@@ -1031,6 +1031,98 @@ class NexthopGroupSummary:
     nexthop_group_types: t.Dict[str, int]
 
 
+def _parse_nexthop_group_rows(
+    data: t.Any,
+    *,
+    name_prefix: str | None = None,
+) -> dict[str, tuple[int, bool, int]]:
+    groups = data.get("nexthopGroups") if isinstance(data, dict) else None
+    if not isinstance(groups, dict):
+        raise ValueError("show nexthop-group JSON is missing nexthopGroups")
+
+    result: dict[str, tuple[int, bool, int]] = {}
+    for key, group in groups.items():
+        if not isinstance(group, dict):
+            raise ValueError(f"nexthop group {key!r} is not a JSON object")
+        name = group.get("nexthopGroupName")
+        if not isinstance(name, str):
+            raise ValueError(f"nexthop group {key!r} has invalid name {name!r}")
+        if name_prefix is not None and not name.startswith(name_prefix):
+            continue
+        if name in result:
+            raise ValueError(f"duplicate nexthop group name {name!r}")
+        size = group.get("size")
+        programmed_tunnels = group.get("numProgrammedTunnels")
+        programmed = group.get("programmed")
+        if isinstance(size, bool) or not isinstance(size, int):
+            raise ValueError(f"nexthop group {name!r} has invalid size {size!r}")
+        if not isinstance(programmed, bool):
+            raise ValueError(
+                f"nexthop group {name!r} has invalid programmed state {programmed!r}"
+            )
+        if (
+            isinstance(programmed_tunnels, bool)
+            or not isinstance(programmed_tunnels, int)
+            or programmed_tunnels < 0
+        ):
+            raise ValueError(
+                f"nexthop group {name!r} has invalid numProgrammedTunnels "
+                f"{programmed_tunnels!r}"
+            )
+        result[name] = (size, programmed, programmed_tunnels)
+    return result
+
+
+def parse_bgp_nexthop_group_sizes(data: t.Any) -> dict[str, int]:
+    """Return all configured ``bgpgrp_*`` groups and their widths."""
+    return {
+        name: size
+        for name, (
+            size,
+            _programmed,
+            _programmed_tunnels,
+        ) in _parse_nexthop_group_rows(data, name_prefix="bgpgrp_").items()
+    }
+
+
+def parse_programmed_bgp_nexthop_group_sizes(data: t.Any) -> dict[str, int]:
+    """Return BGP groups whose EOS group-level ``programmed`` state is true."""
+    return {
+        name: size
+        for name, (
+            size,
+            programmed,
+            _programmed_tunnels,
+        ) in _parse_nexthop_group_rows(data, name_prefix="bgpgrp_").items()
+        if programmed
+    }
+
+
+def parse_nexthop_group_sizes(data: t.Any) -> dict[str, int]:
+    """Return every configured EOS nexthop group and its width."""
+    return {
+        name: size
+        for name, (
+            size,
+            _programmed,
+            _programmed_tunnels,
+        ) in _parse_nexthop_group_rows(data).items()
+    }
+
+
+def parse_programmed_nexthop_group_sizes(data: t.Any) -> dict[str, int]:
+    """Return every EOS nexthop group whose ``programmed`` state is true."""
+    return {
+        name: size
+        for name, (
+            size,
+            programmed,
+            _programmed_tunnels,
+        ) in _parse_nexthop_group_rows(data).items()
+        if programmed
+    }
+
+
 async def get_bgpcpp_version(driver: t.Any) -> str:
     """
     Get BGP++ version from Arista EOS device using driver interface.

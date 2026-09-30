@@ -6,7 +6,7 @@ import time
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, call, MagicMock, Mock, patch
 
 from facebook.network.Address.thrift_types import BinaryAddress
@@ -23,12 +23,95 @@ from taac.internal.steps.custom_step import (
     CustomStep,
 )
 from taac.libs.parameter_evaluator import ParameterEvaluator
+from taac.steps.step import TestbedError
+from taac.health_check.health_check import types as hc_types
+from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.thrift_types import CustomStepInput, Step, TestConfig
 
 BASE_PATH = "neteng.test_infra.dne.taac.internal.steps.custom_step"
 
 
 class CustomStepSetupTest(unittest.IsolatedAsyncioTestCase):
+    async def test_nhg_storm_failure_is_recorded_without_skipping_postchecks(
+        self,
+    ) -> None:
+        step = CustomStep.__new__(CustomStep)
+        step.test_case_name = "ebb16"
+        step.device = cast(
+            TestDevice,
+            SimpleNamespace(name="bag013", attributes=SimpleNamespace()),
+        )
+        step.test_case_start_time = 1.0
+        step.test_case_results = []
+        step.logger = MagicMock()
+        result = object()
+        writer = AsyncMock(return_value=result)
+        workload_error = RuntimeError("programmed NHG ceiling breach")
+        workload_error.add_note("sample=7")
+        with (
+            patch(f"{BASE_PATH}.BgpNhgRandomStormCustomStep") as component,
+            patch(f"{BASE_PATH}.async_write_test_result", writer),
+        ):
+            component.return_value.last_result = {"restore_error": None}
+            component.return_value.run = AsyncMock(side_effect=workload_error)
+            await step.bgp_nhg_random_storm({"epoch_count": 1})
+
+        self.assertEqual([result], step.test_case_results)
+        writer.assert_awaited_once()
+        await_args = writer.await_args
+        if await_args is None:
+            self.fail("deferred failure writer was not awaited")
+        writer_kwargs = await_args.kwargs
+        self.assertEqual(
+            taac_types.ValidationStage.MID_TEST,
+            writer_kwargs["check_stage"],
+        )
+        self.assertEqual(
+            hc_types.HealthCheckStatus.FAIL,
+            writer_kwargs["test_status"],
+        )
+        self.assertIn("programmed NHG ceiling breach", writer_kwargs["message"])
+        self.assertIn("sample=7", writer_kwargs["message"])
+
+    async def test_nhg_storm_cancellation_is_not_deferred(self) -> None:
+        step = CustomStep.__new__(CustomStep)
+        with patch(f"{BASE_PATH}.BgpNhgRandomStormCustomStep") as component:
+            component.return_value.run = AsyncMock(side_effect=asyncio.CancelledError())
+            with self.assertRaises(asyncio.CancelledError):
+                await step.bgp_nhg_random_storm({"epoch_count": 1})
+
+    async def test_nhg_storm_testbed_error_is_not_deferred(self) -> None:
+        step = CustomStep.__new__(CustomStep)
+        with patch(f"{BASE_PATH}.BgpNhgRandomStormCustomStep") as component:
+            component.return_value.run = AsyncMock(
+                side_effect=TestbedError("device transport failed")
+            )
+            with self.assertRaisesRegex(TestbedError, "device transport failed"):
+                await step.bgp_nhg_random_storm({"epoch_count": 1})
+
+    async def test_nhg_storm_wrapped_testbed_error_is_not_deferred(self) -> None:
+        step = CustomStep.__new__(CustomStep)
+        transport_error = TestbedError("device transport failed")
+        observation_error = RuntimeError("sample observation failed")
+        observation_error.__cause__ = transport_error
+        with patch(f"{BASE_PATH}.BgpNhgRandomStormCustomStep") as component:
+            component.return_value.last_result = {"restore_error": None}
+            component.return_value.run = AsyncMock(side_effect=observation_error)
+            with self.assertRaisesRegex(RuntimeError, "sample observation failed"):
+                await step.bgp_nhg_random_storm({"epoch_count": 1})
+
+    async def test_nhg_storm_restoration_failure_is_not_deferred(self) -> None:
+        step = CustomStep.__new__(CustomStep)
+        with patch(f"{BASE_PATH}.BgpNhgRandomStormCustomStep") as component:
+            component.return_value.last_result = {
+                "restore_error": {"message": "IXIA restore failed"}
+            }
+            component.return_value.run = AsyncMock(
+                side_effect=RuntimeError("primary product failure")
+            )
+            with self.assertRaisesRegex(RuntimeError, "primary product failure"):
+                await step.bgp_nhg_random_storm({"epoch_count": 1})
+
     async def test_runner_local_cleanup_skips_device_setup(self) -> None:
         step = CustomStep.__new__(CustomStep)
         parent_setup = AsyncMock()

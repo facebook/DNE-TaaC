@@ -18,19 +18,25 @@ characteristic (SC9). Two properties matter and neither was covered:
    quietly drop itself. Both halves of that are pinned below.
 """
 
+import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from taac.task_definitions import (
+    create_nexthop_group_poll_periodic_task,
+)
 from taac.tasks.periodic_tasks import (
     _bgp_high_watermark_verdict,
     _converged_verdict,
     _DEFAULT_CONVERGED_WINDOW_SAMPLES,
     _NexthopGroupPollSample,
-    _parse_bgp_nexthop_group_sizes,
     _unprogrammed_verdict,
     NexthopGroupPoll,
 )
-from taac.utils.arista_utils import NexthopGroupSummary
+from taac.utils.arista_utils import (
+    NexthopGroupSummary,
+    parse_bgp_nexthop_group_sizes,
+)
 from taac.health_check.health_check import types as hc_types
 
 # Defined in the task's own module, so patch it there.
@@ -48,10 +54,23 @@ def _summary(configured: int, unprogrammed: int = 0) -> NexthopGroupSummary:
     )
 
 
-def _bgp_sample(groups: int, width: int = 8) -> _NexthopGroupPollSample:
+def _bgp_sample(
+    groups: int,
+    width: int = 8,
+    programmed_groups: int | None = None,
+) -> _NexthopGroupPollSample:
+    group_sizes = {f"bgpgrp_{index}": width for index in range(groups)}
     return _NexthopGroupPollSample(
         summary=_summary(groups),
-        bgp_group_sizes={f"bgpgrp_{index}": width for index in range(groups)},
+        bgp_group_sizes=group_sizes,
+        programmed_group_sizes=(
+            None
+            if programmed_groups is None
+            else {
+                name: group_sizes[name]
+                for name in list(group_sizes)[:programmed_groups]
+            }
+        ),
     )
 
 
@@ -1142,6 +1161,18 @@ class NexthopGroupParamValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
         self.assertIn("min_samples must be >= 1, got 0", result.message)
 
+    async def test_programmed_floor_above_ceiling_is_a_breach(self) -> None:
+        self._params(min_programmed_groups=1001, max_programmed_groups=1000)
+        self.task.add_data(_sized({128: 2}), timestamp=1)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn(
+            "min_programmed_groups must be <= max_programmed_groups, got 1001 > 1000",
+            result.message,
+        )
+
 
 class NexthopGroupMinSamplesTest(unittest.IsolatedAsyncioTestCase):
     """A run that lost most of its polls scored every verdict on the survivors.
@@ -1394,21 +1425,31 @@ class BgpNexthopGroupParsingTest(unittest.TestCase):
     def test_keeps_only_named_bgp_groups_and_their_widths(self) -> None:
         data = {
             "nexthopGroups": {
-                "1": {"nexthopGroupName": "bgpgrp_1", "size": 8},
+                "1": {
+                    "nexthopGroupName": "bgpgrp_1",
+                    "size": 8,
+                    "programmed": True,
+                    "numProgrammedTunnels": 8,
+                },
                 "2": {"nexthopGroupName": "lspgrp_1", "size": 128},
                 "3": {"nexthopGroupName": "sid_1", "size": 1},
-                "4": {"nexthopGroupName": "bgpgrp_2", "size": 17},
+                "4": {
+                    "nexthopGroupName": "bgpgrp_2",
+                    "size": 17,
+                    "programmed": False,
+                    "numProgrammedTunnels": 0,
+                },
             }
         }
 
         self.assertEqual(
             {"bgpgrp_1": 8, "bgpgrp_2": 17},
-            _parse_bgp_nexthop_group_sizes(data),
+            parse_bgp_nexthop_group_sizes(data),
         )
 
     def test_missing_group_table_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing nexthopGroups"):
-            _parse_bgp_nexthop_group_sizes({})
+            parse_bgp_nexthop_group_sizes({})
 
     def test_matching_group_without_a_numeric_width_is_rejected(self) -> None:
         data = {
@@ -1416,7 +1457,7 @@ class BgpNexthopGroupParsingTest(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(ValueError, "invalid size"):
-            _parse_bgp_nexthop_group_sizes(data)
+            parse_bgp_nexthop_group_sizes(data)
 
 
 class BgpNexthopGroupHighWatermarkTest(unittest.IsolatedAsyncioTestCase):
@@ -1538,6 +1579,115 @@ class BgpNexthopGroupHighWatermarkTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
         self.assertIn("bgp-nhg all-width trigger BREACH", result.message)
 
+    async def test_programmed_ceiling_is_inclusive(self) -> None:
+        self.task._params.update(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "min_programmed_groups": 1000,
+                "max_programmed_groups": 1000,
+            }
+        )
+        self.task.add_data(_bgp_sample(1500, programmed_groups=999), timestamp=1000)
+        self.task.add_data(_bgp_sample(1500, programmed_groups=1000), timestamp=1005)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        self.assertIn("programmed EOS NHG floor ACKNOWLEDGED", result.message)
+        self.assertIn("programmed EOS NHG ceiling OK", result.message)
+        self.assertIn("inclusive ceiling 1000", result.message)
+        series = self.plot.call_args.kwargs["data_series"]
+        self.assertEqual(
+            {1000: 999, 1005: 1000},
+            series["programmed_eos_nexthop_groups_all_widths"],
+        )
+
+    async def test_programmed_ceiling_breaches_above_watermark(self) -> None:
+        self.task._params.update(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "max_programmed_groups": 1000,
+            }
+        )
+        self.task.add_data(_bgp_sample(1500, programmed_groups=1001), timestamp=1000)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("programmed EOS NHG ceiling BREACH", result.message)
+        self.assertIn("peak 1001", result.message)
+
+    async def test_programmed_floor_rejects_backlog_without_reaching_cap(
+        self,
+    ) -> None:
+        self.task._params.update(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "min_programmed_groups": 1000,
+                "max_programmed_groups": 1000,
+            }
+        )
+        self.task.add_data(_bgp_sample(1500, programmed_groups=50), timestamp=1000)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("programmed EOS NHG floor BREACH", result.message)
+        self.assertIn("peak 50", result.message)
+
+    async def test_programmed_ceiling_without_programmed_samples_fails(self) -> None:
+        self.task._params.update(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "max_programmed_groups": 1000,
+            }
+        )
+        self.task.add_data(_bgp_sample(1500), timestamp=1000)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("programmed EOS NHG ceiling NOT EVALUATED", result.message)
+        self.assertIn("0 of 1 nexthop-group samples", result.message)
+
+    async def test_configured_floor_and_programmed_ceiling_are_independent(
+        self,
+    ) -> None:
+        self.task._params.update(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "min_bgp_groups": 1500,
+                "max_programmed_groups": 1000,
+            }
+        )
+        self.task.add_data(_bgp_sample(1500, programmed_groups=1000), timestamp=1000)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status, result.message)
+        self.assertIn("bgp-nhg all-width trigger ACKNOWLEDGED", result.message)
+        self.assertIn("programmed EOS NHG ceiling OK", result.message)
+
+    async def test_negative_programmed_ceiling_is_a_config_breach(self) -> None:
+        self.task._params.update(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "max_programmed_groups": -1,
+            }
+        )
+        self.task.add_data(_bgp_sample(0, programmed_groups=0), timestamp=1000)
+
+        result = await self._final_check()
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("max_programmed_groups must be >= 0", result.message)
+
     async def test_gate_without_detailed_samples_fails_as_unevaluated(self) -> None:
         self._params()
         self.task.add_data(_summary(200), timestamp=1000)
@@ -1589,9 +1739,19 @@ class BgpNexthopGroupHighWatermarkTest(unittest.IsolatedAsyncioTestCase):
         mock_get_driver.return_value.get_nexthop_group_data = AsyncMock(
             return_value={
                 "nexthopGroups": {
-                    "1": {"nexthopGroupName": "bgpgrp_1", "size": 4},
+                    "1": {
+                        "nexthopGroupName": "bgpgrp_1",
+                        "size": 4,
+                        "programmed": True,
+                        "numProgrammedTunnels": 4,
+                    },
                     "2": {"nexthopGroupName": "lspgrp_1", "size": 128},
-                    "3": {"nexthopGroupName": "bgpgrp_2", "size": 7},
+                    "3": {
+                        "nexthopGroupName": "bgpgrp_2",
+                        "size": 7,
+                        "programmed": True,
+                        "numProgrammedTunnels": 7,
+                    },
                 }
             }
         )
@@ -1618,7 +1778,12 @@ class BgpNexthopGroupHighWatermarkTest(unittest.IsolatedAsyncioTestCase):
         mock_get_driver.return_value.get_nexthop_group_data = AsyncMock(
             return_value={
                 "nexthopGroups": {
-                    "1": {"nexthopGroupName": "bgpgrp_single", "size": 1},
+                    "1": {
+                        "nexthopGroupName": "bgpgrp_single",
+                        "size": 1,
+                        "programmed": True,
+                        "numProgrammedTunnels": 1,
+                    },
                 }
             }
         )
@@ -1634,6 +1799,56 @@ class BgpNexthopGroupHighWatermarkTest(unittest.IsolatedAsyncioTestCase):
         sample = next(iter(self.task._data.values()))
         self.assertIsInstance(sample, _NexthopGroupPollSample)
         self.assertEqual({"bgpgrp_single": 1}, sample.bgp_group_sizes)
+
+    @patch(_SUMMARY, new_callable=AsyncMock)
+    @patch(_DRIVER, new_callable=AsyncMock)
+    async def test_ceiling_requests_detailed_collection(
+        self, mock_get_driver: AsyncMock, mock_get_summary: AsyncMock
+    ) -> None:
+        mock_get_summary.return_value = _summary(1)
+        mock_get_driver.return_value.get_nexthop_group_data = AsyncMock(
+            return_value={
+                "nexthopGroups": {
+                    "1": {
+                        "nexthopGroupName": "bgpgrp_programmed",
+                        "size": 80,
+                        "programmed": True,
+                        "numProgrammedTunnels": 80,
+                    },
+                    "2": {
+                        "nexthopGroupName": "bgpgrp_cached",
+                        "size": 80,
+                        "programmed": False,
+                        "numProgrammedTunnels": 0,
+                    },
+                    "3": {
+                        "nexthopGroupName": "igpgrp_live_fibagent_name",
+                        "size": 40,
+                        "programmed": True,
+                        "numProgrammedTunnels": 40,
+                    },
+                }
+            }
+        )
+
+        await self.task._run(
+            {
+                "hostname": "bag012.ash6",
+                "threshold": 10_000,
+                "max_programmed_groups": 1000,
+            }
+        )
+
+        sample = next(iter(self.task._data.values()))
+        self.assertIsInstance(sample, _NexthopGroupPollSample)
+        self.assertEqual({}, sample.bgp_group_sizes)
+        self.assertEqual(
+            {
+                "bgpgrp_programmed": 80,
+                "igpgrp_live_fibagent_name": 40,
+            },
+            sample.programmed_group_sizes,
+        )
 
     @patch(_SUMMARY, new_callable=AsyncMock)
     @patch(_DRIVER, new_callable=AsyncMock)
@@ -1673,3 +1888,27 @@ class BgpNexthopGroupVerdictTest(unittest.TestCase):
 
         self.assertFalse(failed, message)
         self.assertIn("timestamp 1010", message)
+
+
+class NexthopGroupTaskDefinitionTest(unittest.TestCase):
+    def test_serializes_opt_in_global_eos_ceiling(self) -> None:
+        task = create_nexthop_group_poll_periodic_task(
+            device_name="bag010.ash6",
+            min_programmed_groups=1000,
+            max_programmed_groups=1000,
+        )
+        params_list = task.params_list or []
+        json_params = params_list[0].json_params
+        assert json_params is not None
+
+        self.assertEqual(1000, json.loads(json_params)["max_programmed_groups"])
+        self.assertEqual(1000, json.loads(json_params)["min_programmed_groups"])
+
+    def test_omits_global_eos_ceiling_by_default(self) -> None:
+        task = create_nexthop_group_poll_periodic_task(device_name="bag010.ash6")
+        params_list = task.params_list or []
+        json_params = params_list[0].json_params
+        assert json_params is not None
+
+        self.assertNotIn("max_programmed_groups", json.loads(json_params))
+        self.assertNotIn("min_programmed_groups", json.loads(json_params))

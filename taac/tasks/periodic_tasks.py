@@ -17,6 +17,8 @@ from taac.tasks.thrift_stress_payloads import (
 from taac.utils.arista_utils import (
     get_nexthop_group_summary,
     NexthopGroupSummary,
+    parse_bgp_nexthop_group_sizes,
+    parse_programmed_nexthop_group_sizes,
 )
 from taac.utils.common import (
     async_everpaste_file,
@@ -561,31 +563,10 @@ def _count_multiway_groups(sizes: t.Dict[int, int], min_width: int) -> int:
     return sum(count for width, count in sizes.items() if width >= min_width)
 
 
-_BGP_NEXTHOP_GROUP_PREFIX = "bgpgrp_"
-
-
 class _NexthopGroupPollSample(t.NamedTuple):
     summary: NexthopGroupSummary
     bgp_group_sizes: t.Dict[str, int]
-
-
-def _parse_bgp_nexthop_group_sizes(data: t.Any) -> t.Dict[str, int]:
-    """Return the exact ``bgpgrp_*`` name-to-width map from EOS JSON."""
-    if not isinstance(data, dict) or not isinstance(data.get("nexthopGroups"), dict):
-        raise ValueError("show nexthop-group JSON is missing nexthopGroups")
-
-    result: t.Dict[str, int] = {}
-    for group in data["nexthopGroups"].values():
-        if not isinstance(group, dict):
-            continue
-        name = group.get("nexthopGroupName")
-        if not isinstance(name, str) or not name.startswith(_BGP_NEXTHOP_GROUP_PREFIX):
-            continue
-        size = group.get("size")
-        if not isinstance(size, int):
-            raise ValueError(f"BGP nexthop group {name!r} has invalid size {size!r}")
-        result[name] = size
-    return result
+    programmed_group_sizes: t.Optional[t.Dict[str, int]] = None
 
 
 def _width_histogram(group_sizes: t.Mapping[str, int]) -> t.Dict[int, int]:
@@ -645,6 +626,62 @@ def _bgp_high_watermark_verdict(
         f"{trigger_name} BREACH: {detail}; required "
         f"{minimum_consecutive_samples} consecutive samples -- the requested "
         f"NHG churn was not observed on the device",
+    )
+
+
+def _programmed_group_ceiling_verdict(
+    series: t.Mapping[t.Any, int],
+    group_sizes: t.Mapping[t.Any, t.Mapping[str, int]],
+    maximum_groups: int,
+) -> t.Tuple[bool, str]:
+    """Require every sampled programmed EOS NHG count to stay under a ceiling."""
+    if not series:
+        return True, (
+            "programmed EOS NHG ceiling NOT EVALUATED: no detailed programmed "
+            "nexthop-group samples were recorded"
+        )
+
+    peak_timestamp = max(series, key=lambda timestamp: series[timestamp])
+    peak = series[peak_timestamp]
+    peak_widths = _width_histogram(group_sizes[peak_timestamp])
+    detail = (
+        f"peak {peak} programmed EOS nexthop groups across all widths at timestamp "
+        f"{peak_timestamp}, peak width distribution "
+        f"{dict(sorted(peak_widths.items()))}"
+    )
+    if peak <= maximum_groups:
+        return (
+            False,
+            f"programmed EOS NHG ceiling OK: {detail}; did not exceed inclusive "
+            f"ceiling {maximum_groups}",
+        )
+    return (
+        True,
+        f"programmed EOS NHG ceiling BREACH: {detail}; exceeded inclusive "
+        f"ceiling {maximum_groups}",
+    )
+
+
+def _programmed_group_floor_verdict(
+    series: t.Mapping[t.Any, int],
+    minimum_groups: int,
+) -> t.Tuple[bool, str]:
+    """Require at least one direct EOS programmed-group sample at the floor."""
+    if not series:
+        return True, (
+            "programmed EOS NHG floor NOT EVALUATED: no detailed programmed "
+            "nexthop-group samples were recorded"
+        )
+    peak_timestamp = max(series, key=lambda timestamp: series[timestamp])
+    peak = series[peak_timestamp]
+    if peak >= minimum_groups:
+        return False, (
+            f"programmed EOS NHG floor ACKNOWLEDGED: peak {peak} at timestamp "
+            f"{peak_timestamp} reached floor {minimum_groups}"
+        )
+    return True, (
+        f"programmed EOS NHG floor BREACH: peak {peak} at timestamp "
+        f"{peak_timestamp} never reached floor {minimum_groups}"
     )
 
 
@@ -766,6 +803,21 @@ def _misconfigured_params(params: t.Dict[str, t.Any]) -> t.List[str]:  # noqa: C
             "min_bgp_groups, so there is no all-width BGP-group floor to sustain"
         )
     _checked_int(params, "min_bgp_groups", problems, minimum=1)
+    min_programmed_groups = _checked_int(
+        params, "min_programmed_groups", problems, minimum=1
+    )
+    max_programmed_groups = _checked_int(
+        params, "max_programmed_groups", problems, minimum=0
+    )
+    if (
+        min_programmed_groups is not None
+        and max_programmed_groups is not None
+        and min_programmed_groups > max_programmed_groups
+    ):
+        problems.append(
+            "min_programmed_groups must be <= max_programmed_groups, got "
+            f"{min_programmed_groups} > {max_programmed_groups}"
+        )
     _checked_int(
         params,
         "min_bgp_groups_consecutive_samples",
@@ -1220,15 +1272,38 @@ class NexthopGroupPoll(PeriodicTask):
             sample: NexthopGroupSummary | _NexthopGroupPollSample = output
             if (
                 params.get("min_bgp_groups") is not None
+                or params.get("min_programmed_groups") is not None
+                or params.get("max_programmed_groups") is not None
                 or params.get("min_bgp_multiway_groups") is not None
             ):
                 group_data = await driver.get_nexthop_group_data()
-                bgp_group_sizes = _parse_bgp_nexthop_group_sizes(group_data)
-                sample = _NexthopGroupPollSample(output, bgp_group_sizes)
-                self.logger.info(
-                    "BGP nexthop-group width distribution: "
-                    f"{dict(sorted(_width_histogram(bgp_group_sizes).items()))}"
+                bgp_group_sizes = (
+                    parse_bgp_nexthop_group_sizes(group_data)
+                    if params.get("min_bgp_groups") is not None
+                    or params.get("min_bgp_multiway_groups") is not None
+                    else {}
                 )
+                programmed_group_sizes = (
+                    parse_programmed_nexthop_group_sizes(group_data)
+                    if params.get("min_programmed_groups") is not None
+                    or params.get("max_programmed_groups") is not None
+                    else None
+                )
+                sample = _NexthopGroupPollSample(
+                    output,
+                    bgp_group_sizes,
+                    programmed_group_sizes,
+                )
+                if bgp_group_sizes:
+                    self.logger.info(
+                        "BGP nexthop-group width distribution: "
+                        f"{dict(sorted(_width_histogram(bgp_group_sizes).items()))}"
+                    )
+                if programmed_group_sizes is not None:
+                    self.logger.info(
+                        "Programmed EOS nexthop-group width distribution: "
+                        f"{dict(sorted(_width_histogram(programmed_group_sizes).items()))}"
+                    )
 
             self.add_data(sample)
 
@@ -1274,6 +1349,10 @@ class NexthopGroupPoll(PeriodicTask):
            (``min_bgp_groups``).
         10. sustained BGP-only multipath-NHG creation
            (``min_bgp_multiway_groups``).
+        11. a floor on the peak sampled EOS programmed-group count
+            (``min_programmed_groups``).
+        12. an inclusive ceiling on every sampled EOS nexthop group whose
+            group-level programmed state is true (``max_programmed_groups``).
 
         Collecting no data is a FAILURE, not a SKIP. ``run`` swallows every
         collection exception, so an empty series means every single poll failed
@@ -1318,12 +1397,17 @@ class NexthopGroupPoll(PeriodicTask):
         # _count_multiway_groups.
         sizes_data: t.Dict[float, t.Dict[int, int]] = {}
         bgp_group_sizes_data: t.Dict[float, t.Dict[str, int]] = {}
+        programmed_group_sizes_data: t.Dict[float, t.Dict[str, int]] = {}
 
         for timestamp, value in self._data.items():
             summary = value
             if isinstance(value, _NexthopGroupPollSample):
                 summary = value.summary
                 bgp_group_sizes_data[timestamp] = value.bgp_group_sizes
+                if value.programmed_group_sizes is not None:
+                    programmed_group_sizes_data[timestamp] = (
+                        value.programmed_group_sizes
+                    )
             if isinstance(summary, NexthopGroupSummary):
                 num_groups_configured_data[timestamp] = summary.num_groups_configured
                 num_unprogrammed_groups_data[timestamp] = (
@@ -1442,32 +1526,39 @@ class NexthopGroupPoll(PeriodicTask):
             )
             (failures if failed else verdicts).append(text)
 
-        # Opt-in trigger acknowledgement for C16-style NHG churn. The summary's
-        # raw total includes lspgrp_/sid_ groups, and even its width histogram
-        # cannot correlate a width with a group type. Polling the detailed EOS
-        # table lets these gates count only named bgpgrp_* groups. The all-width
-        # gate matches FibAgent's programmed-NHG watermark domain; the multi-way
-        # gate separately proves that at least some ECMP structure survived.
+        # Opt-in gates for C16-style NHG churn. BGP-named rows support the
+        # legacy trigger metric, while the resource ceiling uses every EOS row:
+        # the FibAgent watermark is global and live AristaFibAgent rows can be
+        # named igpgrp_* rather than bgpgrp_*.
         bgp_group_series: t.Optional[t.Dict[float, int]] = None
         bgp_multiway_series: t.Optional[t.Dict[float, int]] = None
+        programmed_group_series: t.Optional[t.Dict[float, int]] = None
         min_bgp_groups = self._params.get("min_bgp_groups")
+        min_programmed_groups = self._params.get("min_programmed_groups")
+        max_programmed_groups = self._params.get("max_programmed_groups")
         min_bgp_multiway_groups = self._params.get("min_bgp_multiway_groups")
-        detailed_bgp_requested = (
-            min_bgp_groups is not None or min_bgp_multiway_groups is not None
+        detailed_requested = (
+            min_bgp_groups is not None
+            or min_programmed_groups is not None
+            or max_programmed_groups is not None
+            or min_bgp_multiway_groups is not None
         )
-        if detailed_bgp_requested:
+        if detailed_requested:
             if len(bgp_group_sizes_data) != len(num_groups_configured_data):
-                failures.append(
-                    "bgp-nhg trigger NOT EVALUATED: detailed bgpgrp_* data was "
-                    f"recorded for {len(bgp_group_sizes_data)} of "
-                    f"{len(num_groups_configured_data)} nexthop-group samples"
-                )
-            else:
+                if min_bgp_groups is not None or min_bgp_multiway_groups is not None:
+                    failures.append(
+                        "bgp-nhg trigger NOT EVALUATED: detailed bgpgrp_* data was "
+                        f"recorded for {len(bgp_group_sizes_data)} of "
+                        f"{len(num_groups_configured_data)} nexthop-group samples"
+                    )
+            if len(bgp_group_sizes_data) == len(num_groups_configured_data):
                 if min_bgp_groups is not None:
                     bgp_group_series = {
                         ts: len(named_sizes)
                         for ts, named_sizes in bgp_group_sizes_data.items()
                     }
+                if min_bgp_groups is not None:
+                    assert bgp_group_series is not None
                     required_samples = int(
                         self._params.get("min_bgp_groups_consecutive_samples", 1)
                     )
@@ -1518,6 +1609,50 @@ class NexthopGroupPoll(PeriodicTask):
                     for ts in sorted(bgp_group_sizes_data, key=float)
                 ]
                 self.logger.info(f"BGP nexthop-group raw samples: {raw_evidence}")
+            if min_programmed_groups is not None or max_programmed_groups is not None:
+                if len(programmed_group_sizes_data) != len(num_groups_configured_data):
+                    failures.append(
+                        "programmed EOS NHG ceiling NOT EVALUATED: detailed "
+                        "group-level programmed data was recorded for "
+                        f"{len(programmed_group_sizes_data)} of "
+                        f"{len(num_groups_configured_data)} nexthop-group samples"
+                    )
+                else:
+                    programmed_group_series = {
+                        ts: len(named_sizes)
+                        for ts, named_sizes in programmed_group_sizes_data.items()
+                    }
+                    if min_programmed_groups is not None:
+                        failed, text = _programmed_group_floor_verdict(
+                            programmed_group_series,
+                            int(min_programmed_groups),
+                        )
+                        (failures if failed else verdicts).append(text)
+                    if max_programmed_groups is not None:
+                        failed, text = _programmed_group_ceiling_verdict(
+                            programmed_group_series,
+                            programmed_group_sizes_data,
+                            int(max_programmed_groups),
+                        )
+                        (failures if failed else verdicts).append(text)
+                    programmed_raw_evidence = [
+                        {
+                            "timestamp": str(ts),
+                            "programmed_groups": programmed_group_series[ts],
+                            "width_distribution": dict(
+                                sorted(
+                                    _width_histogram(
+                                        programmed_group_sizes_data[ts]
+                                    ).items()
+                                )
+                            ),
+                        }
+                        for ts in sorted(programmed_group_sizes_data, key=float)
+                    ]
+                    self.logger.info(
+                        "Programmed EOS nexthop-group raw samples: "
+                        f"{programmed_raw_evidence}"
+                    )
 
         # Opt-in: the STEADY STATE, as opposed to every other verdict here,
         # which is a maximum over the whole run.
@@ -1641,6 +1776,10 @@ class NexthopGroupPoll(PeriodicTask):
             data_series[f"groups_>={min_ecmp_width}_wide"] = multiway_series
         if bgp_group_series is not None:
             data_series["bgpgrp_groups_all_widths"] = bgp_group_series
+        if programmed_group_series is not None:
+            data_series["programmed_eos_nexthop_groups_all_widths"] = (
+                programmed_group_series
+            )
         if bgp_multiway_series is not None:
             data_series[f"bgpgrp_groups_>={min_ecmp_width}_wide"] = bgp_multiway_series
 
@@ -1656,6 +1795,10 @@ class NexthopGroupPoll(PeriodicTask):
         if bgp_group_series:
             plot_annotations["Max BGP Groups (All Widths)"] = max(
                 bgp_group_series.values()
+            )
+        if programmed_group_series:
+            plot_annotations["Max Programmed EOS Groups (All Widths)"] = max(
+                programmed_group_series.values()
             )
 
         plot_path = await _generate_multi_series_plot(

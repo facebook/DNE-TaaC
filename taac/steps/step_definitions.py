@@ -1214,18 +1214,50 @@ def create_bgp_route_storm_step(
     )
 
 
+def _normalize_nhg_storm_geometry(
+    inactive_paths_per_afi: int | None,
+    target_membership_width: int | None,
+) -> tuple[int | None, int | None]:
+    if inactive_paths_per_afi is None and target_membership_width is None:
+        inactive_paths_per_afi = 3_000
+    if (inactive_paths_per_afi is None) == (target_membership_width is None):
+        raise ValueError(
+            "NHG random storm requires exactly one of inactive_paths_per_afi "
+            "or target_membership_width"
+        )
+    geometry_parameter = (
+        target_membership_width
+        if target_membership_width is not None
+        else inactive_paths_per_afi
+    )
+    if (
+        isinstance(geometry_parameter, bool)
+        or not isinstance(geometry_parameter, int)
+        or geometry_parameter <= 0
+    ):
+        raise ValueError(
+            "NHG random-storm geometry parameter must be a positive integer"
+        )
+    return inactive_paths_per_afi, target_membership_width
+
+
 def create_bgp_nhg_random_storm_step(
     *,
     hostname: str,
     ixia_items_by_afi: t.Mapping[str, t.Mapping[str, t.Any]],
     prefix_pool_scope_regex: str | None = None,
     seed: int = 160016,
-    inactive_paths_per_afi: int = 3_000,
+    inactive_paths_per_afi: int | None = None,
+    target_membership_width: int | None = None,
     minimum_distinct_memberships_per_afi: int = 750,
     minimum_observed_bgp_multiway_memberships: int = 1001,
     minimum_paused_fibagent_samples: int = 1,
+    minimum_confirmed_pause_fap_samples: int = 3,
     fibagent_nhg_watermark_high: int = 1000,
     fibagent_nhg_watermark_low: int = 1000,
+    enable_control_plane_validation: bool = True,
+    control_plane_sample_interval_seconds: int = 5,
+    control_plane_read_timeout_seconds: int = 60,
     minimum_changed_paths_per_epoch: int = 5_000,
     epoch_count: int = 48,
     epoch_interval_seconds: int = 25,
@@ -1268,15 +1300,27 @@ def create_bgp_nhg_random_storm_step(
             "prefix_pool_scope_regex must exactly select topology route items: "
             f"{exact_prefix_pool_scope_regex!r}"
         )
+    inactive_paths_per_afi, target_membership_width = (
+        _normalize_nhg_storm_geometry(
+            inactive_paths_per_afi,
+            target_membership_width,
+        )
+    )
     numeric = {
-        "inactive_paths_per_afi": inactive_paths_per_afi,
         "minimum_distinct_memberships_per_afi": minimum_distinct_memberships_per_afi,
         "minimum_observed_bgp_multiway_memberships": (
             minimum_observed_bgp_multiway_memberships
         ),
         "minimum_paused_fibagent_samples": minimum_paused_fibagent_samples,
+        "minimum_confirmed_pause_fap_samples": (
+            minimum_confirmed_pause_fap_samples
+        ),
         "fibagent_nhg_watermark_high": fibagent_nhg_watermark_high,
         "fibagent_nhg_watermark_low": fibagent_nhg_watermark_low,
+        "control_plane_sample_interval_seconds": (
+            control_plane_sample_interval_seconds
+        ),
+        "control_plane_read_timeout_seconds": control_plane_read_timeout_seconds,
         "minimum_changed_paths_per_epoch": minimum_changed_paths_per_epoch,
         "epoch_count": epoch_count,
         "epoch_interval_seconds": epoch_interval_seconds,
@@ -1300,6 +1344,8 @@ def create_bgp_nhg_random_storm_step(
         )
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError("NHG random-storm seed must be an integer")
+    if not isinstance(enable_control_plane_validation, bool):
+        raise ValueError("enable_control_plane_validation must be a boolean")
     return create_custom_step(
         params_dict={
             "custom_step_name": "bgp_nhg_random_storm",
@@ -1307,6 +1353,9 @@ def create_bgp_nhg_random_storm_step(
             "ixia_items_by_afi": items,
             "prefix_pool_scope_regex": exact_prefix_pool_scope_regex,
             "seed": seed,
+            "inactive_paths_per_afi": inactive_paths_per_afi,
+            "target_membership_width": target_membership_width,
+            "enable_control_plane_validation": enable_control_plane_validation,
             **numeric,
         },
         description=description or "Run seeded dual-stack peer-by-prefix NHG storm",

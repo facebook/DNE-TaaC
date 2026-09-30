@@ -3603,6 +3603,8 @@ def create_nexthop_group_poll_periodic_task(
     min_bgp_groups_consecutive_samples: t.Optional[int] = None,
     min_bgp_multiway_groups: t.Optional[int] = None,
     min_bgp_multiway_consecutive_samples: t.Optional[int] = None,
+    min_programmed_groups: t.Optional[int] = None,
+    max_programmed_groups: t.Optional[int] = None,
 ) -> PeriodicTask:
     """Periodic task to poll nexthop-group count against a threshold.
 
@@ -3700,9 +3702,17 @@ def create_nexthop_group_poll_periodic_task(
             configured, its same-sample multiway floor. Defaults to `1`.
         min_bgp_groups: Optional trigger-acknowledgement floor for all named
             `bgpgrp_*` groups, including width-1 groups. Unlike the summary
-            total, this excludes unrelated `lspgrp_*` and `sid_*` groups. This
-            is the EOS count domain corresponding to FibAgent's programmed-NHG
-            watermark.
+            total, this excludes unrelated `lspgrp_*` and `sid_*` groups. It
+            measures the configured churn population, including groups with no
+            currently programmed tunnels.
+        max_programmed_groups: Optional inclusive ceiling for every EOS
+            nexthop-group row whose group-level `programmed` state is true.
+            Every detailed sample must remain at or below this value. Omitted
+            = not asserted.
+        min_programmed_groups: Optional floor for the peak direct EOS count of
+            nexthop-group rows whose group-level `programmed` state is true.
+            Pair it with an equal `max_programmed_groups` to prove that the
+            programmed population reached, but never exceeded, a watermark.
         min_bgp_groups_consecutive_samples: Number of consecutive detailed
             samples that must reach `min_bgp_groups`. Defaults to `1` when the
             floor is configured.
@@ -3743,6 +3753,8 @@ def create_nexthop_group_poll_periodic_task(
         ("converged_window_samples", converged_window_samples),
         ("min_samples", min_samples),
         ("min_bgp_groups", min_bgp_groups),
+        ("min_programmed_groups", min_programmed_groups),
+        ("max_programmed_groups", max_programmed_groups),
         (
             "min_bgp_groups_consecutive_samples",
             min_bgp_groups_consecutive_samples,

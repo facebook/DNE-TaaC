@@ -2016,12 +2016,17 @@ def create_bgp_nhg_random_storm_stage(
     ixia_items_by_afi: Mapping[str, Mapping[str, Any]],
     prefix_pool_scope_regex: str | None = None,
     seed: int = 160016,
-    inactive_paths_per_afi: int = 3_000,
+    inactive_paths_per_afi: int | None = None,
+    target_membership_width: int | None = None,
     minimum_distinct_memberships_per_afi: int = 750,
     minimum_observed_bgp_multiway_memberships: int = 1001,
     minimum_paused_fibagent_samples: int = 1,
+    minimum_confirmed_pause_fap_samples: int = 3,
     fibagent_nhg_watermark_high: int = 1000,
     fibagent_nhg_watermark_low: int = 1000,
+    enable_control_plane_validation: bool = True,
+    control_plane_sample_interval_seconds: int = 5,
+    control_plane_read_timeout_seconds: int = 60,
     minimum_changed_paths_per_epoch: int = 5_000,
     epoch_count: int = 48,
     epoch_interval_seconds: int = 25,
@@ -2035,6 +2040,7 @@ def create_bgp_nhg_random_storm_stage(
                 prefix_pool_scope_regex=prefix_pool_scope_regex,
                 seed=seed,
                 inactive_paths_per_afi=inactive_paths_per_afi,
+                target_membership_width=target_membership_width,
                 minimum_distinct_memberships_per_afi=(
                     minimum_distinct_memberships_per_afi
                 ),
@@ -2042,8 +2048,16 @@ def create_bgp_nhg_random_storm_stage(
                     minimum_observed_bgp_multiway_memberships
                 ),
                 minimum_paused_fibagent_samples=minimum_paused_fibagent_samples,
+                minimum_confirmed_pause_fap_samples=(
+                    minimum_confirmed_pause_fap_samples
+                ),
                 fibagent_nhg_watermark_high=fibagent_nhg_watermark_high,
                 fibagent_nhg_watermark_low=fibagent_nhg_watermark_low,
+                enable_control_plane_validation=enable_control_plane_validation,
+                control_plane_sample_interval_seconds=(
+                    control_plane_sample_interval_seconds
+                ),
+                control_plane_read_timeout_seconds=(control_plane_read_timeout_seconds),
                 minimum_changed_paths_per_epoch=minimum_changed_paths_per_epoch,
                 epoch_count=epoch_count,
                 epoch_interval_seconds=epoch_interval_seconds,
