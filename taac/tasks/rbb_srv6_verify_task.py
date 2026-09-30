@@ -37,15 +37,15 @@ class RbbSrv6VerifyTask(BaseTask):
 
     def __init__(
         self,
-        hostname: t.Optional[str] = None,
-        description: t.Optional[str] = None,
-        ixia: t.Optional[t.Any] = None,
-        logger: t.Optional[ConsoleFileLogger] = None,
-        shared_data: t.Optional[t.Dict[t.Any, t.Any]] = None,
+        hostname: str | None = None,
+        description: str | None = None,
+        ixia: t.Any | None = None,
+        logger: ConsoleFileLogger | None = None,
+        shared_data: dict[t.Any, t.Any] | None = None,
     ) -> None:
         super().__init__(hostname, description, ixia, logger, shared_data)
 
-    async def run(self, params: t.Dict[str, t.Any]) -> None:
+    async def run(self, params: dict[str, t.Any]) -> None:
         """Run ``show_cmd`` and assert content.
 
         params:
@@ -65,11 +65,11 @@ class RbbSrv6VerifyTask(BaseTask):
         if not hostname:
             raise ValueError("rbb_srv6_verify requires 'hostname'")
         show_cmd = params.get("show_cmd")
-        expect_contains: t.List[str] = params.get("expect_contains", [])
-        expect_absent: t.List[str] = params.get("expect_absent", [])
-        interfaces_up: t.List[str] = params.get("interfaces_up", [])
-        bgp_peers: t.List[str] = params.get("bgp_peers_established", [])
-        fib_prefixes: t.List[str] = params.get("fib_prefixes", [])
+        expect_contains: list[str] = params.get("expect_contains", [])
+        expect_absent: list[str] = params.get("expect_absent", [])
+        interfaces_up: list[str] = params.get("interfaces_up", [])
+        bgp_peers: list[str] = params.get("bgp_peers_established", [])
+        fib_prefixes: list[str] = params.get("fib_prefixes", [])
         gate = params.get("gate", "rbb_srv6_verify")
 
         if (
@@ -87,9 +87,7 @@ class RbbSrv6VerifyTask(BaseTask):
 
         driver = await async_get_device_driver(hostname)
         if interfaces_up:
-            states = await driver.async_get_interfaces_operational_state(
-                interfaces_up
-            )
+            states = await driver.async_get_interfaces_operational_state(interfaces_up)
             not_up = [name for name in interfaces_up if states.get(name) is not True]
             if not_up:
                 raise TestCaseFailure(
@@ -99,7 +97,7 @@ class RbbSrv6VerifyTask(BaseTask):
         if bgp_peers:
             expected = {str(ipaddress.ip_address(peer)) for peer in bgp_peers}
             sessions = await driver.async_get_bgp_sessions()
-            established: t.Set[str] = set()
+            established: set[str] = set()
             for session in sessions:
                 state = getattr(getattr(session, "peer", None), "peer_state", None)
                 state_name = getattr(state, "name", str(state)).rsplit(".", 1)[-1]
@@ -137,8 +135,7 @@ class RbbSrv6VerifyTask(BaseTask):
                     f"{hostname}: {missing_fib}"
                 )
             self.logger.info(
-                f"{hostname} -- [{gate}] FIB prefixes present: "
-                f"{sorted(expected_fib)}"
+                f"{hostname} -- [{gate}] FIB prefixes present: {sorted(expected_fib)}"
             )
         if not show_cmd:
             return

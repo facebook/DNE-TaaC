@@ -115,13 +115,10 @@ IXIA_CHASSIS: str = os.environ.get("TAAC_RBB_IXIA_CHASSIS", "rbb-ixia.lab.exampl
 # The core session is iBGP, so both nodes must use one AS. Keep the original
 # per-node variable names as compatibility aliases, but reject conflicting
 # values rather than quietly generating a non-establishing "iBGP" session.
-_LEGACY_R1_AS: t.Optional[str] = os.environ.get("TAAC_RBB_R1_AS")
-_LEGACY_R2_AS: t.Optional[str] = os.environ.get("TAAC_RBB_R2_AS")
+_LEGACY_R1_AS: str | None = os.environ.get("TAAC_RBB_R1_AS")
+_LEGACY_R2_AS: str | None = os.environ.get("TAAC_RBB_R2_AS")
 CORE_IBGP_AS: int = int(
-    os.environ.get("TAAC_RBB_CORE_AS")
-    or _LEGACY_R1_AS
-    or _LEGACY_R2_AS
-    or "65001"
+    os.environ.get("TAAC_RBB_CORE_AS") or _LEGACY_R1_AS or _LEGACY_R2_AS or "65001"
 )
 R1_BGP_AS: int = int(_LEGACY_R1_AS or CORE_IBGP_AS)
 R2_BGP_AS: int = int(_LEGACY_R2_AS or CORE_IBGP_AS)
@@ -193,9 +190,7 @@ ROUTE_OWNER_BGPD: str = "BGPD"
 # The qualification flow is intentionally one-way: ingress R1 to tail R2.
 # Reverse ordinary-IPv6 traffic does not add SRv6 coverage.
 TRAFFIC_ITEM_R1_TO_R2: str = "RBB_R1_TO_R2_SRV6"
-ALL_TRAFFIC_ITEMS: t.Tuple[str, ...] = (
-    TRAFFIC_ITEM_R1_TO_R2,
-)
+ALL_TRAFFIC_ITEMS: tuple[str, ...] = (TRAFFIC_ITEM_R1_TO_R2,)
 
 # ─── Timing ───────────────────────────────────────────────────────────────
 CONVERGENCE_WAIT_SECONDS: int = 60
@@ -241,9 +236,7 @@ IXIA_TAIL_ADVERTISED_PREFIX: str = os.environ.get(
     "TAAC_RBB_IXIA_TAIL_PREFIX", _DEFAULT_IXIA_TAIL_PREFIX
 )
 IXIA_TAIL_ADVERTISED_PREFIX_LEN: int = int(
-    os.environ.get(
-        "TAAC_RBB_IXIA_TAIL_PREFIX_LEN", str(_DEFAULT_IXIA_TAIL_PREFIX_LEN)
-    )
+    os.environ.get("TAAC_RBB_IXIA_TAIL_PREFIX_LEN", str(_DEFAULT_IXIA_TAIL_PREFIX_LEN))
 )
 IXIA_TAIL_ADVERTISED_PREFIX_COUNT: int = int(
     os.environ.get("TAAC_RBB_IXIA_TAIL_PREFIX_COUNT", "1")
@@ -347,9 +340,7 @@ def core_rif_cidr(role: str, index: int, family: int) -> str:
     if family == 4:
         default = f"198.51.100.{index * 4 + role_offset}/30"
     else:
-        network = ipaddress.ip_network(
-            f"2001:db8:{0xC0 + index:x}::/127", strict=True
-        )
+        network = ipaddress.ip_network(f"2001:db8:{0xC0 + index:x}::/127", strict=True)
         default = f"{network.network_address + (0 if normalized == 'r1' else 1)}/127"
     return os.environ.get(env_name, default)
 
@@ -365,17 +356,13 @@ def srv6_source_cidr(role: str, interface: str) -> str:
     node = 1 if normalized == "r1" else 2
     block = "fe00" if selector == "A" else "feff"
     default = f"2001:db8:{block}:200::{node}:0/128"
-    return os.environ.get(
-        f"TAAC_RBB_{normalized.upper()}_SRV6_SID_{selector}", default
-    )
+    return os.environ.get(f"TAAC_RBB_{normalized.upper()}_SRV6_SID_{selector}", default)
 
 
 # Optional override used only while minimally patching a pre-provisioned R1
 # bgp.json for edge eBGP. Empty preserves its existing usable next_hop6; this
 # avoids replacing an operator address with the documentation-range default.
-R1_IBGP_NEXT_HOP_V6: t.Optional[str] = os.environ.get(
-    "TAAC_RBB_R1_IBGP_NEXT_HOP_V6"
-)
+R1_IBGP_NEXT_HOP_V6: str | None = os.environ.get("TAAC_RBB_R1_IBGP_NEXT_HOP_V6")
 
 # SRv6 tunnel id label (FBOSS-generic).
 SRV6_TUNNEL_ID: str = os.environ.get("TAAC_RBB_SRV6_TUNNEL_ID", "srv6_tunnel")

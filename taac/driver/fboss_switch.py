@@ -87,13 +87,13 @@ except ModuleNotFoundError as exc:
     # in Meta-internal builds; the OSS thrift build does not produce it. Keep
     # the driver module importable in OSS by deferring the failure to call
     # time — only the RIB-dump helpers below actually need it.
-    async def get_rib_entries(*_args, **_kwargs):  # noqa: F811
+    async def get_rib_entries(*_args, **_kwargs):
         raise NotImplementedError(
             "neteng.fboss.bgp.client.canonical_rib_py3 is unavailable in this "
             "build; get_rib_entries is not supported."
         )
 
-    async def get_rib_subprefixes(*_args, **_kwargs):  # noqa: F811
+    async def get_rib_subprefixes(*_args, **_kwargs):
         raise NotImplementedError(
             "neteng.fboss.bgp.client.canonical_rib_py3 is unavailable in this "
             "build; get_rib_subprefixes is not supported."

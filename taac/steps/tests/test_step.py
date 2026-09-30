@@ -6,13 +6,13 @@ import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from taac.test_as_a_config import types as taac_types
 from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     TestDevice,
     TestTopology,
 )
 from taac.libs.parameter_evaluator import ParameterEvaluator
 from taac.steps.step import Step
-from taac.test_as_a_config import types as taac_types
 
 
 class ConcreteStep(Step):

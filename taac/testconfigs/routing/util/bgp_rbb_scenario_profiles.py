@@ -28,8 +28,8 @@ from dataclasses import dataclass, field
 
 from taac.testconfigs.routing.util import bgp_rbb_constants as C
 from taac.testconfigs.routing.util.bgp_rbb_topology import (
-    load_rbb_topology,
     RbbTopology,
+    load_rbb_topology,
 )
 
 
@@ -48,10 +48,10 @@ class Srv6Profile:
     usid_tail: str = C.SRV6_DECAP_SID
     decap_sid: str = C.SRV6_DECAP_SID
     tail_prefix: str = C.TAIL_DEST_PREFIX
-    usids: t.Tuple[str, ...] = field(default_factory=tuple)
+    usids: tuple[str, ...] = field(default_factory=tuple)
 
     @property
-    def encap_usids(self) -> t.Tuple[str, ...]:
+    def encap_usids(self) -> tuple[str, ...]:
         """uSIDs placed on the wire by the two-node RBB emulation.
 
         ``usids`` is declared in logical head→mid→tail order, but R1 is both
@@ -81,14 +81,14 @@ SRV6_3_USIDS_PROFILE: Srv6Profile = Srv6Profile(
 )
 
 
-def _topology(topology: t.Optional[RbbTopology]) -> RbbTopology:
+def _topology(topology: RbbTopology | None) -> RbbTopology:
     return topology if topology is not None else load_rbb_topology()
 
 
 # ─── Verification specs (consumed by rbb_srv6_verify task) ────────────────
 def verify_core_links_up_spec(
-    node: str, topology: t.Optional[RbbTopology] = None
-) -> t.Dict[str, t.Any]:
+    node: str, topology: RbbTopology | None = None
+) -> dict[str, t.Any]:
     """S02-S05: the core port-channel members are Up on this node.
 
     A REAL link-up assertion (not a passive dump): asserts each core
@@ -100,7 +100,7 @@ def verify_core_links_up_spec(
     committed.
     """
     top = _topology(topology).node(node)
-    expect: t.List[str] = []
+    expect: list[str] = []
     for pc in top.core_pcs:
         expect.append(pc.show_name)
         expect.extend(pc.members)
@@ -110,13 +110,11 @@ def verify_core_links_up_spec(
         "gate": "S02_05_core_links_up",
         "show_cmd": "fboss2 show aggregate-port",
         "expect_contains": expect,
-        "interfaces_up": [
-            member for pc in top.core_pcs for member in pc.members
-        ],
+        "interfaces_up": [member for pc in top.core_pcs for member in pc.members],
     }
 
 
-def verify_peer_loopback_learned_spec(node: str) -> t.Dict[str, t.Any]:
+def verify_peer_loopback_learned_spec(node: str) -> dict[str, t.Any]:
     """S07: the PEER node's loopback is present in this node's RIB.
 
     Confirms core iBGP/OpenR actually delivered reachability: R1 must have R2's
@@ -133,8 +131,8 @@ def verify_peer_loopback_learned_spec(node: str) -> t.Dict[str, t.Any]:
 
 
 def verify_openr_adjacency_spec(
-    node: str, topology: t.Optional[RbbTopology] = None
-) -> t.Dict[str, t.Any]:
+    node: str, topology: RbbTopology | None = None
+) -> dict[str, t.Any]:
     """S06/S13: OpenR is up, adjacent over the core, and redistributing loopbacks.
 
     Pure-OSS, non-destructive fboss2 read (the shipped ``Openr*HealthCheck``
@@ -159,8 +157,8 @@ def _counter_read_cmd(cmd_env: str, default: str) -> str:
 
 
 def srv6_encap_counter_spec(
-    node: str, topology: t.Optional[RbbTopology] = None
-) -> t.Dict[str, t.Any]:
+    node: str, topology: RbbTopology | None = None
+) -> dict[str, t.Any]:
     """S25: R1 SRv6 encap counter (core PC egress) — snapshot/assert delta.
 
     Returns the counter command + integer-extraction regex for the head (R1)
@@ -188,8 +186,8 @@ def srv6_encap_counter_spec(
 
 
 def srv6_decap_counter_spec(
-    node: str, topology: t.Optional[RbbTopology] = None
-) -> t.Dict[str, t.Any]:
+    node: str, topology: RbbTopology | None = None
+) -> dict[str, t.Any]:
     """S25: R2 tail-path counter — snapshot/assert delta.
 
     The public FBOSS CLI has no portable per-MySID counter command. The default
@@ -207,9 +205,7 @@ def srv6_decap_counter_spec(
     return {
         "gate": "S25_srv6_decap_delta",
         "direction": "decap",
-        "counter_cmd": _counter_read_cmd(
-            "TAAC_RBB_DECAP_COUNTER_CMD", default_cmd
-        ),
+        "counter_cmd": _counter_read_cmd("TAAC_RBB_DECAP_COUNTER_CMD", default_cmd),
         "counter_regex": _counter_read_cmd(
             "TAAC_RBB_DECAP_COUNTER_REGEX", r"[Oo]ut(?:put)?\D*(\d+)"
         ),
@@ -232,9 +228,9 @@ def _route_details_for(prefix: str) -> str:
 
 def verify_pc162_global_ipv6_spec(
     node: str,
-    topology: t.Optional[RbbTopology] = None,
-    rif_token: t.Optional[str] = None,
-) -> t.Dict[str, t.Any]:
+    topology: RbbTopology | None = None,
+    rif_token: str | None = None,
+) -> dict[str, t.Any]:
     """S10: the topology-selected core interface has its expected IPv6 RIF.
 
     S02-S05 already proves the selected port-channel and member are Up. This
@@ -259,8 +255,8 @@ def verify_pc162_global_ipv6_spec(
 
 
 def verify_srv6_tunnels_spec(
-    node: str, profile: t.Optional[Srv6Profile] = None
-) -> t.Dict[str, t.Any]:
+    node: str, profile: Srv6Profile | None = None
+) -> dict[str, t.Any]:
     """S11: SRv6 micro-SIDs are programmed (real ``fboss2 show mysid``).
 
     Both nodes carry an ADJACENCY_MICRO_SID under the configured locator block;
@@ -271,9 +267,7 @@ def verify_srv6_tunnels_spec(
     """
     profile = profile if profile is not None else SRV6_3_USIDS_PROFILE
     adjacency_sid = profile.usid_head if node == "r1" else profile.usid_mid
-    adjacency_token = str(
-        ipaddress.ip_address(str(adjacency_sid).split("/", 1)[0])
-    )
+    adjacency_token = str(ipaddress.ip_address(str(adjacency_sid).split("/", 1)[0]))
     # A logical MySID entry is visible even when its adjacency is unresolved.
     # SAI only receives a usable uA entry after the neighbor observer binds a
     # next hop, which the CLI renders as ``resolved via ...``.  Require that
@@ -285,9 +279,7 @@ def verify_srv6_tunnels_spec(
         "resolved via",
     ]
     if node == "r2":
-        decap_token = str(
-            ipaddress.ip_address(str(profile.decap_sid).split("/", 1)[0])
-        )
+        decap_token = str(ipaddress.ip_address(str(profile.decap_sid).split("/", 1)[0]))
         expect.extend([decap_token, C.SRV6_BEHAVIOR_DECAP])
     return {
         "gate": "S11_srv6_mysid",
@@ -296,7 +288,7 @@ def verify_srv6_tunnels_spec(
     }
 
 
-def verify_route_owner_te_agent_spec(profile: Srv6Profile) -> t.Dict[str, t.Any]:
+def verify_route_owner_te_agent_spec(profile: Srv6Profile) -> dict[str, t.Any]:
     """S22-S23: after install, the tail prefix is owned by TE_AGENT."""
     packed_segment = C.pack_usid_container(profile.locator, profile.encap_usids)
     return {
@@ -311,7 +303,7 @@ def verify_route_owner_te_agent_spec(profile: Srv6Profile) -> t.Dict[str, t.Any]
     }
 
 
-def verify_srv6_counters_spec(profile: Srv6Profile) -> t.Dict[str, t.Any]:
+def verify_srv6_counters_spec(profile: Srv6Profile) -> dict[str, t.Any]:
     """S26: SRv6 forwarding state present (ASIC FIB populated).
 
     Counter deltas are asserted separately when traffic is enabled.  This gate
@@ -334,7 +326,7 @@ def verify_srv6_counters_spec(profile: Srv6Profile) -> t.Dict[str, t.Any]:
 
 def verify_route_owner_bgpd_spec(
     profile: Srv6Profile, gate: str = "S28_route_owner_bgpd"
-) -> t.Dict[str, t.Any]:
+) -> dict[str, t.Any]:
     """Assert the exact prefix is BGPD-owned and not owned by TE_AGENT."""
     return {
         "gate": gate,
@@ -344,12 +336,9 @@ def verify_route_owner_bgpd_spec(
     }
 
 
-def verify_remote_ixia_prefix_spec() -> t.Dict[str, t.Any]:
+def verify_remote_ixia_prefix_spec() -> dict[str, t.Any]:
     """S17-S18: the exact tail IXIA prefix is BGPD-owned on the head."""
-    prefix = (
-        f"{C.IXIA_TAIL_ADVERTISED_PREFIX}/"
-        f"{C.IXIA_TAIL_ADVERTISED_PREFIX_LEN}"
-    )
+    prefix = f"{C.IXIA_TAIL_ADVERTISED_PREFIX}/{C.IXIA_TAIL_ADVERTISED_PREFIX_LEN}"
     return {
         "gate": "S17_18_exact_remote_ixia_prefix",
         "show_cmd": _route_details_for(prefix),

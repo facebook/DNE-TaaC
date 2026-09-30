@@ -12,6 +12,7 @@ Lab binding (R1/R2 hostnames, IXIA chassis) and SSH credentials come from
 """
 
 from taac.test_as_a_config.types import TestConfig
+
 from taac.testconfigs.routing.factories.qual_rbb.rbb_srv6_test_config import (
     create_rbb_srv6_3_usids_test_config,
 )

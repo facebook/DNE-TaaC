@@ -12,6 +12,13 @@ playbook factory and their ``Playbook(...)`` construction sites get
 registered by ``tests/test_no_inline_playbook_construction.py``.
 """
 
-from taac.playbooks.routing.factories import (  # noqa: F401
-    qual_bgp_update_group,
-)
+import os
+
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+if TAAC_OSS:
+    from taac.playbooks.routing.factories import qual_rbb  # noqa: F401
+else:
+    from taac.playbooks.routing.factories import (  # noqa: F401
+        qual_bgp_update_group,
+    )

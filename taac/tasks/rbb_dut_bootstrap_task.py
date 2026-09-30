@@ -92,15 +92,15 @@ class RbbDutBootstrapTask(BaseTask):
 
     def __init__(
         self,
-        hostname: t.Optional[str] = None,
-        description: t.Optional[str] = None,
-        ixia: t.Optional[t.Any] = None,
-        logger: t.Optional[ConsoleFileLogger] = None,
-        shared_data: t.Optional[t.Dict[t.Any, t.Any]] = None,
+        hostname: str | None = None,
+        description: str | None = None,
+        ixia: t.Any | None = None,
+        logger: ConsoleFileLogger | None = None,
+        shared_data: dict[t.Any, t.Any] | None = None,
     ) -> None:
         super().__init__(hostname, description, ixia, logger, shared_data)
 
-    async def run(self, params: t.Dict[str, t.Any]) -> None:
+    async def run(self, params: dict[str, t.Any]) -> None:
         hostname = params.get("hostname") or self.hostname
         if not hostname:
             raise ValueError("rbb_dut_bootstrap requires 'hostname'")
@@ -136,16 +136,17 @@ class RbbDutBootstrapTask(BaseTask):
         )
 
     @staticmethod
-    def _parse_core_pcs(value: t.Any) -> t.Tuple[CorePortChannel, ...]:
+    def _parse_core_pcs(value: t.Any) -> tuple[CorePortChannel, ...]:
         if not isinstance(value, list) or not value:
             raise ValueError(
-                "rbb_dut_bootstrap apply requires a non-empty "
-                "core_port_channels list"
+                "rbb_dut_bootstrap apply requires a non-empty core_port_channels list"
             )
-        result: t.List[CorePortChannel] = []
+        result: list[CorePortChannel] = []
         for item in value:
             if not isinstance(item, dict) or not isinstance(item.get("name"), str):
-                raise ValueError("core_port_channels contains an invalid entry")
+                raise ValueError(  # noqa: TRY004
+                    "core_port_channels contains an invalid entry"
+                )
             members = item.get("members")
             if not isinstance(members, list) or not all(
                 isinstance(member, str) and member.strip() for member in members
@@ -187,7 +188,7 @@ class RbbDutBootstrapTask(BaseTask):
 
     async def _read_json(
         self, driver: t.Any, hostname: str, path: str
-    ) -> t.Dict[str, t.Any]:
+    ) -> dict[str, t.Any]:
         raw = await async_read_file_or_none(driver, path)
         if raw is None:
             raise TestCaseFailure(
@@ -196,7 +197,9 @@ class RbbDutBootstrapTask(BaseTask):
         try:
             document = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise TestCaseFailure(f"{hostname}: {path} is not valid JSON: {exc}") from exc
+            raise TestCaseFailure(
+                f"{hostname}: {path} is not valid JSON: {exc}"
+            ) from exc
         if not isinstance(document, dict):
             raise TestCaseFailure(f"{hostname}: {path} must contain a JSON object")
         return document
@@ -260,8 +263,7 @@ class RbbDutBootstrapTask(BaseTask):
     async def _file_mode(self, driver: t.Any, hostname: str, path: str) -> str:
         quoted = shlex.quote(path)
         output = await driver.async_run_cmd_on_shell(
-            f"if [ -f {quoted} ] && [ ! -L {quoted} ]; "
-            f"then stat -c %a -- {quoted}; fi"
+            f"if [ -f {quoted} ] && [ ! -L {quoted} ]; then stat -c %a -- {quoted}; fi"
         )
         mode = str(output or "").strip()
         if re.fullmatch(r"[0-7]{3,4}", mode) is None:
@@ -275,8 +277,7 @@ class RbbDutBootstrapTask(BaseTask):
         self, driver: t.Any, hostname: str, path: str, mode: str
     ) -> None:
         output = await driver.async_run_cmd_on_shell(
-            f"chmod {mode} -- {shlex.quote(path)} && "
-            f"stat -c %a -- {shlex.quote(path)}"
+            f"chmod {mode} -- {shlex.quote(path)} && stat -c %a -- {shlex.quote(path)}"
         )
         if str(output or "").strip() != mode:
             raise TestCaseFailure(
@@ -320,9 +321,7 @@ class RbbDutBootstrapTask(BaseTask):
     ) -> None:
         if await driver.async_check_if_file_exists(
             C.BOOTSTRAP_STATE_PATH
-        ) or await self._path_entry_exists(
-            driver, hostname, C.BOOTSTRAP_STATE_PATH
-        ):
+        ) or await self._path_entry_exists(driver, hostname, C.BOOTSTRAP_STATE_PATH):
             raise TestCaseFailure(
                 f"{hostname}: bootstrap recovery state already exists at "
                 f"{C.BOOTSTRAP_STATE_PATH}; restore or inspect the interrupted "
@@ -374,12 +373,13 @@ class RbbDutBootstrapTask(BaseTask):
             BgpConfig,
         )
         from neteng.fboss.switch_config.thrift_types import SwitchConfig
+
         from taac.utils.json_thrift_utils import json_to_thrift
 
         try:
             json_to_thrift(json.dumps(documents.agent["sw"]), SwitchConfig)
             json_to_thrift(json.dumps(documents.bgp), BgpConfig)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise TestCaseFailure(
                 f"{hostname}: generated bootstrap config does not match the "
                 f"bundled FBOSS/BGP Thrift schema: {exc}"
@@ -420,7 +420,7 @@ class RbbDutBootstrapTask(BaseTask):
             "file_owners": file_owners,
         }
 
-        created_snapshots: t.List[str] = []
+        created_snapshots: list[str] = []
         state_created = False
         try:
             await async_write_json_file(
@@ -565,7 +565,7 @@ class RbbDutBootstrapTask(BaseTask):
             # converged; systemd "active" alone only proves the daemons started.
             if role == "r2":
                 await self._wait_for_pair_convergence(driver, hostname, core_pcs)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             try:
                 await self._restore(driver, hostname)
             except Exception as rollback_exc:  # noqa: BLE001
@@ -596,9 +596,7 @@ class RbbDutBootstrapTask(BaseTask):
         while True:
             try:
                 states = await driver.async_get_interfaces_operational_state(members)
-                member_links_up = all(
-                    states.get(member) is True for member in members
-                )
+                member_links_up = all(states.get(member) is True for member in members)
                 port_channel_states = {
                     name: await driver.async_get_aggregated_interface_status(name)
                     for name in port_channels
@@ -607,9 +605,7 @@ class RbbDutBootstrapTask(BaseTask):
                 sessions = await driver.async_get_bgp_sessions()
                 established = set()
                 for session in sessions:
-                    state = getattr(
-                        getattr(session, "peer", None), "peer_state", None
-                    )
+                    state = getattr(getattr(session, "peer", None), "peer_state", None)
                     state_name = getattr(state, "name", str(state)).rsplit(".", 1)[-1]
                     if state_name.upper() == "ESTABLISHED":
                         established.add(str(session.peer_addr))
@@ -638,9 +634,7 @@ class RbbDutBootstrapTask(BaseTask):
         self, driver: t.Any, was_active: bool, *, force_restart: bool = False
     ) -> None:
         if was_active and force_restart:
-            await driver.async_restart_service(
-                FbossSystemctlServiceName.FBOSS_SW_AGENT
-            )
+            await driver.async_restart_service(FbossSystemctlServiceName.FBOSS_SW_AGENT)
         elif was_active:
             try:
                 await driver.async_agent_config_reload()
@@ -673,14 +667,11 @@ class RbbDutBootstrapTask(BaseTask):
         snapshots_exist = False
         for path in _CONFIG_PATHS:
             backup = path + BOOTSTRAP_BACKUP_SUFFIX
-            if await driver.async_check_if_file_exists(
-                backup
-            ) or await driver.async_check_if_file_exists(
-                backup + ".missing"
-            ) or await self._path_entry_exists(
-                driver, hostname, backup
-            ) or await self._path_entry_exists(
-                driver, hostname, backup + ".missing"
+            if (
+                await driver.async_check_if_file_exists(backup)
+                or await driver.async_check_if_file_exists(backup + ".missing")
+                or await self._path_entry_exists(driver, hostname, backup)
+                or await self._path_entry_exists(driver, hostname, backup + ".missing")
             ):
                 snapshots_exist = True
                 break
@@ -696,7 +687,9 @@ class RbbDutBootstrapTask(BaseTask):
                     f"{hostname}: bootstrap snapshots exist but "
                     f"{C.BOOTSTRAP_STATE_PATH} is missing; refusing an inexact restore"
                 )
-            self.logger.info(f"{hostname} -- no DUT bootstrap recovery state to restore")
+            self.logger.info(
+                f"{hostname} -- no DUT bootstrap recovery state to restore"
+            )
             return
         try:
             state = json.loads(raw_state)
@@ -770,9 +763,7 @@ class RbbDutBootstrapTask(BaseTask):
         # files back; this avoids briefly loading a restored placeholder file.
         for name in ("bgp", "openr"):
             if service_states[name] == "inactive":
-                await self._stop_service_for_restore(
-                    driver, hostname, _SERVICES[name]
-                )
+                await self._stop_service_for_restore(driver, hostname, _SERVICES[name])
         if service_states["agent"] == "inactive":
             await self._stop_service_for_restore(
                 driver,
@@ -794,19 +785,13 @@ class RbbDutBootstrapTask(BaseTask):
                     raise TestCaseFailure(
                         f"{hostname}: missing bootstrap snapshot for changed file {path}"
                     )
-                await self._set_file_owner(
-                    driver, hostname, path, file_owners[path]
-                )
-                await self._set_file_mode(
-                    driver, hostname, path, file_modes[path]
-                )
+                await self._set_file_owner(driver, hostname, path, file_owners[path])
+                await self._set_file_mode(driver, hostname, path, file_modes[path])
 
         if service_states["agent"] == "active":
             # Restoring defaultCommandLineArgs requires a process restart;
             # config reload cannot remove a startup-only FBOSS feature flag.
-            await self._activate_agent(
-                driver, was_active=True, force_restart=True
-            )
+            await self._activate_agent(driver, was_active=True, force_restart=True)
         if service_states["openr"] == "active":
             await driver.async_restart_service(FbossSystemctlServiceName.OPENR)
         if service_states["bgp"] == "active":

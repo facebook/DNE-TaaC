@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # pyre-unsafe
 
 """Preflight checks for the OSS RBB SRv6 runner.
@@ -17,12 +16,11 @@ import os
 import re
 import stat
 import sys
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
 
 from taac.runner.oss_exceptions import OSSConfigError
 from taac.runner.oss_secrets import get_oss_dut_credentials, load_oss_secrets
-
 
 _MAX_INPUT_BYTES = 1024 * 1024
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -57,11 +55,11 @@ def _regular_file(path: Path, description: str) -> None:
         )
 
 
-def _load_env_profile(path: Path) -> Dict[str, str]:
+def _load_env_profile(path: Path) -> dict[str, str]:
     """Parse the deliberately small KEY=value subset used by docker --env-file."""
 
     _regular_file(path, "environment profile")
-    values: Dict[str, str] = {}
+    values: dict[str, str] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
@@ -98,9 +96,9 @@ def _load_env_profile(path: Path) -> Dict[str, str]:
     return values
 
 
-def _csv_rows(path: Path, expected_columns: int, description: str) -> List[List[str]]:
+def _csv_rows(path: Path, expected_columns: int, description: str) -> list[list[str]]:
     _regular_file(path, description)
-    rows: List[List[str]] = []
+    rows: list[list[str]] = []
     try:
         with path.open("r", encoding="utf-8", newline="") as csv_stream:
             for line_number, row in enumerate(csv.reader(csv_stream), start=1):
@@ -127,9 +125,7 @@ def _require_values(names: Iterable[str]) -> None:
         raise OSSConfigError("Missing required setting(s): " + ", ".join(missing))
 
 
-def _validate_dut_credentials(
-    hostnames: Iterable[str], setup_option: str = ""
-) -> None:
+def _validate_dut_credentials(hostnames: Iterable[str], setup_option: str = "") -> None:
     for hostname in hostnames:
         username, password = get_oss_dut_credentials(hostname)
         missing = []
@@ -139,8 +135,7 @@ def _validate_dut_credentials(
             missing.append("password")
         if missing:
             raise OSSConfigError(
-                f"Missing DUT SSH {', '.join(missing)} for configured DUT "
-                f"'{hostname}'"
+                f"Missing DUT SSH {', '.join(missing)} for configured DUT '{hostname}'"
             )
         if setup_option and username.strip() != "root":
             raise OSSConfigError(
@@ -169,7 +164,7 @@ def _is_endpoint_placeholder(value: str) -> bool:
 
 def _validate_device_info(path: Path, r1_host: str, r2_host: str) -> None:
     rows = _csv_rows(path, _DEVICE_COLUMNS, "device-info CSV")
-    devices: Dict[str, Sequence[str]] = {}
+    devices: dict[str, Sequence[str]] = {}
     for row in rows:
         hostname = row[0].lower()
         if hostname == "hostname":
@@ -211,17 +206,12 @@ def _validate_circuit_shape(path: Path) -> None:
 
 def _validate_traffic_contract() -> None:
     try:
-        advertised_start = ipaddress.ip_address(
-            os.environ["TAAC_RBB_IXIA_TAIL_PREFIX"]
-        )
+        advertised_start = ipaddress.ip_address(os.environ["TAAC_RBB_IXIA_TAIL_PREFIX"])
         advertised = ipaddress.ip_network(
-            f"{advertised_start}/"
-            f"{os.environ['TAAC_RBB_IXIA_TAIL_PREFIX_LEN']}",
+            f"{advertised_start}/{os.environ['TAAC_RBB_IXIA_TAIL_PREFIX_LEN']}",
             strict=False,
         )
-        steered = ipaddress.ip_network(
-            os.environ["TAAC_RBB_TAIL_PREFIX"], strict=True
-        )
+        steered = ipaddress.ip_network(os.environ["TAAC_RBB_TAIL_PREFIX"], strict=True)
         count = int(os.environ["TAAC_RBB_IXIA_TAIL_PREFIX_COUNT"])
     except (KeyError, ValueError) as exc:
         raise OSSConfigError("The IXIA tail-prefix contract is not valid") from exc
@@ -244,7 +234,7 @@ def run_preflight(
     with_traffic: bool,
     setup_duts: bool = False,
     setup_dut_edges: bool = False,
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """Validate local inputs and return the configured DUT names."""
 
     config_dir = config_dir.expanduser().resolve()
@@ -284,9 +274,7 @@ def run_preflight(
     if setup_dut_edges and not with_traffic:
         raise OSSConfigError("--setup-dut-edges requires --with-traffic")
     if setup_duts and with_traffic and not setup_dut_edges:
-        raise OSSConfigError(
-            "fresh-image traffic requires --setup-dut-edges"
-        )
+        raise OSSConfigError("fresh-image traffic requires --setup-dut-edges")
     r1_host = os.environ["TAAC_RBB_R1_HOST"].strip()
     r2_host = os.environ["TAAC_RBB_R2_HOST"].strip()
     if r1_host.lower() == r2_host.lower():

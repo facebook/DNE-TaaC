@@ -415,8 +415,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             # async context managers, etc.), running it on a separate loop
             # from execute_playbook / tearDown produces "attached to a
             # different loop" errors or silent connection failures.
-            async def _run_lifecycle() -> None:
-                primary_error: Optional[BaseException] = None
+            async def _run_lifecycle(
+                taac_runner=taac_runner,
+                playbooks=playbooks,
+                config_name=config_name,
+                executor=executor,
+            ) -> None:
+                primary_error: BaseException | None = None
                 try:
                     # Setup can fail after config-specific tasks have already
                     # changed a DUT (for example, while IXIA is initialized).

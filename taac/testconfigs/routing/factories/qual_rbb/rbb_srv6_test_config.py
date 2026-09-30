@@ -23,13 +23,6 @@ import ipaddress
 import typing as t
 
 from ixia.ixia import types as ixia_types
-from taac.abstractions.physical_inventory.physical_inventory import (
-    PhysicalInventory,
-)
-from taac.playbooks.routing.factories.qual_rbb.rbb_srv6_playbook import (
-    create_rbb_srv6_3_usids_playbook,
-)
-from taac.task_definitions import create_run_task
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import (
     BasicPortConfig,
@@ -43,6 +36,14 @@ from taac.test_as_a_config.types import (
     TestConfig,
     TrafficEndpoint,
 )
+
+from taac.abstractions.physical_inventory.physical_inventory import (
+    PhysicalInventory,
+)
+from taac.playbooks.routing.factories.qual_rbb.rbb_srv6_playbook import (
+    create_rbb_srv6_3_usids_playbook,
+)
+from taac.task_definitions import create_run_task
 from taac.testconfigs.routing.util import bgp_rbb_constants as C
 from taac.testconfigs.routing.util.bgp_rbb_bootstrap_config import (
     validate_bootstrap_topology,
@@ -52,29 +53,28 @@ from taac.testconfigs.routing.util.bgp_rbb_lab_wiring import (
     rbb_oss_mock_device_data,
 )
 from taac.testconfigs.routing.util.bgp_rbb_scenario_profiles import (
-    Srv6Profile,
     SRV6_3_USIDS_PROFILE,
+    Srv6Profile,
 )
 from taac.testconfigs.routing.util.bgp_rbb_topology import (
-    load_rbb_topology,
     RbbTopology,
+    load_rbb_topology,
     validate_rbb_topology,
 )
 
 
-def _include_traffic(override: t.Optional[bool] = None) -> bool:
+def _include_traffic(override: bool | None = None) -> bool:
     """Whether to attach the IXIA generator config (mirrors the playbook flag)."""
     return C.INCLUDE_TRAFFIC if override is None else override
 
 
 def _resolve_topology(
-    topology: t.Optional[RbbTopology], include_traffic: bool
+    topology: RbbTopology | None, include_traffic: bool
 ) -> RbbTopology:
     """Resolve and validate wiring before building any side-effecting task."""
     if C.SETUP_DUTS_ENABLED and include_traffic and not C.EDGE_EBGP_ENABLED:
         raise ValueError(
-            "fresh-image traffic requires TAAC_RBB_EDGE_EBGP=1 "
-            "(--setup-dut-edges)"
+            "fresh-image traffic requires TAAC_RBB_EDGE_EBGP=1 (--setup-dut-edges)"
         )
     if topology is None:
         topology = load_rbb_topology(
@@ -102,9 +102,7 @@ def _validate_traffic_route_contract(
         ("R2", C.IXIA_R2_EDGE_V6, C.IXIA_R2_EDGE_GW_V6),
     )
     for role, peer, gateway in edge_pairs:
-        peer_interface = ipaddress.ip_interface(
-            f"{peer}/{C.IXIA_EDGE_PREFIX_MASK}"
-        )
+        peer_interface = ipaddress.ip_interface(f"{peer}/{C.IXIA_EDGE_PREFIX_MASK}")
         gateway_interface = ipaddress.ip_interface(
             f"{gateway}/{C.IXIA_EDGE_PREFIX_MASK}"
         )
@@ -118,8 +116,7 @@ def _validate_traffic_route_contract(
         if peer_interface.ip == gateway_interface.ip:
             raise ValueError(f"{role} IXIA peer and DUT gateway must differ")
     if not (
-        1 <= C.IXIA_R1_EDGE_AS <= 0xFFFFFFFF
-        and 1 <= C.IXIA_R2_EDGE_AS <= 0xFFFFFFFF
+        1 <= C.IXIA_R1_EDGE_AS <= 0xFFFFFFFF and 1 <= C.IXIA_R2_EDGE_AS <= 0xFFFFFFFF
     ):
         raise ValueError("IXIA edge ASNs must be in 1..4294967295")
 
@@ -165,7 +162,7 @@ def _validate_traffic_route_contract(
 
 def _edge_bgp_config(
     local_as: int,
-    route_scale: t.Optional[RouteScaleSpec] = None,
+    route_scale: RouteScaleSpec | None = None,
 ) -> BgpConfig:
     """Build an IPv6 eBGP peer, optionally with one advertised route pool."""
     return BgpConfig(
@@ -206,7 +203,7 @@ def _edge_port_config(
 
 def _ixia_port_configs(
     r1: PhysicalInventory, r2: PhysicalInventory, topology: RbbTopology
-) -> t.List[BasicPortConfig]:
+) -> list[BasicPortConfig]:
     """eBGP-emulation port configs for both IXIA edges (S12-S15).
 
     The selected R1 edge supplies the source interface and eBGP session. The
@@ -214,7 +211,7 @@ def _ixia_port_configs(
     """
     r1_iface = topology.r1.primary_ixia_interface
     r2_iface = topology.r2.primary_ixia_interface
-    configs: t.List[BasicPortConfig] = []
+    configs: list[BasicPortConfig] = []
     if r1_iface:
         configs.append(
             _edge_port_config(
@@ -254,7 +251,7 @@ def _ixia_port_configs(
 
 def _ixia_traffic_items(
     r1: PhysicalInventory, r2: PhysicalInventory, topology: RbbTopology
-) -> t.List[BasicTrafficItemConfig]:
+) -> list[BasicTrafficItemConfig]:
     """Selected R1 edge → SRv6 core → selected R2 edge."""
     r1_iface = topology.r1.primary_ixia_interface
     r2_iface = topology.r2.primary_ixia_interface
@@ -295,7 +292,7 @@ def _edge_ebgp_setup_tasks(
     r2: PhysicalInventory,
     topology: RbbTopology,
     include_traffic: bool,
-) -> t.List[taac_types.Task]:
+) -> list[taac_types.Task]:
     """OPT-IN DUT-side edge eBGP bring-up toward the IXIA edges (S14).
 
     The default lab underlay is iBGP-only over loopbacks; establishing a DUT-side
@@ -359,7 +356,7 @@ def _edge_ebgp_setup_tasks(
 
 def _edge_ebgp_teardown_tasks(
     r1: PhysicalInventory, r2: PhysicalInventory, include_traffic: bool
-) -> t.List[taac_types.Task]:
+) -> list[taac_types.Task]:
     """Revert edge eBGP edits and restore ``*.taac-rbb-edge-orig`` files."""
     if not (C.EDGE_EBGP_ENABLED and include_traffic):
         return []
@@ -377,7 +374,7 @@ def _dut_bootstrap_setup_tasks(
     r2: PhysicalInventory,
     topology: RbbTopology,
     include_traffic: bool,
-) -> t.List[taac_types.Task]:
+) -> list[taac_types.Task]:
     """Temporarily bootstrap a fresh image's core/OpenR/iBGP/SRv6 slice."""
     if not C.SETUP_DUTS_ENABLED:
         return []
@@ -403,7 +400,7 @@ def _dut_bootstrap_setup_tasks(
 
 def _dut_bootstrap_teardown_tasks(
     r1: PhysicalInventory, r2: PhysicalInventory
-) -> t.List[taac_types.Task]:
+) -> list[taac_types.Task]:
     """Restore the exact image-installed configs/service states on both DUTs."""
     if not C.SETUP_DUTS_ENABLED:
         return []
@@ -420,7 +417,7 @@ def _direct_ixia_connections(
     inv: PhysicalInventory,
     node: t.Any,
     chassis: str,
-) -> t.List[taac_types.DirectIxiaConnection]:
+) -> list[taac_types.DirectIxiaConnection]:
     """Explicit DUT-iface ↔ IXIA slot/port map (required in OSS mode).
 
     OSS ``traffic_generator`` does no LLDP/optical discovery, so each endpoint
@@ -442,7 +439,7 @@ def _direct_ixia_connections(
 def _build_rbb_test_config(
     name: str,
     profile: Srv6Profile,
-    playbooks: t.List[taac_types.Playbook],
+    playbooks: list[taac_types.Playbook],
     r1: PhysicalInventory,
     r2: PhysicalInventory,
     topology: RbbTopology,
@@ -516,9 +513,9 @@ def _build_rbb_test_config(
 
 
 def create_rbb_srv6_3_usids_test_config(
-    topology: t.Optional[RbbTopology] = None,
+    topology: RbbTopology | None = None,
     name: str = "RBB_SRV6_3_USIDS_TEST",
-    include_traffic: t.Optional[bool] = None,
+    include_traffic: bool | None = None,
 ) -> TestConfig:
     """TC1: full head→mid→tail 3-uSID chain + TE_AGENT direct-route lifecycle."""
     resolved_include_traffic = _include_traffic(include_traffic)

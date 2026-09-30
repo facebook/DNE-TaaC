@@ -100,7 +100,7 @@ class Step(t.Generic[StepInput], ABC):
         self.parameter_evaluator = parameter_evaluator
         # One runner-owned store lets registered tasks in separate RUN_TASK
         # steps exchange keyed state without process-global caches.
-        self.shared_data: t.Optional[t.Dict[t.Any, t.Any]] = None
+        self.shared_data: dict[t.Any, t.Any] | None = None
         # pyrefly: ignore [bad-assignment]
         self.driver: AbstractSwitch = ...
         self.failures = []

@@ -18,8 +18,8 @@ from unittest import mock
 
 from taac.testconfigs.routing.util.bgp_rbb_topology import (
     CorePortChannel,
-    load_rbb_topology,
     RbbTopologyError,
+    load_rbb_topology,
     validate_rbb_topology,
 )
 
@@ -62,7 +62,7 @@ class RbbTopologyFromCsvTest(unittest.TestCase):
         self.assertEqual(self.topo.ixia_chassis, "chassis.example")
 
     def test_live_ixia_mode_requires_explicit_chassis(self) -> None:
-        with mock.patch.dict(os.environ, {"TAAC_RBB_IXIA_CHASSIS": ""}):
+        with mock.patch.dict(os.environ, {"TAAC_RBB_IXIA_CHASSIS": ""}):  # noqa: SIM117
             with self.assertRaisesRegex(RbbTopologyError, "IXIA_CHASSIS"):
                 load_rbb_topology(
                     r1_host="r1.example",
@@ -96,9 +96,7 @@ class RbbTopologyFromCsvTest(unittest.TestCase):
         self.assertEqual(self.topo.r1.primary_ixia_interface, "eth1/9")
 
     def test_user_can_select_one_of_multiple_ixia_edges(self) -> None:
-        with mock.patch.dict(
-            os.environ, {"TAAC_RBB_R1_IXIA_INTERFACE": "eth1/10"}
-        ):
+        with mock.patch.dict(os.environ, {"TAAC_RBB_R1_IXIA_INTERFACE": "eth1/10"}):
             topology = load_rbb_topology(
                 r1_host="r1.example",
                 r2_host="r2.example",
@@ -204,7 +202,7 @@ class RbbTopologyGenericFallbackTest(unittest.TestCase):
             )
 
     def test_live_mode_requires_csv(self) -> None:
-        with mock.patch.dict(os.environ, {"TAAC_CIRCUIT_INFO_PATH": ""}):
+        with mock.patch.dict(os.environ, {"TAAC_CIRCUIT_INFO_PATH": ""}):  # noqa: SIM117
             with self.assertRaises(RbbTopologyError):
                 load_rbb_topology(allow_placeholder=False)
 

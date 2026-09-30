@@ -55,9 +55,7 @@ def _get_ssh_key_path() -> t.Optional[str]:
     return None
 
 
-def _get_ssh_username(
-    override: t.Optional[str] = None, hostname: str = ""
-) -> str:
+def _get_ssh_username(override: str | None = None, hostname: str = "") -> str:
     if override:
         return override
     if hostname:
@@ -69,7 +67,7 @@ def _get_ssh_username(
     return os.environ.get("TAAC_SSH_USER", "root")
 
 
-def _get_ssh_password(hostname: str = "") -> t.Optional[str]:
+def _get_ssh_password(hostname: str = "") -> str | None:
     if hostname:
         from taac.runner.oss_secrets import get_oss_dut_credentials
 

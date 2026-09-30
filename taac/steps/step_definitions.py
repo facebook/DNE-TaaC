@@ -22,7 +22,6 @@ from dataclasses import dataclass
 
 import paramiko
 from taac.abstractions.churn.attribute import AttributeChurn
-from neteng.test_infra.dne.taac.abstractions.churn.route import RouteChurn, RouteStorm
 from taac.abstractions.churn.session import SessionChurn
 from taac.abstractions.churn.workloads import (
     IgpMetricChurn,
@@ -32,6 +31,14 @@ from taac.abstractions.churn.workloads import (
 )
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+if TAAC_OSS:
+    from taac.abstractions.churn.route import RouteChurn, RouteStorm
+else:
+    from neteng.test_infra.dne.taac.abstractions.churn.route import (
+        RouteChurn,
+        RouteStorm,
+    )
 
 if not TAAC_OSS:
     from libfb.py.asyncio.await_utils import convert_to_async

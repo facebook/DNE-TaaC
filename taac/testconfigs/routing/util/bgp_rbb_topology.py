@@ -43,12 +43,12 @@ from taac.testconfigs.routing.util import bgp_rbb_constants as C
 # ─── Generic, documentation-only fallback wiring (NOT this lab's values) ────
 # Used only when no circuit_info CSV is supplied. Interface / port names are
 # neutral placeholders that demonstrate shape; real wiring comes from the CSV.
-_DEFAULT_CORE_PCS: t.Tuple[t.Tuple[str, t.Tuple[str, ...]], ...] = (
+_DEFAULT_CORE_PCS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("port-channel1", ("eth1/1",)),
     ("port-channel2", ("eth1/2",)),
 )
-_DEFAULT_R1_IXIA_EDGES: t.Tuple[t.Tuple[str, str], ...] = (("eth1/3", "1/1"),)
-_DEFAULT_R2_IXIA_EDGES: t.Tuple[t.Tuple[str, str], ...] = (("eth1/3", "1/2"),)
+_DEFAULT_R1_IXIA_EDGES: tuple[tuple[str, str], ...] = (("eth1/3", "1/1"),)
+_DEFAULT_R2_IXIA_EDGES: tuple[tuple[str, str], ...] = (("eth1/3", "1/2"),)
 
 _IXIA_ROLE = "IXIA"
 _IXIA_PORT_RE = re.compile(r"^[0-9]+/[0-9]+$")
@@ -63,7 +63,7 @@ class CorePortChannel:
     """One core port-channel on a node, with its member interfaces."""
 
     name: str  # parent port-channel name as in the CSV, e.g. "port-channel1"
-    members: t.Tuple[str, ...]
+    members: tuple[str, ...]
 
     @property
     def show_name(self) -> str:
@@ -88,25 +88,24 @@ class NodeTopology:
 
     role: str  # "r1" | "r2"
     hostname: str
-    core_pcs: t.Tuple[CorePortChannel, ...] = ()
-    ixia_edges: t.Tuple[IxiaEdge, ...] = ()
-    traffic_ixia_interface: t.Optional[str] = None
+    core_pcs: tuple[CorePortChannel, ...] = ()
+    ixia_edges: tuple[IxiaEdge, ...] = ()
+    traffic_ixia_interface: str | None = None
 
     @property
-    def ixia_port_tuples(self) -> t.List[t.Tuple[str, str]]:
+    def ixia_port_tuples(self) -> list[tuple[str, str]]:
         """``(dut_interface, ixia_port)`` list for ``PhysicalInventory``."""
         return [(e.dut_interface, e.ixia_port) for e in self.ixia_edges]
 
     @property
-    def primary_ixia_interface(self) -> t.Optional[str]:
+    def primary_ixia_interface(self) -> str | None:
         """IXIA-facing interface selected for this two-port traffic model."""
         if self.traffic_ixia_interface:
             selected = next(
                 (
                     edge.dut_interface
                     for edge in self.ixia_edges
-                    if _norm(edge.dut_interface)
-                    == _norm(self.traffic_ixia_interface)
+                    if _norm(edge.dut_interface) == _norm(self.traffic_ixia_interface)
                 ),
                 None,
             )
@@ -116,7 +115,7 @@ class NodeTopology:
         return self.ixia_edges[0].dut_interface if self.ixia_edges else None
 
     @property
-    def primary_ixia_edge(self) -> t.Optional[IxiaEdge]:
+    def primary_ixia_edge(self) -> IxiaEdge | None:
         """Selected DUT/IXIA edge, or the first declared edge by CSV order."""
         interface = self.primary_ixia_interface
         return next(
@@ -129,7 +128,7 @@ class NodeTopology:
         )
 
     @property
-    def rif_verify_pc(self) -> t.Optional[CorePortChannel]:
+    def rif_verify_pc(self) -> CorePortChannel | None:
         """Core PC whose RIF the S10 verify targets (2nd core PC if present)."""
         if len(self.core_pcs) >= 2:
             return self.core_pcs[1]
@@ -163,7 +162,7 @@ def validate_rbb_topology(
     only relationships required by the two-node scenario; it never assumes the
     reference lab's interface numbering.
     """
-    errors: t.List[str] = []
+    errors: list[str] = []
     if not topology.r1.hostname or not topology.r2.hostname:
         errors.append("both R1 and R2 hostnames are required")
     elif _norm(topology.r1.hostname) == _norm(topology.r2.hostname):
@@ -178,8 +177,8 @@ def validate_rbb_topology(
         if not node.core_pcs:
             errors.append(f"{node.hostname}: no R1<->R2 core port-channel declared")
 
-        pc_names: t.Set[str] = set()
-        core_members: t.Set[str] = set()
+        pc_names: set[str] = set()
+        core_members: set[str] = set()
         for pc in node.core_pcs:
             if not pc.name.strip():
                 errors.append(f"{node.hostname}: core port-channel has no name")
@@ -207,8 +206,8 @@ def validate_rbb_topology(
             errors.append(
                 f"{node.hostname}: this traffic model requires at least one IXIA edge"
             )
-        seen_dut_edges: t.Set[str] = set()
-        seen_ixia_ports: t.Set[str] = set()
+        seen_dut_edges: set[str] = set()
+        seen_ixia_ports: set[str] = set()
         for edge in node.ixia_edges:
             if not edge.dut_interface.strip():
                 errors.append(f"{node.hostname}: IXIA edge has no DUT interface")
@@ -271,11 +270,13 @@ def validate_rbb_topology(
 
 
 # ─── CSV → topology derivation ─────────────────────────────────────────────
-def _norm(name: t.Optional[str]) -> str:
+def _norm(name: str | None) -> str:
     return (name or "").strip().lower()
 
 
-def _endpoints(circuit: DesiredCircuitRecord) -> t.Tuple[EndpointRecord, EndpointRecord]:
+def _endpoints(
+    circuit: DesiredCircuitRecord,
+) -> tuple[EndpointRecord, EndpointRecord]:
     return circuit.a_endpoint, circuit.z_endpoint
 
 
@@ -286,11 +287,11 @@ def _is_active(circuit: DesiredCircuitRecord) -> bool:
 
 def _core_pcs_for(
     this_host: str, other_host: str, circuits: t.Sequence[DesiredCircuitRecord]
-) -> t.Tuple[CorePortChannel, ...]:
+) -> tuple[CorePortChannel, ...]:
     """Group ``this_host``'s core members (facing ``other_host``) by parent PC."""
     this_n, other_n = _norm(this_host), _norm(other_host)
     # Preserve first-seen order of parent PCs; dedup members within each.
-    grouped: t.Dict[str, t.List[str]] = {}
+    grouped: dict[str, list[str]] = {}
     for ckt in circuits:
         if not _is_active(ckt):
             continue
@@ -326,8 +327,8 @@ def _validate_core_pairing(
     select either bundle for SRv6 path checks.
     """
     r1_n, r2_n = _norm(r1_host), _norm(r2_host)
-    peer_parents: t.Dict[t.Tuple[str, str], t.Set[str]] = {}
-    errors: t.List[str] = []
+    peer_parents: dict[tuple[str, str], set[str]] = {}
+    errors: list[str] = []
     for circuit in circuits:
         if not _is_active(circuit):
             continue
@@ -363,11 +364,11 @@ def _validate_core_pairing(
 
 def _ixia_edges_for(
     this_host: str, circuits: t.Sequence[DesiredCircuitRecord]
-) -> t.Tuple[IxiaEdge, ...]:
+) -> tuple[IxiaEdge, ...]:
     """Collect this_host's IXIA edges (DUT iface ↔ IXIA slot/port)."""
     this_n = _norm(this_host)
-    edges: t.List[IxiaEdge] = []
-    seen: t.Set[t.Tuple[str, str]] = set()
+    edges: list[IxiaEdge] = []
+    seen: set[tuple[str, str]] = set()
     for ckt in circuits:
         if not _is_active(ckt):
             continue
@@ -407,10 +408,10 @@ def _default_node(role: str, hostname: str) -> NodeTopology:
 
 
 def load_rbb_topology(
-    r1_host: t.Optional[str] = None,
-    r2_host: t.Optional[str] = None,
-    circuit_info_path: t.Optional[str] = None,
-    ixia_chassis: t.Optional[str] = None,
+    r1_host: str | None = None,
+    r2_host: str | None = None,
+    circuit_info_path: str | None = None,
+    ixia_chassis: str | None = None,
     *,
     allow_placeholder: bool = True,
     require_ixia: bool = False,
@@ -439,7 +440,7 @@ def load_rbb_topology(
     ixia_chassis = explicit_ixia_chassis or C.IXIA_CHASSIS
     circuit_info_path = circuit_info_path or os.environ.get("TAAC_CIRCUIT_INFO_PATH")
 
-    circuits: t.List[DesiredCircuitRecord] = []
+    circuits: list[DesiredCircuitRecord] = []
     if circuit_info_path:
         if not os.path.isfile(circuit_info_path):
             raise RbbTopologyError(

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # pyre-unsafe
 
 """Strict loader for adopter-owned OSS TAAC credentials.
@@ -13,14 +12,12 @@ import json
 import os
 import stat
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
 
 from taac.runner.oss_exceptions import OSSConfigError
 
-
 _MAX_SECRETS_FILE_BYTES = 64 * 1024
 _SCHEMA_VERSION = 1
-_FIELD_TO_ENV: Dict[Tuple[str, str], str] = {
+_FIELD_TO_ENV: dict[tuple[str, str], str] = {
     ("dut", "username"): "TAAC_SSH_USER",
     ("dut", "password"): "TAAC_SSH_PASSWORD",
     ("ixia", "username"): "TAAC_IXIA_USERNAME",
@@ -38,7 +35,7 @@ def _normalize_dut_hostname(hostname: str) -> str:
 
 def get_oss_dut_credentials(
     hostname: str,
-) -> Tuple[Optional[str], Optional[str]]:
+) -> tuple[str | None, str | None]:
     """Return the effective SSH username/password for *hostname*.
 
     Explicit ``TAAC_SSH_*`` environment variables retain their existing
@@ -63,7 +60,7 @@ def get_oss_dut_credentials(
     if not isinstance(credentials, dict):
         credentials = {}
 
-    def effective(field: str, env_name: str) -> Optional[str]:
+    def effective(field: str, env_name: str) -> str | None:
         environment_value = os.environ.get(env_name) or None
         return credentials.get(field) or environment_value
 
@@ -74,9 +71,9 @@ def get_oss_dut_credentials(
 
 
 def _object_without_duplicate_keys(
-    pairs: List[Tuple[str, object]],
-) -> Dict[str, object]:
-    result: Dict[str, object] = {}
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
             raise ValueError(f"duplicate key '{key}'")
@@ -84,7 +81,7 @@ def _object_without_duplicate_keys(
     return result
 
 
-def _read_json(path: Path) -> Dict[str, object]:
+def _read_json(path: Path) -> dict[str, object]:
     try:
         file_stat = path.stat()
     except OSError as exc:
@@ -125,7 +122,7 @@ def _read_json(path: Path) -> Dict[str, object]:
     return data
 
 
-def load_oss_secrets(secrets_file: str) -> Set[str]:
+def load_oss_secrets(secrets_file: str) -> set[str]:
     """Validate *secrets_file* and populate TAAC's OSS credential variables.
 
     Non-empty values from the file are applied with ``setdefault`` so an
@@ -153,9 +150,9 @@ def load_oss_secrets(secrets_file: str) -> Set[str]:
         )
 
     # Parse and validate the complete document before changing process state.
-    parsed_fields: Dict[Tuple[str, str], str] = {}
-    parsed_host_credentials: Dict[str, Dict[str, str]] = {}
-    populated: Set[str] = set()
+    parsed_fields: dict[tuple[str, str], str] = {}
+    parsed_host_credentials: dict[str, dict[str, str]] = {}
+    populated: set[str] = set()
     for section_name in ("dut", "ixia"):
         section = data.get(section_name, {})
         if not isinstance(section, dict):
@@ -163,7 +160,7 @@ def load_oss_secrets(secrets_file: str) -> Set[str]:
                 f"Secrets file '{path}' field '{section_name}' must be an object"
             )
 
-        allowed_fields: Set[str] = {
+        allowed_fields: set[str] = {
             field for section_key, field in _FIELD_TO_ENV if section_key == section_name
         }
         if section_name == "dut":
@@ -215,7 +212,7 @@ def load_oss_secrets(secrets_file: str) -> Set[str]:
             raise OSSConfigError(
                 f"Secrets file '{path}' contains unsupported dut.hosts field(s)"
             )
-        parsed_credentials: Dict[str, str] = {}
+        parsed_credentials: dict[str, str] = {}
         for field_name in _CREDENTIAL_FIELDS:
             value = credentials.get(field_name, "")
             if not isinstance(value, str):

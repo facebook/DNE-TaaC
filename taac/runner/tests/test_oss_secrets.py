@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # pyre-unsafe
 
 import json
@@ -14,7 +13,6 @@ from taac.runner.cli_parser import create_argument_parser
 from taac.runner.oss_exceptions import OSSConfigError
 from taac.runner.oss_secrets import get_oss_dut_credentials, load_oss_secrets
 from taac.utils.oss_driver_utils import AsyncSSHClient, ParamikoClient
-
 
 _CREDENTIAL_ENV_NAMES = {
     "TAAC_SSH_USER",
@@ -145,10 +143,12 @@ class TestOSSSecrets(TestCase):
                 [
                     sys.executable,
                     "-c",
-                    "from taac.runner.oss_secrets import "
-                    "get_oss_dut_credentials; import sys; "
-                    "sys.exit(get_oss_dut_credentials('rbb-r1.lab.local') "
-                    "!= ('r1-user', 'r1-secret'))",
+                    (
+                        "from taac.runner.oss_secrets import "
+                        "get_oss_dut_credentials; import sys; "
+                        "sys.exit(get_oss_dut_credentials('rbb-r1.lab.local') "
+                        "!= ('r1-user', 'r1-secret'))"
+                    ),
                 ],
                 env=os.environ.copy(),
                 check=False,

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # pyre-unsafe
 
 import json
@@ -79,22 +78,7 @@ class TestRbbPreflight(TestCase):
     ) -> None:
         self.config_dir.mkdir(mode=0o700)
         (self.config_dir / "rbb.env").write_text(
-            "\n".join(
-                (
-                    "TAAC_OSS=1",
-                    "TAAC_RBB_R1_HOST=rbb-r1.lab.local",
-                    "TAAC_RBB_R2_HOST=rbb-r2.lab.local",
-                    "TAAC_RBB_R1_HARDWARE=TEST_FBOSS",
-                    "TAAC_RBB_R2_HARDWARE=TEST_FBOSS",
-                    "TAAC_RBB_IXIA_CHASSIS=10.0.0.3",
-                    "TAAC_IXIA_API_SERVER=10.0.0.4",
-                    "TAAC_RBB_IXIA_TAIL_PREFIX=2001:db8:beef::",
-                    "TAAC_RBB_IXIA_TAIL_PREFIX_LEN=64",
-                    "TAAC_RBB_IXIA_TAIL_PREFIX_COUNT=1",
-                    "TAAC_RBB_TAIL_PREFIX=2001:db8:beef::/64",
-                    "",
-                )
-            ),
+            "TAAC_OSS=1\nTAAC_RBB_R1_HOST=rbb-r1.lab.local\nTAAC_RBB_R2_HOST=rbb-r2.lab.local\nTAAC_RBB_R1_HARDWARE=TEST_FBOSS\nTAAC_RBB_R2_HARDWARE=TEST_FBOSS\nTAAC_RBB_IXIA_CHASSIS=10.0.0.3\nTAAC_IXIA_API_SERVER=10.0.0.4\nTAAC_RBB_IXIA_TAIL_PREFIX=2001:db8:beef::\nTAAC_RBB_IXIA_TAIL_PREFIX_LEN=64\nTAAC_RBB_IXIA_TAIL_PREFIX_COUNT=1\nTAAC_RBB_TAIL_PREFIX=2001:db8:beef::/64\n",
             encoding="utf-8",
         )
         secrets = {

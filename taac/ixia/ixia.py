@@ -512,6 +512,8 @@ def _is_ipv4_prefix_pool(prefix_pool: t.Any) -> bool:
     raise TypeError(
         f"unsupported RESTPy prefix-pool object {type(prefix_pool).__name__}"
     )
+
+
 def _is_ipv6_bgp_peer(peer: t.Any) -> bool:
     """Identify a RESTPy IPv6 BGP peer across public/internal module hashes."""
     return isinstance(peer, BgpIpv6Peer)
@@ -588,21 +590,21 @@ if t.TYPE_CHECKING:
     from uhd_restpy.testplatform.sessions.ixnetwork.topology.bgpipv6peer_d4ac277d9da759fd5a152b8e6eb0ab20 import (
         BgpIpv6Peer as UhdBgpIpv6Peer,
     )
-    BgpIpv6Peer = t.Union[IxnBgpIpv6Peer, UhdBgpIpv6Peer]
+    BgpIpv6Peer = IxnBgpIpv6Peer | UhdBgpIpv6Peer
     from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
         Ipv4PrefixPools as IxnIpv4PrefixPools,
     )
     from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv4prefixpools_2d6f2aedde61c058965d4e1b21741352 import (
         Ipv4PrefixPools as UhdIpv4PrefixPools,
     )
-    Ipv4PrefixPools = t.Union[IxnIpv4PrefixPools, UhdIpv4PrefixPools]
+    Ipv4PrefixPools = IxnIpv4PrefixPools | UhdIpv4PrefixPools
     from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
         Ipv6PrefixPools as IxnIpv6PrefixPools,
     )
     from uhd_restpy.testplatform.sessions.ixnetwork.topology.ipv6prefixpools_f83aba85ff769655b348dc60ddcb30f2 import (
         Ipv6PrefixPools as UhdIpv6PrefixPools,
     )
-    Ipv6PrefixPools = t.Union[IxnIpv6PrefixPools, UhdIpv6PrefixPools]
+    Ipv6PrefixPools = IxnIpv6PrefixPools | UhdIpv6PrefixPools
     from ixnetwork_restpy.testplatform.sessions.ixnetwork.topology.bgpiprouteproperty_3dbf4edca5d6573869a4ee79cda6644b import (
         BgpIPRouteProperty as IxnBgpIPRouteProperty,
     )

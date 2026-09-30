@@ -11,20 +11,21 @@ real home in ``taac/tasks`` is unaffected.
 
 import copy
 import ipaddress
-import socket
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from taac.constants import TestCaseFailure
 from taac.tasks.rbb_edge_ebgp_task import RbbEdgeEbgpTask
 from taac.tasks.rbb_srv6_counter_delta_task import RbbSrv6CounterDeltaTask
-from taac.tasks.rbb_srv6_direct_route_task import RbbSrv6DirectRouteTask
-from taac.tasks.rbb_srv6_direct_route_task import _build_srv6_next_hop
+from taac.tasks.rbb_srv6_direct_route_task import (
+    RbbSrv6DirectRouteTask,
+    _build_srv6_next_hop,
+)
 from taac.tasks.rbb_srv6_verify_task import RbbSrv6VerifyTask
 from taac.tasks.registry import TASK_NAME_TO_CLASS
 from taac.testconfigs.routing.util.bgp_rbb_edge_config import (
-    add_edge_ebgp_peer,
     EDGE_EBGP_PEER_GROUP,
+    add_edge_ebgp_peer,
     enable_ipv6_afi_on_ibgp,
 )
 
@@ -117,7 +118,7 @@ class RbbSrv6VerifyTaskTest(unittest.IsolatedAsyncioTestCase):
     async def test_absent_check_ignores_cli_capitalization(self) -> None:
         task = RbbSrv6VerifyTask(hostname="rbb-r1", logger=MagicMock())
         driver = self._driver("Route owned by TE_AGENT")
-        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):
+        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):  # noqa: SIM117
             with self.assertRaises(TestCaseFailure):
                 await task.run(
                     {
@@ -130,7 +131,7 @@ class RbbSrv6VerifyTaskTest(unittest.IsolatedAsyncioTestCase):
     async def test_raises_when_expected_missing(self) -> None:
         task = RbbSrv6VerifyTask(hostname="rbb-r2", logger=MagicMock())
         driver = self._driver("route 2001:db8:cafe::/48 owner bgp via ...")
-        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):
+        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):  # noqa: SIM117
             with self.assertRaises(TestCaseFailure):
                 await task.run(
                     {
@@ -143,7 +144,7 @@ class RbbSrv6VerifyTaskTest(unittest.IsolatedAsyncioTestCase):
     async def test_raises_when_unexpected_present(self) -> None:
         task = RbbSrv6VerifyTask(hostname="rbb-r2", logger=MagicMock())
         driver = self._driver("route owned by te_agent")
-        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):
+        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):  # noqa: SIM117
             with self.assertRaises(TestCaseFailure):
                 await task.run(
                     {
@@ -159,7 +160,7 @@ class RbbSrv6VerifyTaskTest(unittest.IsolatedAsyncioTestCase):
         driver.async_get_interfaces_operational_state = AsyncMock(
             return_value={"eth1/1": True, "eth1/2": False}
         )
-        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):
+        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):  # noqa: SIM117
             with self.assertRaises(TestCaseFailure):
                 await task.run(
                     {
@@ -179,7 +180,9 @@ class RbbSrv6VerifyTaskTest(unittest.IsolatedAsyncioTestCase):
             return_value=[
                 SimpleNamespace(
                     peer_addr="192.0.2.1",
-                    peer=SimpleNamespace(peer_state=SimpleNamespace(name="ESTABLISHED")),
+                    peer=SimpleNamespace(
+                        peer_state=SimpleNamespace(name="ESTABLISHED")
+                    ),
                 )
             ]
         )
@@ -207,7 +210,7 @@ class RbbSrv6VerifyTaskTest(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         )
-        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):
+        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):  # noqa: SIM117
             with self.assertRaisesRegex(TestCaseFailure, "not Established"):
                 await task.run(
                     {
@@ -247,7 +250,7 @@ class RbbSrv6VerifyTaskTest(unittest.IsolatedAsyncioTestCase):
         task = RbbSrv6VerifyTask(hostname="rbb-r1", logger=MagicMock())
         driver = self._driver("")
         driver.async_get_fib_table_entries_all = AsyncMock(return_value=[])
-        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):
+        with patch(_VERIFY_PATH, new_callable=AsyncMock, return_value=driver):  # noqa: SIM117
             with self.assertRaisesRegex(TestCaseFailure, "absent from the FBOSS FIB"):
                 await task.run(
                     {
@@ -317,7 +320,7 @@ class RbbSrv6DirectRouteTaskTest(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         task = RbbSrv6DirectRouteTask(hostname="rbb-r1", logger=MagicMock())
-        with patch(_DIRECT_PATH, new_callable=AsyncMock) as get_driver:
+        with patch(_DIRECT_PATH, new_callable=AsyncMock) as get_driver:  # noqa: SIM117
             with self.assertRaisesRegex(ValueError, "must be a JSON boolean"):
                 await task.run(
                     {
@@ -350,7 +353,7 @@ class RbbSrv6DirectRouteTaskTest(unittest.IsolatedAsyncioTestCase):
     async def test_fboss_install_requires_explicit_srv6_segments(self) -> None:
         task = RbbSrv6DirectRouteTask(hostname="rbb-r1", logger=MagicMock())
         driver = MagicMock()
-        with patch(_DIRECT_PATH, new_callable=AsyncMock, return_value=driver):
+        with patch(_DIRECT_PATH, new_callable=AsyncMock, return_value=driver):  # noqa: SIM117
             with self.assertRaisesRegex(ValueError, "srv6_segments"):
                 await task.run(
                     {
@@ -362,7 +365,7 @@ class RbbSrv6DirectRouteTaskTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejects_ipv4_prefix(self) -> None:
         task = RbbSrv6DirectRouteTask(hostname="rbb-r1", logger=MagicMock())
-        with patch(_DIRECT_PATH, new_callable=AsyncMock, return_value=MagicMock()):
+        with patch(_DIRECT_PATH, new_callable=AsyncMock, return_value=MagicMock()):  # noqa: SIM117
             with self.assertRaisesRegex(ValueError, "prefix must be IPv6"):
                 await task.run(
                     {
@@ -423,13 +426,17 @@ class RbbSrv6CounterDeltaTaskTest(unittest.IsolatedAsyncioTestCase):
             await self._task(shared).run(
                 {"hostname": "rbb-r1", "action": "snapshot", **spec}
             )
-        with patch(
-            _COUNTER_PATH, new_callable=AsyncMock, return_value=self._driver("out 500")
+        with (
+            patch(
+                _COUNTER_PATH,
+                new_callable=AsyncMock,
+                return_value=self._driver("out 500"),
+            ),
+            self.assertRaises(TestCaseFailure),
         ):
-            with self.assertRaises(TestCaseFailure):
-                await self._task(shared).run(
-                    {"hostname": "rbb-r1", "action": "assert", **spec}
-                )
+            await self._task(shared).run(
+                {"hostname": "rbb-r1", "action": "assert", **spec}
+            )
 
     async def test_snapshot_fails_when_regex_does_not_match(self) -> None:
         spec = {
@@ -437,15 +444,17 @@ class RbbSrv6CounterDeltaTaskTest(unittest.IsolatedAsyncioTestCase):
             "counter_regex": r"out\D*(\d+)",
             "direction": "encap",
         }
-        with patch(
-            _COUNTER_PATH,
-            new_callable=AsyncMock,
-            return_value=self._driver("counter unavailable"),
+        with (
+            patch(
+                _COUNTER_PATH,
+                new_callable=AsyncMock,
+                return_value=self._driver("counter unavailable"),
+            ),
+            self.assertRaisesRegex(TestCaseFailure, "did not match"),
         ):
-            with self.assertRaisesRegex(TestCaseFailure, "did not match"):
-                await self._task({}).run(
-                    {"hostname": "rbb-r1", "action": "snapshot", **spec}
-                )
+            await self._task({}).run(
+                {"hostname": "rbb-r1", "action": "snapshot", **spec}
+            )
 
     async def test_invalid_action_raises(self) -> None:
         with self.assertRaises(ValueError):
@@ -459,7 +468,7 @@ class RbbSrv6CounterDeltaTaskTest(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_assert_rejects_non_positive_minimum_before_device_read(self) -> None:
-        with patch(_COUNTER_PATH, new_callable=AsyncMock) as get_driver:
+        with patch(_COUNTER_PATH, new_callable=AsyncMock) as get_driver:  # noqa: SIM117
             with self.assertRaisesRegex(ValueError, "at least 1"):
                 await self._task({}).run(
                     {
@@ -613,19 +622,11 @@ class BgpEdgeConfigHelperTest(unittest.TestCase):
                 local_addr="2001:db8:a:10::1",
             )
         self.assertEqual(
-            sum(
-                1
-                for p in cfg["peers"]
-                if p["peer_addr"] == "2001:db8:a:10::2"
-            ),
+            sum(1 for p in cfg["peers"] if p["peer_addr"] == "2001:db8:a:10::2"),
             1,
         )
         self.assertEqual(
-            sum(
-                1
-                for pg in cfg["peer_groups"]
-                if pg["name"] == EDGE_EBGP_PEER_GROUP
-            ),
+            sum(1 for pg in cfg["peer_groups"] if pg["name"] == EDGE_EBGP_PEER_GROUP),
             1,
         )
 
@@ -647,9 +648,7 @@ class BgpEdgeConfigHelperTest(unittest.TestCase):
         group = next(
             pg for pg in cfg["peer_groups"] if pg["name"] == EDGE_EBGP_PEER_GROUP
         )
-        peer = next(
-            p for p in cfg["peers"] if p["peer_addr"] == "2001:db8:a:10::2"
-        )
+        peer = next(p for p in cfg["peers"] if p["peer_addr"] == "2001:db8:a:10::2")
         self.assertEqual(group["remote_as_4_byte"], 64513)
         self.assertEqual(group["bgp_peer_timers"]["hold_time_seconds"], 90)
         self.assertEqual(peer["local_addr"], "2001:db8:a:10::1")
@@ -712,7 +711,7 @@ class RbbEdgeEbgpTaskTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_action_raises(self) -> None:
         task = RbbEdgeEbgpTask(hostname="rbb-r2", logger=MagicMock())
-        with patch(_EDGE_PATH, new_callable=AsyncMock, return_value=self._driver()):
+        with patch(_EDGE_PATH, new_callable=AsyncMock, return_value=self._driver()):  # noqa: SIM117
             with self.assertRaises(ValueError):
                 await task.run({"hostname": "rbb-r2", "action": "bogus"})
 
@@ -725,9 +724,7 @@ class RbbEdgeEbgpTaskTest(unittest.IsolatedAsyncioTestCase):
         agent_raw = _json.dumps(
             {
                 "sw": {
-                    "interfaces": [
-                        {"intfID": 2001, "vlanID": 2001, "ipAddresses": []}
-                    ],
+                    "interfaces": [{"intfID": 2001, "vlanID": 2001, "ipAddresses": []}],
                     "vlans": [{"id": 2001, "ipAddresses": []}],
                     "vlanPorts": [{"vlanID": 2001, "logicalPort": 1}],
                     "ports": [
@@ -743,24 +740,31 @@ class RbbEdgeEbgpTaskTest(unittest.IsolatedAsyncioTestCase):
                 }
             }
         )
-        with patch(_EDGE_PATH, new_callable=AsyncMock, return_value=driver), patch(
-            f"{_EDGE_MOD}.async_read_file_or_none",
-            new_callable=AsyncMock,
-            side_effect=[bgp_raw, agent_raw],
-        ), patch(
-            f"{_EDGE_MOD}.async_guard_snapshot_set",
-            new_callable=AsyncMock,
-        ), patch(
-            f"{_EDGE_MOD}.async_backup_before_overwrite",
-            new_callable=AsyncMock,
-            return_value=True,
-        ), patch(
-            f"{_EDGE_MOD}.async_write_json_file",
-            new_callable=AsyncMock,
-        ) as write_json, patch(
-            f"{_EDGE_MOD}.async_apply_backup_metadata",
-            new_callable=AsyncMock,
-        ) as preserve_metadata:
+        with (
+            patch(_EDGE_PATH, new_callable=AsyncMock, return_value=driver),
+            patch(
+                f"{_EDGE_MOD}.async_read_file_or_none",
+                new_callable=AsyncMock,
+                side_effect=[bgp_raw, agent_raw],
+            ),
+            patch(
+                f"{_EDGE_MOD}.async_guard_snapshot_set",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                f"{_EDGE_MOD}.async_backup_before_overwrite",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                f"{_EDGE_MOD}.async_write_json_file",
+                new_callable=AsyncMock,
+            ) as write_json,
+            patch(
+                f"{_EDGE_MOD}.async_apply_backup_metadata",
+                new_callable=AsyncMock,
+            ) as preserve_metadata,
+        ):
             # This test deliberately uses a minimal structural fixture for the
             # patch logic. Full generated SwitchConfig schema validation is
             # covered by the edge task's focused apply/restore assertions.
@@ -795,9 +799,7 @@ class RbbEdgeEbgpTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cfg["peers"][0]["next_hop6"], "2001:db8:7fff::")
         # The edge RIF got added to the empty SVI.
         acfg = next(w for w in written if "sw" in w)
-        self.assertIn(
-            "2001:db8:a:10::1/64", acfg["sw"]["interfaces"][0]["ipAddresses"]
-        )
+        self.assertIn("2001:db8:a:10::1/64", acfg["sw"]["interfaces"][0]["ipAddresses"])
         self.assertEqual(acfg["sw"]["vlans"][0]["ipAddresses"], [])
         # The disabled edge port was flipped to ENABLED (state 2).
         self.assertEqual(acfg["sw"]["ports"][0]["state"], 2)
@@ -829,19 +831,21 @@ class RbbEdgeEbgpTaskTest(unittest.IsolatedAsyncioTestCase):
                 }
             }
         )
-        with patch(
-            f"{_EDGE_MOD}.async_read_file_or_none",
-            new_callable=AsyncMock,
-            return_value=agent_raw,
+        with (
+            patch(
+                f"{_EDGE_MOD}.async_read_file_or_none",
+                new_callable=AsyncMock,
+                return_value=agent_raw,
+            ),
+            self.assertRaisesRegex(TestCaseFailure, "operator-owned addresses"),
         ):
-            with self.assertRaisesRegex(TestCaseFailure, "operator-owned addresses"):
-                await task._prepare_edge_rif(
-                    driver,
-                    "rbb-r2",
-                    "2001:db8:a:10::1/64",
-                    "eth1/1/1",
-                    None,
-                )
+            await task._prepare_edge_rif(
+                driver,
+                "rbb-r2",
+                "2001:db8:a:10::1/64",
+                "eth1/1/1",
+                None,
+            )
 
     async def test_edge_rif_preserves_preconfigured_dual_stack_interface(
         self,
@@ -897,7 +901,7 @@ class RbbEdgeEbgpTaskTest(unittest.IsolatedAsyncioTestCase):
         task = RbbEdgeEbgpTask(hostname="rbb-r2", logger=MagicMock())
         driver = self._driver()
         driver.async_run_cmd_on_shell = AsyncMock(return_value="1000\n")
-        with patch(_EDGE_PATH, new_callable=AsyncMock, return_value=driver):
+        with patch(_EDGE_PATH, new_callable=AsyncMock, return_value=driver):  # noqa: SIM117
             with self.assertRaisesRegex(TestCaseFailure, "requires a root SSH"):
                 await task.run(
                     {
@@ -920,8 +924,10 @@ class RbbEdgeEbgpTaskTest(unittest.IsolatedAsyncioTestCase):
             return "LoadState=loaded\nActiveState=inactive\n"
 
         driver.async_run_cmd_on_shell = AsyncMock(side_effect=command_result)
-        with patch(_EDGE_PATH, new_callable=AsyncMock, return_value=driver):
-            with self.assertRaisesRegex(TestCaseFailure, "already be loaded and active"):
+        with patch(_EDGE_PATH, new_callable=AsyncMock, return_value=driver):  # noqa: SIM117
+            with self.assertRaisesRegex(
+                TestCaseFailure, "already be loaded and active"
+            ):
                 await task.run(
                     {
                         "hostname": "rbb-r2",
@@ -936,7 +942,7 @@ class RbbEdgeEbgpTaskTest(unittest.IsolatedAsyncioTestCase):
     async def test_apply_rejects_string_boolean_parameters(self) -> None:
         task = RbbEdgeEbgpTask(hostname="rbb-r2", logger=MagicMock())
         driver = self._driver()
-        with patch(_EDGE_PATH, new_callable=AsyncMock, return_value=driver):
+        with patch(_EDGE_PATH, new_callable=AsyncMock, return_value=driver):  # noqa: SIM117
             with self.assertRaisesRegex(ValueError, "force must be a JSON boolean"):
                 await task.run(
                     {

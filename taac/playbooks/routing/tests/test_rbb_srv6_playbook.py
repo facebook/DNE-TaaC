@@ -7,10 +7,11 @@ import unittest
 from unittest import mock
 
 from taac.health_check.health_check import types as hc_types
+from taac.test_as_a_config.types import StepName
+
 from taac.playbooks.routing.factories.qual_rbb.rbb_srv6_playbook import (
     create_rbb_srv6_3_usids_playbook,
 )
-from taac.test_as_a_config.types import StepName
 from taac.testconfigs.routing.util import bgp_rbb_constants as C
 from taac.testconfigs.routing.util.bgp_rbb_scenario_profiles import (
     SRV6_3_USIDS_PROFILE,

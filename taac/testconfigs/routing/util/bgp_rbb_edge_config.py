@@ -7,7 +7,7 @@ from __future__ import annotations
 import ipaddress
 import typing as t
 
-_DEFAULT_TIMERS: t.Dict[str, int] = {
+_DEFAULT_TIMERS: dict[str, int] = {
     "hold_time_seconds": 30,
     "keep_alive_seconds": 10,
     "out_delay_seconds": 3,
@@ -32,11 +32,11 @@ EDGE_EBGP_PEER_GROUP: str = "RBB-IXIA-EDGE-EBGP"
 
 
 def enable_ipv6_afi_on_ibgp(
-    config: t.Dict[str, t.Any],
+    config: dict[str, t.Any],
     *,
-    ibgp_next_hop6: t.Optional[str] = None,
-    ibgp_peer_addr: t.Optional[str] = None,
-) -> t.Dict[str, t.Any]:
+    ibgp_next_hop6: str | None = None,
+    ibgp_peer_addr: str | None = None,
+) -> dict[str, t.Any]:
     """Turn on v6 AFI for a safely selected iBGP group and set its v6 next-hop.
 
     An iBGP peer group is one whose ``remote_as_4_byte`` equals the box's
@@ -59,9 +59,7 @@ def enable_ipv6_afi_on_ibgp(
         except ValueError as exc:
             raise ValueError(f"invalid iBGP IPv6 next-hop {nh6!r}") from exc
         if parsed_nh6.version != 6 or parsed_nh6.is_unspecified:
-            raise ValueError(
-                f"iBGP next-hop {nh6!r} must be a usable IPv6 address"
-            )
+            raise ValueError(f"iBGP next-hop {nh6!r} must be a usable IPv6 address")
     all_ibgp_groups = [
         pg
         for pg in config.get("peer_groups", [])
@@ -77,20 +75,14 @@ def enable_ipv6_afi_on_ibgp(
     ]
     if ibgp_peer_addr:
         try:
-            requested_peer = str(
-                ipaddress.ip_address(_strip_len(ibgp_peer_addr))
-            )
+            requested_peer = str(ipaddress.ip_address(_strip_len(ibgp_peer_addr)))
         except ValueError as exc:
-            raise ValueError(
-                f"invalid requested iBGP peer {ibgp_peer_addr!r}"
-            ) from exc
-        matching_peers: t.List[t.Dict[str, t.Any]] = []
+            raise ValueError(f"invalid requested iBGP peer {ibgp_peer_addr!r}") from exc
+        matching_peers: list[dict[str, t.Any]] = []
         for peer in all_ibgp_peers:
             try:
                 candidate = str(
-                    ipaddress.ip_address(
-                        _strip_len(str(peer.get("peer_addr") or ""))
-                    )
+                    ipaddress.ip_address(_strip_len(str(peer.get("peer_addr") or "")))
                 )
             except ValueError:
                 continue
@@ -122,18 +114,14 @@ def enable_ipv6_afi_on_ibgp(
     if not ibgp_peers:
         raise ValueError("BGP config has no iBGP peer to enable for IPv6")
     if nh6 is None:
-        unusable_peers: t.List[str] = []
+        unusable_peers: list[str] = []
         for peer in ibgp_peers:
             current = _strip_len(str(peer.get("next_hop6") or ""))
             try:
                 parsed = ipaddress.ip_address(current)
             except ValueError:
                 parsed = None
-            if (
-                parsed is None
-                or parsed.version != 6
-                or parsed.is_unspecified
-            ):
+            if parsed is None or parsed.version != 6 or parsed.is_unspecified:
                 unusable_peers.append(str(peer.get("peer_addr") or "<unknown>"))
         if unusable_peers:
             raise ValueError(
@@ -151,7 +139,7 @@ def enable_ipv6_afi_on_ibgp(
 
 
 def add_edge_ebgp_peer(
-    config: t.Dict[str, t.Any],
+    config: dict[str, t.Any],
     *,
     peer_addr: str,
     remote_as: int,
@@ -159,7 +147,7 @@ def add_edge_ebgp_peer(
     peer_group_name: str = EDGE_EBGP_PEER_GROUP,
     description: str = "IXIA edge eBGP peer",
     hold_time: int = 30,
-) -> t.Dict[str, t.Any]:
+) -> dict[str, t.Any]:
     """Add an eBGP peer group + peer toward one IXIA emulated router, in place.
 
     Idempotent: a peer group/peer already owned by this RBB group is converged

@@ -33,6 +33,7 @@ from taac.constants import TestCaseFailure
 from taac.driver.driver_constants import FbossSystemctlServiceName
 from taac.tasks.base_task import BaseTask
 from taac.tasks.rbb_edge_config_utils import (
+    EDGE_BACKUP_SUFFIX,
     async_apply_backup_metadata,
     async_backup_before_overwrite,
     async_discard_backup,
@@ -40,7 +41,6 @@ from taac.tasks.rbb_edge_config_utils import (
     async_read_file_or_none,
     async_restore_backup,
     async_write_json_file,
-    EDGE_BACKUP_SUFFIX,
 )
 from taac.testconfigs.routing.util import bgp_rbb_constants as C
 from taac.testconfigs.routing.util.bgp_rbb_bootstrap_config import (
@@ -68,15 +68,15 @@ class RbbEdgeEbgpTask(BaseTask):
 
     def __init__(
         self,
-        hostname: t.Optional[str] = None,
-        description: t.Optional[str] = None,
-        ixia: t.Optional[t.Any] = None,
-        logger: t.Optional[ConsoleFileLogger] = None,
-        shared_data: t.Optional[t.Dict[t.Any, t.Any]] = None,
+        hostname: str | None = None,
+        description: str | None = None,
+        ixia: t.Any | None = None,
+        logger: ConsoleFileLogger | None = None,
+        shared_data: dict[t.Any, t.Any] | None = None,
     ) -> None:
         super().__init__(hostname, description, ixia, logger, shared_data)
 
-    async def run(self, params: t.Dict[str, t.Any]) -> None:
+    async def run(self, params: dict[str, t.Any]) -> None:
         """Apply or restore the DUT-side edge eBGP config.
 
         params:
@@ -104,9 +104,7 @@ class RbbEdgeEbgpTask(BaseTask):
                 f"rbb_edge_ebgp 'action' must be {_APPLY!r} or {_RESTORE!r}, "
                 f"got {action!r}"
             )
-        validate_bootstrap_device_paths(
-            (C.AGENT_CONFIG_PATH, C.BGP_CONFIG_PATH)
-        )
+        validate_bootstrap_device_paths((C.AGENT_CONFIG_PATH, C.BGP_CONFIG_PATH))
 
         driver = await async_get_device_driver(hostname)
         await self._require_root(driver, hostname)
@@ -125,10 +123,12 @@ class RbbEdgeEbgpTask(BaseTask):
             )
         force = params.get("force", False)
         if not isinstance(force, bool):
-            raise ValueError("rbb_edge_ebgp force must be a JSON boolean")
+            raise ValueError(  # noqa: TRY004
+                "rbb_edge_ebgp force must be a JSON boolean"
+            )
         enable_v6 = params.get("enable_ipv6_afi", False)
         if not isinstance(enable_v6, bool):
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004
                 "rbb_edge_ebgp enable_ipv6_afi must be a JSON boolean"
             )
         try:
@@ -146,12 +146,10 @@ class RbbEdgeEbgpTask(BaseTask):
             raise ValueError("rbb_edge_ebgp peer/local addresses must differ")
         try:
             if isinstance(remote_as, bool):
-                raise ValueError
+                raise ValueError  # noqa: TRY004
             remote_as_value = int(remote_as)
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "rbb_edge_ebgp edge_remote_as must be an integer"
-            ) from exc
+            raise ValueError("rbb_edge_ebgp edge_remote_as must be an integer") from exc
         if not 1 <= remote_as_value <= 0xFFFFFFFF:
             raise ValueError("rbb_edge_ebgp edge_remote_as must be 1..4294967295")
         srv6_nexthop = params.get("ibgp_srv6_nexthop")
@@ -182,9 +180,7 @@ class RbbEdgeEbgpTask(BaseTask):
             try:
                 edge_interface = ipaddress.ip_interface(str(edge_rif_cidr))
             except ValueError as exc:
-                raise ValueError(
-                    f"rbb_edge_ebgp invalid edge_rif_cidr: {exc}"
-                ) from exc
+                raise ValueError(f"rbb_edge_ebgp invalid edge_rif_cidr: {exc}") from exc
             if edge_interface.ip != local_ip:
                 raise ValueError(
                     "rbb_edge_ebgp edge_rif_cidr address must equal edge_local_addr"
@@ -205,7 +201,7 @@ class RbbEdgeEbgpTask(BaseTask):
             ibgp_peer_addr=str(ibgp_peer_addr) if ibgp_peer_addr else None,
         )
 
-        agent_cfg: t.Optional[t.Dict[str, t.Any]] = None
+        agent_cfg: dict[str, t.Any] | None = None
         agent_changed = False
         if edge_rif_cidr:
             agent_cfg, agent_changed = await self._prepare_edge_rif(
@@ -228,6 +224,7 @@ class RbbEdgeEbgpTask(BaseTask):
                 BgpConfig,
             )
             from neteng.fboss.switch_config.thrift_types import SwitchConfig
+
             from taac.utils.json_thrift_utils import json_to_thrift
 
             try:
@@ -235,7 +232,7 @@ class RbbEdgeEbgpTask(BaseTask):
                     json_to_thrift(json.dumps(bgp_cfg), BgpConfig)
                 if agent_changed and agent_cfg is not None:
                     json_to_thrift(json.dumps(agent_cfg["sw"]), SwitchConfig)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 raise TestCaseFailure(
                     f"{hostname}: generated edge config does not match the "
                     f"bundled FBOSS/BGP Thrift schema: {exc}"
@@ -266,7 +263,7 @@ class RbbEdgeEbgpTask(BaseTask):
             snapshot_paths.append(C.AGENT_CONFIG_PATH)
         if bgp_changed:
             snapshot_paths.append(C.BGP_CONFIG_PATH)
-        created_snapshots: t.List[str] = []
+        created_snapshots: list[str] = []
         try:
             for path in snapshot_paths:
                 if await async_backup_before_overwrite(
@@ -320,7 +317,7 @@ class RbbEdgeEbgpTask(BaseTask):
                     backup_suffix=EDGE_BACKUP_SUFFIX,
                 )
                 await driver.async_restart_service(FbossSystemctlServiceName.BGP)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             try:
                 await self._restore(driver, hostname)
             except Exception as rollback_exc:  # noqa: BLE001
@@ -361,7 +358,10 @@ class RbbEdgeEbgpTask(BaseTask):
                 if "=" in line:
                     key, value = line.split("=", 1)
                     fields[key.strip()] = value.strip()
-            if fields.get("LoadState") != "loaded" or fields.get("ActiveState") != "active":
+            if (
+                fields.get("LoadState") != "loaded"
+                or fields.get("ActiveState") != "active"
+            ):
                 raise TestCaseFailure(
                     f"{hostname}: --setup-dut-edges requires {service.value} to "
                     "already be loaded and active; use --setup-duts for a fresh "
@@ -377,9 +377,9 @@ class RbbEdgeEbgpTask(BaseTask):
         remote_as: int,
         local_addr: str,
         enable_v6: bool,
-        srv6_nexthop: t.Optional[str],
-        ibgp_peer_addr: t.Optional[str],
-    ) -> t.Tuple[t.Dict[str, t.Any], bool]:
+        srv6_nexthop: str | None,
+        ibgp_peer_addr: str | None,
+    ) -> tuple[dict[str, t.Any], bool]:
         raw = await async_read_file_or_none(driver, C.BGP_CONFIG_PATH)
         if not raw:
             raise TestCaseFailure(
@@ -414,9 +414,9 @@ class RbbEdgeEbgpTask(BaseTask):
         driver: t.Any,
         hostname: str,
         cidr: str,
-        port_name: t.Optional[str],
-        intf_id: t.Optional[int],
-    ) -> t.Tuple[t.Dict[str, t.Any], bool]:
+        port_name: str | None,
+        intf_id: int | None,
+    ) -> tuple[dict[str, t.Any], bool]:
         raw = await async_read_file_or_none(driver, C.AGENT_CONFIG_PATH)
         if not raw:
             raise TestCaseFailure(
@@ -451,9 +451,7 @@ class RbbEdgeEbgpTask(BaseTask):
                 f"{hostname}: {C.AGENT_CONFIG_PATH} sw.ports must be a list of objects"
             )
         matching_ports = [
-            candidate
-            for candidate in ports
-            if candidate.get("name") == str(port_name)
+            candidate for candidate in ports if candidate.get("name") == str(port_name)
         ]
         if len(matching_ports) != 1:
             raise TestCaseFailure(
@@ -494,8 +492,7 @@ class RbbEdgeEbgpTask(BaseTask):
             )
         try:
             vlan_owner_count = sum(
-                int(candidate.get("ingressVlan", -1)) == intf_id
-                for candidate in ports
+                int(candidate.get("ingressVlan", -1)) == intf_id for candidate in ports
             )
         except (TypeError, ValueError) as exc:
             raise TestCaseFailure(
@@ -509,7 +506,9 @@ class RbbEdgeEbgpTask(BaseTask):
         interfaces = sw.get("interfaces")
         vlans = sw.get("vlans")
         vlan_ports = sw.get("vlanPorts")
-        if not all(isinstance(items, list) for items in (interfaces, vlans, vlan_ports)):
+        if not all(
+            isinstance(items, list) for items in (interfaces, vlans, vlan_ports)
+        ):
             raise TestCaseFailure(
                 f"{hostname}: AgentConfig interfaces/vlans/vlanPorts must be lists"
             )

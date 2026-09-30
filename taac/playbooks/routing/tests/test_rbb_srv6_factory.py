@@ -18,15 +18,16 @@ from dataclasses import replace
 from unittest import mock
 
 from ixia.ixia import types as ixia_types
+
 from taac.testconfigs.routing.factories.qual_rbb.rbb_srv6_test_config import (
     _validate_traffic_route_contract,
     create_rbb_srv6_3_usids_test_config,
 )
 from taac.testconfigs.routing.util import bgp_rbb_constants as C
 from taac.testconfigs.routing.util.bgp_rbb_scenario_profiles import (
+    SRV6_3_USIDS_PROFILE,
     srv6_decap_counter_spec,
     srv6_encap_counter_spec,
-    SRV6_3_USIDS_PROFILE,
     verify_core_links_up_spec,
     verify_openr_adjacency_spec,
     verify_pc162_global_ipv6_spec,
@@ -83,9 +84,7 @@ class ScenarioBuilderTest(unittest.TestCase):
         # show_cmd greps the tail prefix's route-details block. The slash in the
         # prefix is escaped for the sed address regex (203.0.113.0\/24), so assert
         # on the network-address portion, which appears verbatim.
-        self.assertIn(
-            SRV6_3_USIDS_PROFILE.tail_prefix.split("/")[0], te["show_cmd"]
-        )
+        self.assertIn(SRV6_3_USIDS_PROFILE.tail_prefix.split("/")[0], te["show_cmd"])
         bgpd = verify_route_owner_bgpd_spec(SRV6_3_USIDS_PROFILE)
         self.assertIn(C.ROUTE_OWNER_BGPD, bgpd["expect_contains"])
         self.assertIn(C.ROUTE_OWNER_TE_AGENT, bgpd["expect_absent"])
@@ -175,8 +174,7 @@ class GenericDefaultsTest(unittest.TestCase):
         # The generic direct route is the exact first IXIA tail prefix.
         self.assertEqual(
             C.TAIL_DEST_PREFIX,
-            f"{C.IXIA_TAIL_ADVERTISED_PREFIX}/"
-            f"{C.IXIA_TAIL_ADVERTISED_PREFIX_LEN}",
+            f"{C.IXIA_TAIL_ADVERTISED_PREFIX}/{C.IXIA_TAIL_ADVERTISED_PREFIX_LEN}",
         )
 
     def test_ixia_edge_defaults_are_documentation_range(self) -> None:
@@ -201,9 +199,7 @@ class GenericDefaultsTest(unittest.TestCase):
 
     def test_locator_token_derived_from_locator(self) -> None:
         self.assertEqual(C.locator_token("2001:db8:6::/48"), "2001:db8:6:")
-        self.assertEqual(
-            C.locator_token("2001:db8:6:1234::/48"), "2001:db8:6:"
-        )
+        self.assertEqual(C.locator_token("2001:db8:6:1234::/48"), "2001:db8:6:")
         # The committed token matches the committed (generic) locator.
         self.assertEqual(C.SRV6_LOCATOR_TOKEN, C.locator_token(C.SRV6_LOCATOR))
 
@@ -226,27 +222,19 @@ class GenericDefaultsTest(unittest.TestCase):
 
     def test_pack_usids_rejects_ambiguous_or_foreign_values(self) -> None:
         with self.assertRaisesRegex(ValueError, "one 16-bit function"):
-            C.pack_usid_container(
-                "2001:db8::/32", ("2001:db8:27cc:1::",)
-            )
+            C.pack_usid_container("2001:db8::/32", ("2001:db8:27cc:1::",))
         with self.assertRaisesRegex(ValueError, "outside"):
-            C.pack_usid_container(
-                "2001:db8::/32", ("2001:db9:27cc::",)
-            )
+            C.pack_usid_container("2001:db8::/32", ("2001:db9:27cc::",))
 
 
 class RbbTestConfigStructureTest(unittest.TestCase):
     def test_tc1_rejects_route_and_traffic_prefix_mismatch(self) -> None:
-        mismatched = replace(
-            SRV6_3_USIDS_PROFILE, tail_prefix="2001:db8:dead::/64"
-        )
+        mismatched = replace(SRV6_3_USIDS_PROFILE, tail_prefix="2001:db8:dead::/64")
         with self.assertRaisesRegex(ValueError, "must equal"):
             _validate_traffic_route_contract(mismatched, include_traffic=True)
 
     def test_ixia_route_pool_must_start_on_network_boundary(self) -> None:
-        with mock.patch.object(
-            C, "IXIA_TAIL_ADVERTISED_PREFIX", "2001:db8:beef::1"
-        ):
+        with mock.patch.object(C, "IXIA_TAIL_ADVERTISED_PREFIX", "2001:db8:beef::1"):  # noqa: SIM117
             with self.assertRaisesRegex(ValueError, "not a /64 network address"):
                 _validate_traffic_route_contract(
                     SRV6_3_USIDS_PROFILE, include_traffic=True
@@ -360,8 +348,9 @@ class RbbTestConfigStructureTest(unittest.TestCase):
 
     def test_dut_bootstrap_is_opt_in_and_precedes_edge_overlay(self) -> None:
         topology = _generic_topology()
-        with mock.patch.object(C, "SETUP_DUTS_ENABLED", True), mock.patch.object(
-            C, "EDGE_EBGP_ENABLED", True
+        with (
+            mock.patch.object(C, "SETUP_DUTS_ENABLED", True),
+            mock.patch.object(C, "EDGE_EBGP_ENABLED", True),
         ):
             config = create_rbb_srv6_3_usids_test_config(
                 topology=topology, include_traffic=True
@@ -380,9 +369,7 @@ class RbbTestConfigStructureTest(unittest.TestCase):
             json.loads(task.params.json_params)
             for task in (config.setup_tasks or [])[:2]
         ]
-        self.assertEqual(
-            [params["role"] for params in bootstrap_params], ["r1", "r2"]
-        )
+        self.assertEqual([params["role"] for params in bootstrap_params], ["r1", "r2"])
         self.assertTrue(all(params["include_traffic"] for params in bootstrap_params))
         self.assertEqual(
             bootstrap_params[0]["core_port_channels"][0]["members"],
@@ -415,13 +402,12 @@ class RbbTestConfigStructureTest(unittest.TestCase):
         params = [
             json.loads(task.params.json_params) for task in (config.setup_tasks or [])
         ]
-        self.assertEqual(
-            [entry["include_traffic"] for entry in params], [False, False]
-        )
+        self.assertEqual([entry["include_traffic"] for entry in params], [False, False])
 
     def test_fresh_image_traffic_requires_edge_setup(self) -> None:
-        with mock.patch.object(C, "SETUP_DUTS_ENABLED", True), mock.patch.object(
-            C, "EDGE_EBGP_ENABLED", False
+        with (  # noqa: SIM117
+            mock.patch.object(C, "SETUP_DUTS_ENABLED", True),
+            mock.patch.object(C, "EDGE_EBGP_ENABLED", False),
         ):
             with self.assertRaisesRegex(ValueError, "requires.*setup-dut-edges"):
                 create_rbb_srv6_3_usids_test_config(
@@ -429,9 +415,10 @@ class RbbTestConfigStructureTest(unittest.TestCase):
                 )
 
     def test_live_traffic_without_explicit_wiring_is_rejected(self) -> None:
-        with mock.patch.dict(os.environ, {"TAAC_CIRCUIT_INFO_PATH": ""}):
+        with mock.patch.dict(os.environ, {"TAAC_CIRCUIT_INFO_PATH": ""}):  # noqa: SIM117
             with self.assertRaises(ValueError):
                 create_rbb_srv6_3_usids_test_config(include_traffic=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,7 +35,7 @@ async def _async_path_kind(driver: t.Any, path: str) -> str:
     return result
 
 
-async def async_read_file_or_none(driver: t.Any, path: str) -> t.Optional[str]:
+async def async_read_file_or_none(driver: t.Any, path: str) -> str | None:
     """Return file contents, or ``None`` only when the file does not exist."""
     if not await driver.async_check_if_file_exists(path):
         return None
@@ -62,7 +62,7 @@ async def async_backup_before_overwrite(
     try:
         backup_kind = await _async_path_kind(driver, backup)
         marker_kind = await _async_path_kind(driver, missing_marker)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise TestCaseFailure(
             f"{hostname}: cannot verify recovery snapshot state for {path}: {exc}"
         ) from exc
@@ -87,7 +87,7 @@ async def async_backup_before_overwrite(
 
     try:
         source_kind = await _async_path_kind(driver, path)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise TestCaseFailure(
             f"{hostname}: cannot determine whether {path} exists before overwrite: "
             f"{exc}"
@@ -107,7 +107,7 @@ async def async_backup_before_overwrite(
             if str(copied or "").strip() != "copied":
                 raise OSError("remote metadata-preserving copy failed")
             snapshot = await driver.async_read_file(backup)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise TestCaseFailure(
                 f"{hostname}: cannot create recovery snapshot {backup}: {exc}"
             ) from exc
@@ -123,7 +123,7 @@ async def async_backup_before_overwrite(
                 _MISSING_MARKER_CONTENT, missing_marker
             )
             marker = await driver.async_read_file(missing_marker)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise TestCaseFailure(
                 f"{hostname}: cannot create recovery marker {missing_marker}: {exc}"
             ) from exc
@@ -145,7 +145,7 @@ async def async_guard_snapshot_set(
     backup_suffix: str = EDGE_BACKUP_SUFFIX,
 ) -> None:
     """Reject stale artifacts across a multi-file edit before snapshotting."""
-    blocked: t.List[str] = []
+    blocked: list[str] = []
     for path in paths:
         backup = path + backup_suffix
         marker = backup + _MISSING_MARKER_SUFFIX
@@ -161,7 +161,7 @@ async def async_guard_snapshot_set(
                 )
             if backup_kind != "absent" or marker_kind != "absent":
                 blocked.append(path)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise TestCaseFailure(
                 f"{hostname}: could not verify recovery snapshot state for "
                 f"{path}: {exc}"
@@ -251,7 +251,7 @@ async def async_restore_backup(
     try:
         backup_kind = await _async_path_kind(driver, backup)
         marker_kind = await _async_path_kind(driver, missing_marker)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise TestCaseFailure(
             f"{hostname}: cannot verify recovery snapshot state for {path}: {exc}"
         ) from exc

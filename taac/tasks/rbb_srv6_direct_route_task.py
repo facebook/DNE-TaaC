@@ -53,7 +53,7 @@ def _build_srv6_next_hop(
             + ", ".join(unsupported)
         )
 
-    kwargs: t.Dict[str, t.Any] = {
+    kwargs: dict[str, t.Any] = {
         "address": source.address,
         "srv6SegmentList": list(segment_addrs),
         "tunnelType": tunnel_type,
@@ -75,9 +75,7 @@ def _build_srv6_next_hop(
     try:
         return next_hop_type(**kwargs)
     except (TypeError, ValueError) as exc:
-        raise TestCaseFailure(
-            "FBOSS client rejected the SRv6 next-hop fields"
-        ) from exc
+        raise TestCaseFailure("FBOSS client rejected the SRv6 next-hop fields") from exc
 
 
 class RbbSrv6DirectRouteTask(BaseTask):
@@ -88,15 +86,15 @@ class RbbSrv6DirectRouteTask(BaseTask):
 
     def __init__(
         self,
-        hostname: t.Optional[str] = None,
-        description: t.Optional[str] = None,
-        ixia: t.Optional[t.Any] = None,
-        logger: t.Optional[ConsoleFileLogger] = None,
-        shared_data: t.Optional[t.Dict[t.Any, t.Any]] = None,
+        hostname: str | None = None,
+        description: str | None = None,
+        ixia: t.Any | None = None,
+        logger: ConsoleFileLogger | None = None,
+        shared_data: dict[t.Any, t.Any] | None = None,
     ) -> None:
         super().__init__(hostname, description, ixia, logger, shared_data)
 
-    async def run(self, params: t.Dict[str, t.Any]) -> None:
+    async def run(self, params: dict[str, t.Any]) -> None:
         """Apply the install or delete action.
 
         params:
@@ -124,7 +122,7 @@ class RbbSrv6DirectRouteTask(BaseTask):
             raise ValueError("rbb_srv6_direct_route requires 'prefix'")
         force_delete = params.get("force_delete", False)
         if not isinstance(force_delete, bool):
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004
                 "rbb_srv6_direct_route 'force_delete' must be a JSON boolean"
             )
 
@@ -148,8 +146,8 @@ class RbbSrv6DirectRouteTask(BaseTask):
         prefix: str,
         client: str,
         *,
-        srv6_segments: t.Optional[t.Sequence[str]] = None,
-        srv6_tunnel_id: t.Optional[str] = None,
+        srv6_segments: t.Sequence[str] | None = None,
+        srv6_tunnel_id: str | None = None,
         force_delete: bool = False,
     ) -> None:
         """Add/withdraw the direct route via FBOSS agent thrift.
@@ -188,7 +186,7 @@ class RbbSrv6DirectRouteTask(BaseTask):
             raise ValueError("rbb_srv6_direct_route prefix must be IPv6")
         net = str(network.network_address)
         plen = network.prefixlen
-        segment_addrs: t.List[t.Any] = []
+        segment_addrs: list[t.Any] = []
         if action == _INSTALL:
             if not srv6_segments:
                 raise ValueError(
@@ -228,16 +226,13 @@ class RbbSrv6DirectRouteTask(BaseTask):
 
         def _matches(route: t.Any) -> bool:
             return (
-                _addr_str(route.dest.ip.addr) == net
-                and route.dest.prefixLength == plen
+                _addr_str(route.dest.ip.addr) == net and route.dest.prefixLength == plen
             )
 
         async with driver.async_agent_client as agent:
             if action == _INSTALL:
                 bgpd_routes = await agent.getRouteTableByClient(bgpd_client_id)
-                target = next(
-                    (route for route in bgpd_routes if _matches(route)), None
-                )
+                target = next((route for route in bgpd_routes if _matches(route)), None)
                 if target is None:
                     raise TestCaseFailure(
                         f"{hostname}: cannot install {client} copy of {prefix}; "
@@ -275,7 +270,7 @@ class RbbSrv6DirectRouteTask(BaseTask):
                     )
                     for nh in target.nextHops
                 ]
-                route_kwargs: t.Dict[str, t.Any] = {
+                route_kwargs: dict[str, t.Any] = {
                     "dest": target.dest,
                     "nextHopAddrs": target.nextHopAddrs,
                     "nextHops": srv6_next_hops,

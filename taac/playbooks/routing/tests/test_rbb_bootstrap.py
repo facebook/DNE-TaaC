@@ -220,9 +220,7 @@ class RbbBootstrapBuilderTest(unittest.TestCase):
             },
             {"defaultCommandLineArgs", "sw"},
         )
-        self.assertEqual(
-            docs.agent["defaultCommandLineArgs"]["enable_lacp"], "true"
-        )
+        self.assertEqual(docs.agent["defaultCommandLineArgs"]["enable_lacp"], "true")
         self.assertEqual(
             docs.agent["defaultCommandLineArgs"]["enable_nexthop_id_manager"],
             "true",
@@ -262,9 +260,7 @@ class RbbBootstrapBuilderTest(unittest.TestCase):
         self.assertEqual([aggregate["key"] for aggregate in aggregates], [161, 162])
         self.assertEqual(aggregates[0]["memberPorts"][0]["memberPortID"], 1)
         self.assertEqual(aggregates[0]["memberPorts"][0]["rate"], 0)
-        self.assertEqual(
-            aggregates[0]["minimumCapacityToUp"], {"linkPercentage": 0.75}
-        )
+        self.assertEqual(aggregates[0]["minimumCapacityToUp"], {"linkPercentage": 0.75})
         self.assertEqual(
             docs.openr["areas"][0]["include_interface_regexes"],
             ["^fboss2001$", "^fboss2002$"],
@@ -315,13 +311,15 @@ class RbbBootstrapBuilderTest(unittest.TestCase):
             {str(0x27D6), str(0x7FFF)},
         )
         self.assertEqual(
-            r2.agent["sw"]["mySidConfig"]["entries"][str(0x27D6)][
-                "adjacency"
-            ]["portName"],
+            r2.agent["sw"]["mySidConfig"]["entries"][str(0x27D6)]["adjacency"][
+                "portName"
+            ],
             "Port-Channel162",
         )
 
-    def test_device_only_tail_route_is_bgpd_originated_with_decap_next_hop(self) -> None:
+    def test_device_only_tail_route_is_bgpd_originated_with_decap_next_hop(
+        self,
+    ) -> None:
         docs = build_bootstrap_documents(
             base_agent=_base_agent(),
             base_bgp=_base_bgp(),
@@ -491,9 +489,7 @@ class RbbBootstrapBuilderTest(unittest.TestCase):
             core_pcs=_core_pcs(),
         )
         selected = next(
-            port
-            for port in docs.agent["sw"]["ports"]
-            if port["name"] == "eth1/1/1"
+            port for port in docs.agent["sw"]["ports"] if port["name"] == "eth1/1/1"
         )
         self.assertEqual(selected["state"], 2)
 
@@ -608,60 +604,70 @@ class RbbDutBootstrapTaskTest(unittest.IsolatedAsyncioTestCase):
             C.BGP_CONFIG_PATH: _base_bgp(),
             C.BGP_POLICY_PATH: policy,
         }
-        with patch(
-            f"{_BOOTSTRAP_MOD}.async_get_device_driver",
-            new_callable=AsyncMock,
-            return_value=driver,
-        ), patch.object(
-            task,
-            "_read_json",
-            new_callable=AsyncMock,
-            side_effect=lambda _driver, _host, path: copy.deepcopy(
-                read_values[path.removesuffix(BOOTSTRAP_BACKUP_SUFFIX)]
+        with (
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
             ),
-        ), patch.object(
-            task,
-            "_active_state",
-            new_callable=AsyncMock,
-            side_effect=(
-                "active",
-                "active",
-                "inactive",
-                "active",
-                "active",
-                "inactive",
+            patch.object(
+                task,
+                "_read_json",
+                new_callable=AsyncMock,
+                side_effect=lambda _driver, _host, path: copy.deepcopy(
+                    read_values[path.removesuffix(BOOTSTRAP_BACKUP_SUFFIX)]
+                ),
             ),
-        ), patch.object(
-            task,
-            "_file_mode",
-            new_callable=AsyncMock,
-            side_effect=("644", "600", "600", "644", "600", "600"),
-        ), patch.object(
-            task,
-            "_file_owner",
-            new_callable=AsyncMock,
-            side_effect=("0:0", "0:0", "0:0", "0:0", "0:0", "0:0"),
-        ), patch.object(
-            task,
-            "_set_file_mode",
-            new_callable=AsyncMock,
-        ), patch.object(
-            task,
-            "_set_file_owner",
-            new_callable=AsyncMock,
-        ), patch(
-            f"{_BOOTSTRAP_MOD}.async_guard_snapshot_set",
-            new_callable=AsyncMock,
-        ), patch(
-            f"{_BOOTSTRAP_MOD}.async_backup_before_overwrite",
-            new_callable=AsyncMock,
-            return_value=True,
-        ), patch(
-            f"{_BOOTSTRAP_MOD}.async_write_json_file",
-            new_callable=AsyncMock,
-        ) as write_json, patch(
-            "taac.utils.json_thrift_utils.json_to_thrift"
-        ) as validate_thrift:
+            patch.object(
+                task,
+                "_active_state",
+                new_callable=AsyncMock,
+                side_effect=(
+                    "active",
+                    "active",
+                    "inactive",
+                    "active",
+                    "active",
+                    "inactive",
+                ),
+            ),
+            patch.object(
+                task,
+                "_file_mode",
+                new_callable=AsyncMock,
+                side_effect=("644", "600", "600", "644", "600", "600"),
+            ),
+            patch.object(
+                task,
+                "_file_owner",
+                new_callable=AsyncMock,
+                side_effect=("0:0", "0:0", "0:0", "0:0", "0:0", "0:0"),
+            ),
+            patch.object(
+                task,
+                "_set_file_mode",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                task,
+                "_set_file_owner",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_guard_snapshot_set",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_backup_before_overwrite",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_write_json_file",
+                new_callable=AsyncMock,
+            ) as write_json,
+            patch("taac.utils.json_thrift_utils.json_to_thrift") as validate_thrift,
+        ):
             await task.run(
                 {
                     "hostname": "rbb-r2",
@@ -681,28 +687,28 @@ class RbbDutBootstrapTaskTest(unittest.IsolatedAsyncioTestCase):
         driver.async_restart_service.assert_any_await(
             FbossSystemctlServiceName.FBOSS_SW_AGENT
         )
-        driver.async_restart_service.assert_any_await(
-            FbossSystemctlServiceName.OPENR
-        )
+        driver.async_restart_service.assert_any_await(FbossSystemctlServiceName.OPENR)
         driver.async_start_service.assert_awaited_once_with(
             FbossSystemctlServiceName.BGP
         )
         driver.async_get_interfaces_operational_state.assert_awaited_once()
-        self.assertEqual(
-            driver.async_get_aggregated_interface_status.await_count, 2
-        )
+        self.assertEqual(driver.async_get_aggregated_interface_status.await_count, 2)
         driver.async_get_bgp_sessions.assert_awaited_once()
 
-    async def test_restore_preserves_artifacts_until_services_are_restored(self) -> None:
+    async def test_restore_preserves_artifacts_until_services_are_restored(
+        self,
+    ) -> None:
         task = RbbDutBootstrapTask(hostname="rbb-r1", logger=MagicMock())
         driver = self._driver()
         state = {
             "version": 1,
             "hostname": "rbb-r1",
             "phase": "ready",
-            "changed_paths": list(
-                (C.AGENT_CONFIG_PATH, C.OPENR_CONFIG_PATH, C.BGP_CONFIG_PATH)
-            ),
+            "changed_paths": [
+                C.AGENT_CONFIG_PATH,
+                C.OPENR_CONFIG_PATH,
+                C.BGP_CONFIG_PATH,
+            ],
             "service_active_state": {
                 "agent": "active",
                 "openr": "active",
@@ -719,44 +725,51 @@ class RbbDutBootstrapTaskTest(unittest.IsolatedAsyncioTestCase):
                 C.BGP_CONFIG_PATH: "0:0",
             },
         }
-        with patch(
-            f"{_BOOTSTRAP_MOD}.async_get_device_driver",
-            new_callable=AsyncMock,
-            return_value=driver,
-        ), patch(
-            f"{_BOOTSTRAP_MOD}.async_read_file_or_none",
-            new_callable=AsyncMock,
-            return_value=json.dumps(state),
-        ), patch(
-            f"{_BOOTSTRAP_MOD}.async_restore_backup",
-            new_callable=AsyncMock,
-            return_value=True,
-        ) as restore, patch(
-            f"{_BOOTSTRAP_MOD}.async_discard_backup",
-            new_callable=AsyncMock,
-        ) as discard, patch(
-            f"{_BOOTSTRAP_MOD}.async_write_json_file",
-            new_callable=AsyncMock,
-        ) as write_json, patch(
-            f"{_BOOTSTRAP_MOD}.async_remove_file",
-            new_callable=AsyncMock,
-        ) as remove, patch.object(
-            task,
-            "_set_file_mode",
-            new_callable=AsyncMock,
-        ) as set_mode, patch.object(
-            task,
-            "_set_file_owner",
-            new_callable=AsyncMock,
-        ) as set_owner:
+        with (
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_read_file_or_none",
+                new_callable=AsyncMock,
+                return_value=json.dumps(state),
+            ),
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_restore_backup",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as restore,
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_discard_backup",
+                new_callable=AsyncMock,
+            ) as discard,
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_write_json_file",
+                new_callable=AsyncMock,
+            ) as write_json,
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_remove_file",
+                new_callable=AsyncMock,
+            ) as remove,
+            patch.object(
+                task,
+                "_set_file_mode",
+                new_callable=AsyncMock,
+            ) as set_mode,
+            patch.object(
+                task,
+                "_set_file_owner",
+                new_callable=AsyncMock,
+            ) as set_owner,
+        ):
             await task.run({"hostname": "rbb-r1", "action": "restore"})
         self.assertEqual(restore.await_count, 3)
         driver.async_stop_service.assert_awaited_once_with(
             FbossSystemctlServiceName.BGP
         )
-        driver.async_restart_service.assert_any_await(
-            FbossSystemctlServiceName.OPENR
-        )
+        driver.async_restart_service.assert_any_await(FbossSystemctlServiceName.OPENR)
         driver.async_agent_config_reload.assert_not_awaited()
         driver.async_restart_service.assert_any_await(
             FbossSystemctlServiceName.FBOSS_SW_AGENT
@@ -791,27 +804,34 @@ class RbbDutBootstrapTaskTest(unittest.IsolatedAsyncioTestCase):
                 C.BGP_CONFIG_PATH: "0:0",
             },
         }
-        with patch(
-            f"{_BOOTSTRAP_MOD}.async_get_device_driver",
-            new_callable=AsyncMock,
-            return_value=driver,
-        ), patch(
-            f"{_BOOTSTRAP_MOD}.async_read_file_or_none",
-            new_callable=AsyncMock,
-            return_value=json.dumps(state),
-        ), patch(
-            f"{_BOOTSTRAP_MOD}.async_restore_backup",
-            new_callable=AsyncMock,
-        ) as restore, patch(
-            f"{_BOOTSTRAP_MOD}.async_discard_backup",
-            new_callable=AsyncMock,
-        ) as discard, patch(
-            f"{_BOOTSTRAP_MOD}.async_write_json_file",
-            new_callable=AsyncMock,
-        ), patch(
-            f"{_BOOTSTRAP_MOD}.async_remove_file",
-            new_callable=AsyncMock,
-        ) as remove:
+        with (
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_read_file_or_none",
+                new_callable=AsyncMock,
+                return_value=json.dumps(state),
+            ),
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_restore_backup",
+                new_callable=AsyncMock,
+            ) as restore,
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_discard_backup",
+                new_callable=AsyncMock,
+            ) as discard,
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_write_json_file",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_remove_file",
+                new_callable=AsyncMock,
+            ) as remove,
+        ):
             await task.run({"hostname": "rbb-r1", "action": "restore"})
 
         restore.assert_not_awaited()
@@ -846,42 +866,46 @@ class RbbDutBootstrapTaskTest(unittest.IsolatedAsyncioTestCase):
         task = RbbDutBootstrapTask(hostname="rbb-r1", logger=MagicMock())
         driver = self._driver()
         driver.async_check_if_file_exists = AsyncMock(return_value=True)
-        with patch(
-            f"{_BOOTSTRAP_MOD}.async_get_device_driver",
-            new_callable=AsyncMock,
-            return_value=driver,
+        with (
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+            self.assertRaisesRegex(Exception, "recovery state already exists"),
         ):
-            with self.assertRaisesRegex(Exception, "recovery state already exists"):
-                await task.run(
-                    {
-                        "hostname": "rbb-r1",
-                        "role": "r1",
-                        "core_port_channels": [
-                            {"name": "port-channel161", "members": ["eth1/1/1"]}
-                        ],
-                    }
-                )
+            await task.run(
+                {
+                    "hostname": "rbb-r1",
+                    "role": "r1",
+                    "core_port_channels": [
+                        {"name": "port-channel161", "members": ["eth1/1/1"]}
+                    ],
+                }
+            )
         driver.async_write_file_on_device.assert_not_awaited()
 
     async def test_non_root_session_is_rejected_before_device_file_access(self) -> None:
         task = RbbDutBootstrapTask(hostname="rbb-r1", logger=MagicMock())
         driver = self._driver()
         driver.async_run_cmd_on_shell = AsyncMock(return_value="1000\n")
-        with patch(
-            f"{_BOOTSTRAP_MOD}.async_get_device_driver",
-            new_callable=AsyncMock,
-            return_value=driver,
+        with (
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+            self.assertRaisesRegex(Exception, "requires a root SSH account"),
         ):
-            with self.assertRaisesRegex(Exception, "requires a root SSH account"):
-                await task.run(
-                    {
-                        "hostname": "rbb-r1",
-                        "role": "r1",
-                        "core_port_channels": [
-                            {"name": "port-channel161", "members": ["eth1/1/1"]}
-                        ],
-                    }
-                )
+            await task.run(
+                {
+                    "hostname": "rbb-r1",
+                    "role": "r1",
+                    "core_port_channels": [
+                        {"name": "port-channel161", "members": ["eth1/1/1"]}
+                    ],
+                }
+            )
         driver.async_check_if_file_exists.assert_not_awaited()
         driver.async_write_file_on_device.assert_not_awaited()
 
@@ -909,24 +933,30 @@ class RbbDutBootstrapTaskTest(unittest.IsolatedAsyncioTestCase):
                 C.BGP_CONFIG_PATH: "0:0",
             },
         }
-        with patch(
-            f"{_BOOTSTRAP_MOD}.async_get_device_driver",
-            new_callable=AsyncMock,
-            return_value=driver,
-        ), patch(
-            f"{_BOOTSTRAP_MOD}.async_read_file_or_none",
-            new_callable=AsyncMock,
-            return_value=json.dumps(state),
-        ), patch(
-            f"{_BOOTSTRAP_MOD}.async_discard_backup",
-            new_callable=AsyncMock,
-        ) as discard, patch(
-            f"{_BOOTSTRAP_MOD}.async_remove_file",
-            new_callable=AsyncMock,
-        ) as remove, patch(
-            f"{_BOOTSTRAP_MOD}.async_restore_backup",
-            new_callable=AsyncMock,
-        ) as restore:
+        with (
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_read_file_or_none",
+                new_callable=AsyncMock,
+                return_value=json.dumps(state),
+            ),
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_discard_backup",
+                new_callable=AsyncMock,
+            ) as discard,
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_remove_file",
+                new_callable=AsyncMock,
+            ) as remove,
+            patch(
+                f"{_BOOTSTRAP_MOD}.async_restore_backup",
+                new_callable=AsyncMock,
+            ) as restore,
+        ):
             await task.run({"hostname": "rbb-r1", "action": "restore"})
         self.assertEqual(discard.await_count, 2)
         remove.assert_awaited_once_with(driver, C.BOOTSTRAP_STATE_PATH)

@@ -46,15 +46,15 @@ class RbbSrv6CounterDeltaTask(BaseTask):
 
     def __init__(
         self,
-        hostname: t.Optional[str] = None,
-        description: t.Optional[str] = None,
-        ixia: t.Optional[t.Any] = None,
-        logger: t.Optional[ConsoleFileLogger] = None,
-        shared_data: t.Optional[t.Dict[t.Any, t.Any]] = None,
+        hostname: str | None = None,
+        description: str | None = None,
+        ixia: t.Any | None = None,
+        logger: ConsoleFileLogger | None = None,
+        shared_data: dict[t.Any, t.Any] | None = None,
     ) -> None:
         super().__init__(hostname, description, ixia, logger, shared_data)
 
-    def _extract(self, output: str, regex: str) -> t.Optional[int]:
+    def _extract(self, output: str, regex: str) -> int | None:
         """Sum every captured integer, or return ``None`` when none matched."""
         total = 0
         found = False
@@ -66,7 +66,7 @@ class RbbSrv6CounterDeltaTask(BaseTask):
                 continue
         return total if found else None
 
-    async def run(self, params: t.Dict[str, t.Any]) -> None:
+    async def run(self, params: dict[str, t.Any]) -> None:
         """Snapshot or assert an SRv6 counter delta.
 
         params:

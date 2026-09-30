@@ -24,10 +24,11 @@ from __future__ import annotations
 
 import typing as t
 
+from taac.test_as_a_config.types import MockDeviceInfo
+
 from taac.abstractions.physical_inventory.physical_inventory import (
     PhysicalInventory,
 )
-from taac.test_as_a_config.types import MockDeviceInfo
 from taac.testconfigs.routing.util import bgp_rbb_constants as C
 from taac.testconfigs.routing.util.bgp_rbb_topology import (
     NodeTopology,
@@ -35,9 +36,7 @@ from taac.testconfigs.routing.util.bgp_rbb_topology import (
 )
 
 
-def _rbb_mock_device_data(
-    device_name: str, hardware: str
-) -> dict[str, MockDeviceInfo]:
+def _rbb_mock_device_data(device_name: str, hardware: str) -> dict[str, MockDeviceInfo]:
     """Synthesize a FBOSS MockDeviceInfo for a lab box (netwhoami is empty).
 
     Field set mirrors the proven EBB lab-box helper; values are FBOSS/RBB
@@ -87,7 +86,7 @@ def _inventory_for(
 
 def build_rbb_inventories(
     topology: RbbTopology,
-) -> t.Tuple[PhysicalInventory, PhysicalInventory]:
+) -> tuple[PhysicalInventory, PhysicalInventory]:
     """Return ``(RBB_R1, RBB_R2)`` PhysicalInventory built from the topology."""
     r1 = _inventory_for(
         topology.r1,

@@ -34,6 +34,8 @@ import re
 import typing as t
 
 from taac.health_check.health_check import types as hc_types
+from taac.test_as_a_config.types import Playbook, PointInTimeHealthCheck, Step
+
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_establish_check,
     create_ixia_packet_loss_check,
@@ -46,30 +48,29 @@ from taac.steps.step_definitions import (
     create_stop_traffic_step,
     create_validation_step,
 )
-from taac.test_as_a_config.types import Playbook, PointInTimeHealthCheck, Step
 from taac.testconfigs.routing.util import bgp_rbb_constants as C
 from taac.testconfigs.routing.util.bgp_rbb_scenario_profiles import (
+    Srv6Profile,
     srv6_decap_counter_spec,
     srv6_encap_counter_spec,
-    Srv6Profile,
     verify_core_links_up_spec,
     verify_openr_adjacency_spec,
     verify_pc162_global_ipv6_spec,
     verify_peer_loopback_learned_spec,
+    verify_remote_ixia_prefix_spec,
     verify_route_owner_bgpd_spec,
     verify_route_owner_te_agent_spec,
-    verify_remote_ixia_prefix_spec,
     verify_srv6_counters_spec,
     verify_srv6_tunnels_spec,
 )
 from taac.testconfigs.routing.util.bgp_rbb_topology import (
-    load_rbb_topology,
     RbbTopology,
+    load_rbb_topology,
     validate_rbb_topology,
 )
 
 
-def _include_traffic(override: t.Optional[bool]) -> bool:
+def _include_traffic(override: bool | None) -> bool:
     """Whether to include the IXIA packet-loss stages/prechecks.
 
     Defaults to off so importing a public example never reserves a chassis.
@@ -82,7 +83,7 @@ def _include_traffic(override: t.Optional[bool]) -> bool:
     return C.INCLUDE_TRAFFIC
 
 
-def _verify_step(hostname: str, spec: t.Dict[str, t.Any]) -> Step:
+def _verify_step(hostname: str, spec: dict[str, t.Any]) -> Step:
     """Wrap a scenario verify spec into an ``rbb_srv6_verify`` task step."""
     params = {"hostname": hostname, **spec}
     return create_run_task_step(
@@ -92,7 +93,7 @@ def _verify_step(hostname: str, spec: t.Dict[str, t.Any]) -> Step:
     )
 
 
-def _counter_step(hostname: str, action: str, spec: t.Dict[str, t.Any]) -> Step:
+def _counter_step(hostname: str, action: str, spec: dict[str, t.Any]) -> Step:
     """Wrap a counter spec into an ``rbb_srv6_counter_delta`` task step."""
     params = {"hostname": hostname, "action": action, **spec}
     return create_run_task_step(
@@ -155,9 +156,7 @@ def _core_links_up_stage(
     )
 
 
-def _openr_stage(
-    r1_hostname: str, r2_hostname: str, topology: RbbTopology
-) -> t.Any:
+def _openr_stage(r1_hostname: str, r2_hostname: str, topology: RbbTopology) -> t.Any:
     """S06/S13 — OpenR up, adjacency, and loopback redistribution.
 
     The shipped ``Openr*HealthCheck`` checks raise ``NotImplementedError`` under
@@ -260,7 +259,7 @@ def _remote_route_stage(r1_hostname: str) -> t.Any:
     )
 
 
-def _prechecks() -> t.List[PointInTimeHealthCheck]:
+def _prechecks() -> list[PointInTimeHealthCheck]:
     # The baseline packet-loss precheck clears stats and asserts the path is
     # already lossless before the staged gates. On a cold bring-up (edge eBGP
     # still converging) it fires first and masks the S16/S17-S18 verdicts, so it
@@ -288,7 +287,7 @@ def _prechecks() -> t.List[PointInTimeHealthCheck]:
     ]
 
 
-def _postchecks() -> t.List[PointInTimeHealthCheck]:
+def _postchecks() -> list[PointInTimeHealthCheck]:
     return [
         create_ixia_packet_loss_check(
             thresholds=[
@@ -333,8 +332,8 @@ def create_rbb_srv6_3_usids_playbook(
     r1_hostname: str = C.R1_HOSTNAME,
     r2_hostname: str = C.R2_HOSTNAME,
     name: str = "bgp_rbb_srv6_3_usids",
-    include_traffic: t.Optional[bool] = None,
-    topology: t.Optional[RbbTopology] = None,
+    include_traffic: bool | None = None,
+    topology: RbbTopology | None = None,
 ) -> Playbook:
     """Full head→mid→tail 3-uSID lifecycle through the required gates.
 

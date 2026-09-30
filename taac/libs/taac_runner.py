@@ -87,8 +87,10 @@ else:
     def render_headline(_report: t.Any) -> str:
         return ""
 
-    def render_report_lines(_report: t.Any) -> t.List[str]:
+    def render_report_lines(_report: t.Any) -> list[str]:
         return []
+
+
 from taac.libs.ixia_candidate import (
     IxiaCandidate,
     normalize_ixia_candidates,
@@ -121,7 +123,7 @@ from taac.steps.all_steps import (  # oss-rewrite (force ShipIt re-export to taa
     NAME_TO_STEP,
     STEP_NAME_TO_INPUT,
 )
-from neteng.test_infra.dne.taac.steps.step import Step, TestbedError
+from taac.steps.step import Step, TestbedError
 from taac.steps.step_definitions import ValidationStep
 from taac.tasks.utils import run_task
 from taac.test_configs import get_test_config
@@ -974,7 +976,7 @@ class TaacRunner:
         task at a time, then surface all failures after every cleanup was
         attempted.
         """
-        errors: t.List[Exception] = []
+        errors: list[Exception] = []
         for task in tasks:
             try:
                 await self.run_tasks((task,))

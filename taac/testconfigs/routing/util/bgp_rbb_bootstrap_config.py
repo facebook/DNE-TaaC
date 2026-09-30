@@ -51,9 +51,9 @@ class NodeBootstrapPlan:
     router_id: str
     loopback_v6: str
     peer_router_id: str
-    core_v4: t.Tuple[str, ...]
-    core_v6: t.Tuple[str, ...]
-    peer_core_v6: t.Tuple[str, ...]
+    core_v4: tuple[str, ...]
+    core_v6: tuple[str, ...]
+    peer_core_v6: tuple[str, ...]
     srv6_source_a: str
     srv6_source_b: str
 
@@ -62,16 +62,18 @@ class NodeBootstrapPlan:
 class BootstrapDocuments:
     """The three documents changed by one bootstrap task."""
 
-    agent: t.Dict[str, t.Any]
-    bgp: t.Dict[str, t.Any]
-    openr: t.Dict[str, t.Any]
+    agent: dict[str, t.Any]
+    bgp: dict[str, t.Any]
+    openr: dict[str, t.Any]
 
 
 def _interface(value: str, *, family: int, prefixlen: int, label: str) -> str:
     try:
         parsed = ipaddress.ip_interface(value)
     except ValueError as exc:
-        raise ValueError(f"{label} is not a valid interface address: {value!r}") from exc
+        raise ValueError(
+            f"{label} is not a valid interface address: {value!r}"
+        ) from exc
     if parsed.version != family or parsed.network.prefixlen != prefixlen:
         raise ValueError(f"{label} must be IPv{family} /{prefixlen}: {value!r}")
     if parsed.ip.is_unspecified or parsed.ip.is_multicast:
@@ -138,9 +140,9 @@ def validate_bootstrap_topology(topology: RbbTopology) -> None:
     VLAN/LAG model without a platform contract would be unsafe.
     """
     validate_rbb_topology(topology, require_ixia=False)
-    errors: t.List[str] = []
+    errors: list[str] = []
     for node in (topology.r1, topology.r2):
-        keys: t.Set[int] = set()
+        keys: set[int] = set()
         for pc in node.core_pcs:
             try:
                 key = port_channel_key(pc.name)
@@ -175,9 +177,7 @@ def _node_plan(role: str, core_count: int) -> NodeBootstrapPlan:
     return NodeBootstrapPlan(
         role=role,
         router_id=_address(router_id, family=4, label=f"{role} router ID"),
-        loopback_v6=_address(
-            loopback_v6, family=6, label=f"{role} IPv6 loopback"
-        ),
+        loopback_v6=_address(loopback_v6, family=6, label=f"{role} IPv6 loopback"),
         peer_router_id=_address(
             peer_router_id, family=4, label=f"{peer_role} router ID"
         ),
@@ -229,10 +229,10 @@ def _validate_address_plan(count: int) -> None:
         raise ValueError("R1 and R2 router IDs must differ")
     if r1.loopback_v6 == r2.loopback_v6:
         raise ValueError("R1 and R2 IPv6 loopbacks must differ")
-    seen_v4: t.Set[ipaddress.IPv4Network] = set()
-    seen_v6: t.Set[ipaddress.IPv6Network] = set()
-    core_v4_addresses: t.Set[ipaddress.IPv4Address] = set()
-    core_v6_addresses: t.Set[ipaddress.IPv6Address] = set()
+    seen_v4: set[ipaddress.IPv4Network] = set()
+    seen_v6: set[ipaddress.IPv6Network] = set()
+    core_v4_addresses: set[ipaddress.IPv4Address] = set()
+    core_v6_addresses: set[ipaddress.IPv6Address] = set()
     for index in range(count):
         left4 = ipaddress.ip_interface(r1.core_v4[index])
         right4 = ipaddress.ip_interface(r2.core_v4[index])
@@ -241,7 +241,9 @@ def _validate_address_plan(count: int) -> None:
         if left4.network != right4.network or left4.ip == right4.ip:
             raise ValueError(f"core{index} IPv4 RIFs must be distinct peers in one /30")
         if left6.network != right6.network or left6.ip == right6.ip:
-            raise ValueError(f"core{index} IPv6 RIFs must be distinct peers in one /127")
+            raise ValueError(
+                f"core{index} IPv6 RIFs must be distinct peers in one /127"
+            )
         if left4.network in seen_v4 or left6.network in seen_v6:
             raise ValueError("each core port-channel needs a unique RIF subnet")
         if left4.ip in (
@@ -309,9 +311,7 @@ def _validate_address_plan(count: int) -> None:
         )
 
     usid_addresses = {
-        ipaddress.IPv6Address(
-            _address(sid, family=6, label=f"SRv6 {name} uSID")
-        )
+        ipaddress.IPv6Address(_address(sid, family=6, label=f"SRv6 {name} uSID"))
         for name, sid in (
             ("head", C.SRV6_USID_HEAD),
             ("mid", C.SRV6_USID_MID),
@@ -352,21 +352,27 @@ def _usid_function(locator: str, sid: str, *, label: str) -> int:
     return function
 
 
-def _indexed(items: t.Any, key: str, *, label: str) -> t.Dict[t.Any, t.Dict[str, t.Any]]:
+def _indexed(items: t.Any, key: str, *, label: str) -> dict[t.Any, dict[str, t.Any]]:
     if not isinstance(items, list):
-        raise ValueError(f"AgentConfig sw.{label} must be a list")
-    result: t.Dict[t.Any, t.Dict[str, t.Any]] = {}
+        raise ValueError(  # noqa: TRY004
+            f"AgentConfig sw.{label} must be a list"
+        )
+    result: dict[t.Any, dict[str, t.Any]] = {}
     for item in items:
         if not isinstance(item, dict) or key not in item:
             raise ValueError(f"AgentConfig sw.{label} contains an invalid entry")
         value = item[key]
         if value in result:
-            raise ValueError(f"AgentConfig sw.{label} contains duplicate {key}={value!r}")
+            raise ValueError(
+                f"AgentConfig sw.{label} contains duplicate {key}={value!r}"
+            )
         result[value] = item
     return result
 
 
-def _virtual_vlan(vlan_id: int, name: str, addresses: t.Sequence[str]) -> t.Dict[str, t.Any]:
+def _virtual_vlan(
+    vlan_id: int, name: str, addresses: t.Sequence[str]
+) -> dict[str, t.Any]:
     return {
         "id": vlan_id,
         "name": name,
@@ -378,7 +384,7 @@ def _virtual_vlan(vlan_id: int, name: str, addresses: t.Sequence[str]) -> t.Dict
 
 def _virtual_interface(
     intf_id: int, addresses: t.Sequence[str], *, is_virtual: bool
-) -> t.Dict[str, t.Any]:
+) -> dict[str, t.Any]:
     return {
         "intfID": intf_id,
         "routerID": 0,
@@ -393,7 +399,10 @@ def _virtual_interface(
 
 
 def _replace_by_id(
-    items: t.List[t.Dict[str, t.Any]], key: str, value: int, replacement: t.Dict[str, t.Any]
+    items: list[dict[str, t.Any]],
+    key: str,
+    value: int,
+    replacement: dict[str, t.Any],
 ) -> None:
     matches = [index for index, item in enumerate(items) if item.get(key) == value]
     if len(matches) > 1:
@@ -410,16 +419,18 @@ def build_agent_config(
     role: str,
     core_pcs: t.Sequence[CorePortChannel],
     include_traffic: bool = False,
-) -> t.Dict[str, t.Any]:
+) -> dict[str, t.Any]:
     """Patch only the RBB logical slice of an installed AgentConfig."""
     if not core_pcs:
         raise ValueError("bootstrap requires at least one core port-channel")
     if not isinstance(include_traffic, bool):
-        raise ValueError("include_traffic must be a boolean")
+        raise ValueError(  # noqa: TRY004
+            "include_traffic must be a boolean"
+        )
     if not isinstance(base.get("platform"), dict) or not isinstance(
         base.get("defaultCommandLineArgs"), dict
     ):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004
             "installed AgentConfig must contain platform and defaultCommandLineArgs"
         )
     cfg = copy.deepcopy(dict(base))
@@ -442,12 +453,14 @@ def build_agent_config(
     )
     sw = cfg.get("sw")
     if not isinstance(sw, dict):
-        raise ValueError("installed AgentConfig must contain a sw object")
+        raise ValueError(  # noqa: TRY004
+            "installed AgentConfig must contain a sw object"
+        )
     ports = _indexed(sw.get("ports"), "name", label="ports")
     ports_by_id = _indexed(sw.get("ports"), "logicalID", label="ports")
-    vlans = t.cast(t.List[t.Dict[str, t.Any]], sw.get("vlans"))
-    interfaces = t.cast(t.List[t.Dict[str, t.Any]], sw.get("interfaces"))
-    vlan_ports = t.cast(t.List[t.Dict[str, t.Any]], sw.get("vlanPorts"))
+    vlans = t.cast(list[dict[str, t.Any]], sw.get("vlans"))
+    interfaces = t.cast(list[dict[str, t.Any]], sw.get("interfaces"))
+    vlan_ports = t.cast(list[dict[str, t.Any]], sw.get("vlanPorts"))
     vlan_by_id = _indexed(vlans, "id", label="vlans")
     interface_by_id = _indexed(interfaces, "intfID", label="interfaces")
     if not isinstance(vlan_ports, list) or any(
@@ -456,11 +469,11 @@ def build_agent_config(
         raise ValueError("AgentConfig sw.vlanPorts must be a list of objects")
     virtual_ids = {C.LOOPBACK_VLAN, C.SRV6_SID_VLAN_A, C.SRV6_SID_VLAN_B}
     try:
-        physical_vlans = {
-            int(port.get("ingressVlan", -1)) for port in ports.values()
-        }
+        physical_vlans = {int(port.get("ingressVlan", -1)) for port in ports.values()}
     except (TypeError, ValueError) as exc:
-        raise ValueError("installed AgentConfig contains an invalid ingressVlan") from exc
+        raise ValueError(
+            "installed AgentConfig contains an invalid ingressVlan"
+        ) from exc
     if physical_vlans & virtual_ids:
         raise ValueError(
             "bootstrap virtual RIF IDs collide with an installed physical port VLAN"
@@ -477,11 +490,11 @@ def build_agent_config(
         )
     plan = _node_plan(role, len(core_pcs))
 
-    desired_aggregates: t.List[t.Dict[str, t.Any]] = []
-    selected_ids: t.Set[int] = set()
-    selected_vlans: t.Set[int] = set()
-    desired_names: t.Set[str] = set()
-    desired_keys: t.Set[int] = set()
+    desired_aggregates: list[dict[str, t.Any]] = []
+    selected_ids: set[int] = set()
+    selected_vlans: set[int] = set()
+    desired_names: set[str] = set()
+    desired_keys: set[int] = set()
     for index, pc in enumerate(core_pcs):
         if len(pc.members) != 1:
             raise ValueError(
@@ -498,7 +511,9 @@ def build_agent_config(
             port_id = int(port["logicalID"])
             vlan_id = int(port["ingressVlan"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(f"core member {member_name!r} has no usable ID/VLAN") from exc
+            raise ValueError(
+                f"core member {member_name!r} has no usable ID/VLAN"
+            ) from exc
         if ports_by_id.get(port_id) is not port:
             raise ValueError(f"core member {member_name!r} has an ambiguous logicalID")
         port_type = port.get("portType")
@@ -509,8 +524,7 @@ def build_agent_config(
             or port.get("routable") is not True
         ):
             raise ValueError(
-                f"core member {member_name!r} must be a routable FBOSS "
-                "INTERFACE_PORT"
+                f"core member {member_name!r} must be a routable FBOSS INTERFACE_PORT"
             )
         if not 1 <= vlan_id <= 4094:
             raise ValueError(
@@ -527,7 +541,9 @@ def build_agent_config(
                 f"core member {member_name!r} has unsupported state {port_state}"
             )
         if port_id in selected_ids or vlan_id in selected_vlans:
-            raise ValueError("core members must resolve to distinct logical IDs and VLANs")
+            raise ValueError(
+                "core members must resolve to distinct logical IDs and VLANs"
+            )
         selected_ids.add(port_id)
         selected_vlans.add(vlan_id)
         ingress_vlan_owners = [
@@ -542,7 +558,11 @@ def build_agent_config(
             )
         vlan = vlan_by_id.get(vlan_id)
         interface = interface_by_id.get(vlan_id)
-        if vlan is None or interface is None or int(interface.get("vlanID", -1)) != vlan_id:
+        if (
+            vlan is None
+            or interface is None
+            or int(interface.get("vlanID", -1)) != vlan_id
+        ):
             raise ValueError(
                 f"core member {member_name!r} needs existing VLAN/interface {vlan_id}"
             )
@@ -552,9 +572,7 @@ def build_agent_config(
                 "preconfigured workflow without --setup-duts"
             )
         vlan_port_entries = [
-            entry
-            for entry in vlan_ports
-            if int(entry.get("vlanID", -1)) == vlan_id
+            entry for entry in vlan_ports if int(entry.get("vlanID", -1)) == vlan_id
         ]
         if (
             len(vlan_port_entries) != 1
@@ -600,19 +618,23 @@ def build_agent_config(
 
     existing_aggregates = sw.get("aggregatePorts")
     if not isinstance(existing_aggregates, list):
-        raise ValueError("AgentConfig sw.aggregatePorts must be a list")
-    preserved_aggregates: t.List[t.Dict[str, t.Any]] = []
+        raise ValueError(  # noqa: TRY004
+            "AgentConfig sw.aggregatePorts must be a list"
+        )
+    preserved_aggregates: list[dict[str, t.Any]] = []
     for aggregate in existing_aggregates:
         if not isinstance(aggregate, dict):
-            raise ValueError("AgentConfig sw.aggregatePorts contains an invalid entry")
+            raise ValueError(  # noqa: TRY004
+                "AgentConfig sw.aggregatePorts contains an invalid entry"
+            )
         if not isinstance(aggregate.get("memberPorts", []), list) or any(
-            not isinstance(member, dict)
-            for member in aggregate.get("memberPorts", [])
+            not isinstance(member, dict) for member in aggregate.get("memberPorts", [])
         ):
             raise ValueError("AgentConfig aggregate port has invalid memberPorts")
-        same_owned_slot = aggregate.get("key") in desired_keys or str(
-            aggregate.get("name", "")
-        ).lower() in desired_names
+        same_owned_slot = (
+            aggregate.get("key") in desired_keys
+            or str(aggregate.get("name", "")).lower() in desired_names
+        )
         member_ids = {
             member.get("memberPortID")
             for member in aggregate.get("memberPorts", [])
@@ -655,8 +677,12 @@ def build_agent_config(
 
     adjacency_index = 0 if role == "r1" else len(core_pcs) - 1
     adjacency_sid = C.SRV6_USID_HEAD if role == "r1" else C.SRV6_USID_MID
-    entries: t.Dict[str, t.Any] = {
-        str(_usid_function(C.SRV6_LOCATOR, adjacency_sid, label=f"{role} adjacency uSID")): {
+    entries: dict[str, t.Any] = {
+        str(
+            _usid_function(
+                C.SRV6_LOCATOR, adjacency_sid, label=f"{role} adjacency uSID"
+            )
+        ): {
             "adjacency": {
                 "isV6": True,
                 "portName": desired_aggregates[adjacency_index]["name"],
@@ -668,11 +694,7 @@ def build_agent_config(
     }
     if role == "r2":
         entries[
-            str(
-                _usid_function(
-                    C.SRV6_LOCATOR, C.SRV6_DECAP_SID, label="r2 decap uSID"
-                )
-            )
+            str(_usid_function(C.SRV6_LOCATOR, C.SRV6_DECAP_SID, label="r2 decap uSID"))
         ] = {"decap": {}}
     sw["mySidConfig"] = {
         "locatorPrefix": str(ipaddress.ip_network(C.SRV6_LOCATOR, strict=False)),
@@ -703,8 +725,8 @@ def build_agent_config(
         )
     sw["srv6Tunnels"] = tunnels + [desired_tunnel]
 
-    route_prefix: t.Optional[str] = None
-    route_nh: t.Optional[str] = None
+    route_prefix: str | None = None
+    route_nh: str | None = None
     if role == "r1":
         route_prefix = str(ipaddress.ip_network(C.SRV6_LOCATOR, strict=False))
         route_nh = str(ipaddress.ip_interface(plan.peer_core_v6[0]).ip)
@@ -729,12 +751,13 @@ def build_agent_config(
         for route in routes:
             existing_prefix = route.get("prefix")
             if not isinstance(existing_prefix, str):
-                raise ValueError("AgentConfig static route is missing a string prefix")
-            try:
-                route_collision = (
-                    ipaddress.ip_network(existing_prefix, strict=False)
-                    == ipaddress.ip_network(route_prefix, strict=False)
+                raise ValueError(  # noqa: TRY004
+                    "AgentConfig static route is missing a string prefix"
                 )
+            try:
+                route_collision = ipaddress.ip_network(
+                    existing_prefix, strict=False
+                ) == ipaddress.ip_network(route_prefix, strict=False)
             except ValueError as exc:
                 raise ValueError(
                     f"AgentConfig contains an invalid static route {existing_prefix!r}"
@@ -758,7 +781,7 @@ def build_bgp_config(
     role: str,
     core_count: int,
     originate_tail_prefix: bool = False,
-) -> t.Dict[str, t.Any]:
+) -> dict[str, t.Any]:
     """Converge the image's placeholder bgp.json to one loopback iBGP peer."""
     cfg = copy.deepcopy(dict(base))
     plan = _node_plan(role, core_count)
@@ -770,7 +793,9 @@ def build_bgp_config(
     if not 1 <= C.CORE_IBGP_AS <= 0xFFFFFFFF:
         raise ValueError("TAAC_RBB_CORE_AS must be in 1..4294967295")
     if not isinstance(cfg.get("net_service_config"), dict):
-        raise ValueError("installed bgp.json needs a net_service_config object")
+        raise ValueError(  # noqa: TRY004
+            "installed bgp.json needs a net_service_config object"
+        )
     for field in ("peer_groups", "peers", "networks4", "networks6"):
         # Older stock images emitted every empty repeated field. Newer images
         # omit only the optional peer_groups placeholder; the builder creates
@@ -779,7 +804,9 @@ def build_bgp_config(
             continue
         value = cfg.get(field)
         if not isinstance(value, list):
-            raise ValueError(f"installed bgp.json field {field!r} must be a list")
+            raise ValueError(  # noqa: TRY004
+                f"installed bgp.json field {field!r} must be a list"
+            )
         if value:
             raise ValueError(
                 "installed bgp.json already contains routing state; use the "
@@ -844,7 +871,7 @@ def build_openr_config(
     *,
     role: str,
     core_interface_ids: t.Sequence[int],
-) -> t.Dict[str, t.Any]:
+) -> dict[str, t.Any]:
     """Patch the image's OpenR defaults with exact generated FBOSS RIF names."""
     cfg = copy.deepcopy(dict(base))
     if cfg.get("node_name") != "REPLACE_NODE_NAME":
@@ -854,7 +881,9 @@ def build_openr_config(
         )
     areas = cfg.get("areas")
     if not isinstance(areas, list):
-        raise ValueError("installed openr.conf areas must be a list")
+        raise ValueError(  # noqa: TRY004
+            "installed openr.conf areas must be a list"
+        )
     if not areas:
         # Newer stock images ship an empty fresh-image placeholder instead of
         # a default area. Build the same minimal area which would otherwise be
@@ -879,9 +908,7 @@ def build_openr_config(
     elif len(areas) == 1 and isinstance(areas[0], dict):
         area = areas[0]
     else:
-        raise ValueError(
-            "installed openr.conf must contain zero or one area object"
-        )
+        raise ValueError("installed openr.conf must contain zero or one area object")
     area_id = area.get("area_id")
     if not isinstance(area_id, str) or not area_id:
         raise ValueError("installed openr.conf area_id must be a non-empty string")
@@ -931,7 +958,9 @@ def build_bootstrap_documents(
 ) -> BootstrapDocuments:
     """Build all changed documents; callers validate/write only after return."""
     if not isinstance(include_traffic, bool):
-        raise ValueError("include_traffic must be a boolean")
+        raise ValueError(  # noqa: TRY004
+            "include_traffic must be a boolean"
+        )
     _validate_address_plan(len(core_pcs))
     agent = build_agent_config(
         base_agent,
@@ -939,9 +968,7 @@ def build_bootstrap_documents(
         core_pcs=core_pcs,
         include_traffic=include_traffic,
     )
-    ports_by_name = {
-        str(port.get("name", "")): port for port in agent["sw"]["ports"]
-    }
+    ports_by_name = {str(port.get("name", "")): port for port in agent["sw"]["ports"]}
     core_interface_ids = [
         int(ports_by_name[pc.members[0]]["ingressVlan"]) for pc in core_pcs
     ]
