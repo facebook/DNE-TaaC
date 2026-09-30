@@ -1044,10 +1044,14 @@ def _get_bgp_ebb_full_scale_playbooks(
     nhg_storm_poll_interval_seconds: int = 60,
     nhg_storm_min_eos_samples: int = 6,
     nhg_storm_min_eos_consecutive_samples: int = 3,
+    nhg_storm_target_membership_width: int | None = 25,
     nhg_storm_min_observed_bgp_multiway_memberships: int = (
         EBB_FIBAGENT_BGP_NHG_WATERMARK_HIGH + 1
     ),
     nhg_storm_min_paused_fibagent_samples: int = 1,
+    nhg_storm_min_confirmed_pause_fap_samples: int = 3,
+    nhg_storm_control_plane_sample_interval_seconds: int = 5,
+    nhg_storm_control_plane_read_timeout_seconds: int = 60,
 ) -> list[Playbook]:
     device_config = bound.device_config
     if device_config is None:
@@ -1427,12 +1431,22 @@ def _get_bgp_ebb_full_scale_playbooks(
             nexthop_group_min_consecutive_samples=(
                 nhg_storm_min_eos_consecutive_samples
             ),
+            target_membership_width=nhg_storm_target_membership_width,
             minimum_observed_bgp_multiway_memberships=(
                 nhg_storm_min_observed_bgp_multiway_memberships
             ),
             minimum_paused_fibagent_samples=(nhg_storm_min_paused_fibagent_samples),
+            minimum_confirmed_pause_fap_samples=(
+                nhg_storm_min_confirmed_pause_fap_samples
+            ),
             fibagent_nhg_watermark_high=fibagent_bgp_nhg_watermark_high,
             fibagent_nhg_watermark_low=fibagent_bgp_nhg_watermark_low,
+            control_plane_sample_interval_seconds=(
+                nhg_storm_control_plane_sample_interval_seconds
+            ),
+            control_plane_read_timeout_seconds=(
+                nhg_storm_control_plane_read_timeout_seconds
+            ),
             enable_update_group=enable_update_group,
             bgp_mon_parent_network=bound_bgp_mon_network,
             characterization=OBSERVE_ONLY_ON_DEVICE,
@@ -1470,6 +1484,10 @@ def create_bgp_ebb_full_scale_test_config(  # noqa: C901
     nhg_storm_poll_interval_seconds: int = 60,
     nhg_storm_min_eos_samples: int = 6,
     nhg_storm_min_eos_consecutive_samples: int = 3,
+    nhg_storm_target_membership_width: int | None = 25,
+    nhg_storm_min_confirmed_pause_fap_samples: int = 3,
+    nhg_storm_control_plane_sample_interval_seconds: int = 5,
+    nhg_storm_control_plane_read_timeout_seconds: int = 60,
     fibagent_bgp_nhg_watermark_high: int = EBB_FIBAGENT_BGP_NHG_WATERMARK_HIGH,
     fibagent_bgp_nhg_watermark_low: int = EBB_FIBAGENT_BGP_NHG_WATERMARK_LOW,
     setup_only: bool = False,
@@ -1615,8 +1633,18 @@ def create_bgp_ebb_full_scale_test_config(  # noqa: C901
             nhg_storm_min_eos_consecutive_samples=(
                 nhg_storm_min_eos_consecutive_samples
             ),
+            nhg_storm_target_membership_width=(nhg_storm_target_membership_width),
             nhg_storm_min_observed_bgp_multiway_memberships=(
                 fibagent_bgp_nhg_watermark_high + 1
+            ),
+            nhg_storm_min_confirmed_pause_fap_samples=(
+                nhg_storm_min_confirmed_pause_fap_samples
+            ),
+            nhg_storm_control_plane_sample_interval_seconds=(
+                nhg_storm_control_plane_sample_interval_seconds
+            ),
+            nhg_storm_control_plane_read_timeout_seconds=(
+                nhg_storm_control_plane_read_timeout_seconds
             ),
         )
     if playbooks_selected:

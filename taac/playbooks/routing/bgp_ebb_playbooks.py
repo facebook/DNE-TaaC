@@ -2498,6 +2498,8 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     ] = None,
     nexthop_group_threshold: int = 8192,
     seed: int = 160016,
+    target_membership_width: int | None = None,
+    inactive_paths_per_afi: int | None = None,
     minimum_distinct_memberships_per_afi: int = 750,
     minimum_changed_paths_per_epoch: int = 5_000,
     epoch_count: int = 48,
@@ -2506,7 +2508,10 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     convergence_threshold: int = 600,
     minimum_observed_bgp_multiway_memberships: int = 1001,
     minimum_paused_fibagent_samples: int = 1,
+    minimum_confirmed_pause_fap_samples: int = 3,
     minimum_observed_multiway_groups: int = 1,
+    control_plane_sample_interval_seconds: int = 5,
+    control_plane_read_timeout_seconds: int = 60,
     nexthop_group_poll_interval_seconds: int = 60,
     nexthop_group_min_samples: int = 6,
     nexthop_group_min_consecutive_samples: int = 3,
@@ -2538,8 +2543,8 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
         raise ValueError(
             "CICD-EBB-16 requires one positive target prefix count per AFI"
         )
-    target_prefix_count = t.cast(int, target_prefix_counts[0])
-    inactive_paths_per_afi = 4 * target_prefix_count
+    if inactive_paths_per_afi is None and target_membership_width is None:
+        inactive_paths_per_afi = 4 * t.cast(int, target_prefix_counts[0])
     cpu_characterization, rss_delta = _characterization_profile_configs(
         PHASE_WORKLOAD, characterization, characterization_gates
     )
@@ -2583,6 +2588,8 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
                 min_ecmp_width=2,
                 min_observed_groups=fibagent_nhg_watermark_high,
                 min_observed_multiway_groups=minimum_observed_multiway_groups,
+                min_programmed_groups=fibagent_nhg_watermark_high,
+                max_programmed_groups=fibagent_nhg_watermark_high,
                 min_observed_groups_consecutive_samples=(
                     nexthop_group_min_consecutive_samples
                 ),
@@ -2598,6 +2605,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
                     prefix_pool_scope_regex=prefix_pool_scope_regex,
                     seed=seed,
                     inactive_paths_per_afi=inactive_paths_per_afi,
+                    target_membership_width=target_membership_width,
                     minimum_distinct_memberships_per_afi=(
                         minimum_distinct_memberships_per_afi
                     ),
@@ -2605,8 +2613,18 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
                         minimum_observed_bgp_multiway_memberships
                     ),
                     minimum_paused_fibagent_samples=(minimum_paused_fibagent_samples),
+                    minimum_confirmed_pause_fap_samples=(
+                        minimum_confirmed_pause_fap_samples
+                    ),
                     fibagent_nhg_watermark_high=fibagent_nhg_watermark_high,
                     fibagent_nhg_watermark_low=fibagent_nhg_watermark_low,
+                    enable_control_plane_validation=True,
+                    control_plane_sample_interval_seconds=(
+                        control_plane_sample_interval_seconds
+                    ),
+                    control_plane_read_timeout_seconds=(
+                        control_plane_read_timeout_seconds
+                    ),
                     minimum_changed_paths_per_epoch=minimum_changed_paths_per_epoch,
                     epoch_count=epoch_count,
                     epoch_interval_seconds=epoch_interval_seconds,

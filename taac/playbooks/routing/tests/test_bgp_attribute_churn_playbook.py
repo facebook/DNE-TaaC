@@ -1511,6 +1511,10 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
 
         self.assertFalse(playbook_factory.call_args.kwargs["enable_update_group"])
         self.assertEqual(
+            25,
+            playbook_factory.call_args.kwargs["target_membership_width"],
+        )
+        self.assertEqual(
             _TEST_BGP_MON_PARENT_NETWORK,
             playbook_factory.call_args.kwargs["bgp_mon_parent_network"],
         )
@@ -2060,14 +2064,37 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         self.assertEqual("bgp_nhg_random_storm", payload["custom_step_name"])
         self.assertEqual(_EBB16_IXIA_ITEMS, payload["ixia_items_by_afi"])
         self.assertEqual(3_000, payload["inactive_paths_per_afi"])
+        self.assertIsNone(payload["target_membership_width"])
         self.assertEqual(750, payload["minimum_distinct_memberships_per_afi"])
         self.assertEqual(1001, payload["minimum_observed_bgp_multiway_memberships"])
         self.assertEqual(1000, payload["fibagent_nhg_watermark_high"])
         self.assertEqual(1000, payload["fibagent_nhg_watermark_low"])
+        self.assertTrue(payload["enable_control_plane_validation"])
+        self.assertEqual(3, payload["minimum_confirmed_pause_fap_samples"])
+        self.assertEqual(5, payload["control_plane_sample_interval_seconds"])
+        self.assertEqual(60, payload["control_plane_read_timeout_seconds"])
         self.assertEqual(
             "^(?:PREFIX_POOL_IPV4_EBGP|PREFIX_POOL_IPV6_EBGP)$",
             payload["prefix_pool_scope_regex"],
         )
+        target_width_payload = _step_payload(
+            create_bgp_nhg_random_storm_step(
+                hostname="dut.example.com",
+                ixia_items_by_afi=_EBB16_IXIA_ITEMS,
+                target_membership_width=80,
+                epoch_count=2,
+                epoch_interval_seconds=1,
+            )
+        )
+        self.assertIsNone(target_width_payload["inactive_paths_per_afi"])
+        self.assertEqual(80, target_width_payload["target_membership_width"])
+        with self.assertRaisesRegex(ValueError, "requires exactly one"):
+            create_bgp_nhg_random_storm_step(
+                hostname="dut.example.com",
+                ixia_items_by_afi=_EBB16_IXIA_ITEMS,
+                inactive_paths_per_afi=3_000,
+                target_membership_width=80,
+            )
 
         stage = create_bgp_nhg_random_storm_stage(
             hostname="dut.example.com",
@@ -2084,6 +2111,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             3_000,
             _step_payload(stage.steps[0])["inactive_paths_per_afi"],
         )
+        self.assertIsNone(_step_payload(stage.steps[0])["target_membership_width"])
         self.assertEqual(
             1001,
             _step_payload(stage.steps[0])["minimum_observed_bgp_multiway_memberships"],
@@ -2113,10 +2141,13 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         storm = _step_payload(playbook.stages[0].steps[0])
         self.assertEqual(_EBB16_IXIA_ITEMS, storm["ixia_items_by_afi"])
         self.assertEqual(3_000, storm["inactive_paths_per_afi"])
+        self.assertIsNone(storm["target_membership_width"])
         self.assertEqual(1001, storm["minimum_observed_bgp_multiway_memberships"])
         self.assertEqual(1, storm["minimum_paused_fibagent_samples"])
         self.assertEqual(1000, storm["fibagent_nhg_watermark_high"])
         self.assertEqual(1000, storm["fibagent_nhg_watermark_low"])
+        self.assertTrue(storm["enable_control_plane_validation"])
+        self.assertEqual(3, storm["minimum_confirmed_pause_fap_samples"])
         self.assertEqual(
             "^(?:PREFIX_POOL_IPV4_EBGP|PREFIX_POOL_IPV6_EBGP)$",
             storm["prefix_pool_scope_regex"],
@@ -2143,12 +2174,9 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             epoch_interval_seconds=1,
             soak_duration=1,
         )
-        self.assertEqual(
-            3_000,
-            _step_payload(expanded_playbook.stages[0].steps[0])[
-                "inactive_paths_per_afi"
-            ],
-        )
+        expanded_storm = _step_payload(expanded_playbook.stages[0].steps[0])
+        self.assertEqual(3_000, expanded_storm["inactive_paths_per_afi"])
+        self.assertIsNone(expanded_storm["target_membership_width"])
         self.assertEqual(
             {"ipv4": 750, "ipv6": 750},
             {
@@ -2176,6 +2204,8 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         self.assertEqual(3, nhg_params["min_observed_groups_consecutive_samples"])
         self.assertNotIn("min_bgp_groups", nhg_params)
         self.assertNotIn("min_bgp_groups_consecutive_samples", nhg_params)
+        self.assertEqual(1000, nhg_params["min_programmed_groups"])
+        self.assertEqual(1000, nhg_params["max_programmed_groups"])
         self.assertNotIn("min_bgp_multiway_groups", nhg_params)
         self.assertNotIn("min_bgp_multiway_consecutive_samples", nhg_params)
 
@@ -2212,11 +2242,14 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
 
         self.assertEqual(48, storm["epoch_count"])
         self.assertEqual(25, storm["epoch_interval_seconds"])
-        self.assertEqual(3_000, storm["inactive_paths_per_afi"])
+        self.assertIsNone(storm["inactive_paths_per_afi"])
+        self.assertEqual(25, storm["target_membership_width"])
         self.assertEqual(750, storm["minimum_distinct_memberships_per_afi"])
         self.assertEqual(1001, storm["minimum_observed_bgp_multiway_memberships"])
         self.assertEqual(1000, storm["fibagent_nhg_watermark_high"])
         self.assertEqual(1000, storm["fibagent_nhg_watermark_low"])
+        self.assertTrue(storm["enable_control_plane_validation"])
+        self.assertEqual(3, storm["minimum_confirmed_pause_fap_samples"])
         self.assertEqual(
             {"ipv4": 750, "ipv6": 750},
             {
