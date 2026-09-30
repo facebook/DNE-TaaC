@@ -7137,7 +7137,7 @@ class Ixia:
             _username, password = get_oss_ixia_password()
             return password
 
-        from taac.ixia.internal_credentials import (
+        from taac.internal.ixia_credentials import (
             fetch_ixia_password_internal,
         )
 

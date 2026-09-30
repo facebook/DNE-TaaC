@@ -191,7 +191,7 @@ def fetch_ixia_password() -> str:
         return fetch_ixia_password_oss()
 
     # Lazy import for OSS compatibility - only needed in an internal runtime.
-    from taac.ixia.internal_credentials import (
+    from taac.internal.ixia_credentials import (
         fetch_ixia_password_internal,
     )
 
