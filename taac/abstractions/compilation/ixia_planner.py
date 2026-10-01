@@ -34,6 +34,7 @@ from taac.abstractions.compilation.model import (
     IxiaRouteScaleMode,
     IxiaSelfNextHopRealization,
     IxiaStandardCommunityPlan,
+    IxiaTrafficFlowPlan,
     ResourceId,
 )
 from taac.abstractions.compilation.resource_ids import (
@@ -44,6 +45,7 @@ from taac.abstractions.compilation.resource_ids import (
     ixia_device_group_resource_id,
     ixia_port_resource_id,
     ixia_session_resource_id,
+    ixia_traffic_flow_resource_id,
     link_resource_id,
 )
 from taac.abstractions.ixia_semantics import (
@@ -64,6 +66,7 @@ from taac.abstractions.topology.model import (
     IxiaBgpSessionIntent,
     ResolvedPeer,
     ResolvedPrefixAdvertisementLike,
+    TrafficFlowSpec,
 )
 from taac.abstractions.topology.prefix import (
     NextHopIntent,
@@ -79,6 +82,10 @@ class IxiaPlanningResult:
 
     def __post_init__(self) -> None:
         self.legacy_identity.validate(self.plan.iter_resource_ids())
+
+
+class UnsupportedTrafficFlowIntentError(ValueError):
+    pass
 
 
 @dataclass
@@ -297,6 +304,11 @@ def plan_ixia(
         device_groups=tuple(device_groups),
         bgp_sessions=tuple(sessions),
         advertisements=tuple(advertisements),
+        traffic_flows=_traffic_flow_plans(
+            bound,
+            tuple(device_groups),
+            tuple(advertisements),
+        ),
     )
     return IxiaPlanningResult(
         plan=plan,
@@ -306,6 +318,118 @@ def plan_ixia(
             advertisement_identities=tuple(advertisement_identities),
         ),
     )
+
+
+def _traffic_flow_plans(
+    bound: BoundTopology,
+    device_groups: tuple[IxiaDeviceGroupPlan, ...],
+    advertisements: tuple[IxiaAdvertisementPlan, ...],
+) -> tuple[IxiaTrafficFlowPlan, ...]:
+    flows = (
+        *bound.logical_topology.traffic_flows,
+        *(
+            flow
+            for group in bound.logical_topology.device_groups
+            for flow in group.traffic_flows
+        ),
+    )
+    seen_names: set[str] = set()
+    for flow in flows:
+        if flow.name in seen_names:
+            raise UnsupportedTrafficFlowIntentError(
+                f"duplicate IXIA traffic-flow name {flow.name!r}"
+            )
+        seen_names.add(flow.name)
+    return tuple(
+        _traffic_flow_plan(flow, device_groups, advertisements) for flow in flows
+    )
+
+
+def _traffic_flow_plan(
+    flow: TrafficFlowSpec,
+    device_groups: tuple[IxiaDeviceGroupPlan, ...],
+    advertisements: tuple[IxiaAdvertisementPlan, ...],
+) -> IxiaTrafficFlowPlan:
+    if flow.dst_prefix_pool is not None:
+        raise UnsupportedTrafficFlowIntentError(
+            f"traffic flow {flow.name!r} uses dst_prefix_pool; DICE IXIA "
+            "lowering currently requires an unambiguous dst_dg"
+        )
+    if flow.dst_dg is None:
+        raise UnsupportedTrafficFlowIntentError(
+            f"traffic flow {flow.name!r} has no destination device group"
+        )
+    source = _single_traffic_flow_group(flow.name, flow.src_dg, device_groups)
+    destination_group = _single_traffic_flow_group(
+        flow.name,
+        flow.dst_dg,
+        device_groups,
+    )
+    destination_advertisement = _single_traffic_flow_advertisement(
+        flow.name,
+        flow.dst_dg,
+        destination_group,
+        advertisements,
+    )
+    if flow.rate_bps is not None:
+        raise UnsupportedTrafficFlowIntentError(
+            f"traffic flow {flow.name!r} uses bit-rate pacing, which is not supported"
+        )
+    if flow.rate_percent is None:
+        raise UnsupportedTrafficFlowIntentError(
+            f"traffic flow {flow.name!r} requires an explicit percentage rate"
+        )
+    return IxiaTrafficFlowPlan(
+        resource_id=ixia_traffic_flow_resource_id(flow.name),
+        logical_name=flow.name,
+        source_device_group_id=source.resource_id,
+        destination_advertisement_id=destination_advertisement.resource_id,
+        afi=source.afi,
+        traffic_profile=flow.traffic_profile,
+        rate_percent=flow.rate_percent,
+        rate_bps=flow.rate_bps,
+        frame_size_bytes=flow.frame_size_bytes,
+        bidirectional=flow.bidirectional,
+        enabled=flow.enabled,
+    )
+
+
+def _single_traffic_flow_advertisement(
+    flow_name: str,
+    logical_group_name: str,
+    group: IxiaDeviceGroupPlan,
+    advertisements: tuple[IxiaAdvertisementPlan, ...],
+) -> IxiaAdvertisementPlan:
+    matches = tuple(
+        advertisement
+        for advertisement in advertisements
+        if advertisement.device_group_id == group.resource_id
+    )
+    if len(matches) != 1:
+        raise UnsupportedTrafficFlowIntentError(
+            f"traffic flow {flow_name!r} device group {logical_group_name!r} must "
+            "resolve to exactly one IXIA advertisement; found "
+            f"{len(matches)}"
+        )
+    return matches[0]
+
+
+def _single_traffic_flow_group(
+    flow_name: str,
+    logical_group_name: str,
+    device_groups: tuple[IxiaDeviceGroupPlan, ...],
+) -> IxiaDeviceGroupPlan:
+    matches = tuple(
+        group
+        for group in device_groups
+        if group.resource_id.path[0] == logical_group_name
+    )
+    if len(matches) != 1:
+        raise UnsupportedTrafficFlowIntentError(
+            f"traffic flow {flow_name!r} device group {logical_group_name!r} "
+            f"must resolve to exactly one IXIA instance; found {len(matches)}"
+        )
+    return matches[0]
 
 
 def _ixia_port_plans(

@@ -107,10 +107,6 @@ class PlanningResult:
             )
 
 
-class UnsupportedTrafficFlowIntentError(ValueError):
-    pass
-
-
 @dataclass
 class _InterfaceAccumulator:
     resource_id: ResourceId
@@ -204,10 +200,6 @@ class BoundTopologyPlanner:
     """Builds common semantic plans without invoking a compiler or renderer."""
 
     def plan(self, bound: BoundTopology) -> PlanningResult:
-        if bound.logical_topology.traffic_flows:
-            raise UnsupportedTrafficFlowIntentError(
-                "traffic-flow compilation is outside the Phase 1.5 IXIA lane"
-            )
         endpoint_specs = {
             endpoint.name: endpoint for endpoint in bound.logical_topology.endpoints
         }

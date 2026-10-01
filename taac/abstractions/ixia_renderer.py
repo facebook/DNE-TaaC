@@ -37,6 +37,7 @@ from taac.abstractions.compilation.model import (
     IxiaRouteAttributeDistribution,
     IxiaRouteScaleMode,
     IxiaSelfNextHopRealization,
+    IxiaTrafficFlowPlan,
     ResourceId,
 )
 from taac.abstractions.compilation.traffic_generator import (
@@ -87,6 +88,8 @@ _PEER_PAIR_PREFIX_LENGTH_BY_CAPABILITY = {
     _IxiaRenderingCapability.INITIAL_IPV6: 127,
     _IxiaRenderingCapability.COMPACT_NAMED_IPV6: 127,
 }
+
+_FIBAGENT_QUALIFICATION_TRAFFIC_PROFILE = "fibagent_qualification_traffic"
 
 
 @dataclass(frozen=True)
@@ -183,6 +186,10 @@ class SharedIxiaRenderer:
         result = TrafficGeneratorRenderResult(
             consumed_resource_ids=request.plan.iter_resource_ids(),
             basic_port_configs=basic_port_configs,
+            basic_traffic_item_configs=tuple(
+                _basic_traffic_item_config(request, flow)
+                for flow in request.plan.traffic_flows
+            ),
             endpoint_patches=endpoint_patches,
             lifecycle_fragments=_traffic_generator_lifecycle_fragments(
                 request,
@@ -191,6 +198,103 @@ class SharedIxiaRenderer:
         )
         result.validate(request)
         return result
+
+
+def _basic_traffic_item_config(
+    request: TrafficGeneratorRenderRequest,
+    flow: IxiaTrafficFlowPlan,
+) -> taac_types.BasicTrafficItemConfig:
+    if flow.traffic_profile not in {
+        None,
+        _FIBAGENT_QUALIFICATION_TRAFFIC_PROFILE,
+    }:
+        _unsupported(
+            f"IXIA traffic flow {flow.resource_id} uses unsupported profile "
+            f"{flow.traffic_profile!r}"
+        )
+    if flow.rate_bps is not None:
+        _unsupported(
+            f"IXIA traffic flow {flow.resource_id} requests bit-rate pacing, "
+            "which BasicTrafficItemConfig does not support"
+        )
+    if flow.rate_percent is None:
+        _unsupported(f"IXIA traffic flow {flow.resource_id} requires an explicit rate")
+    if not float(flow.rate_percent).is_integer():
+        _unsupported(
+            f"IXIA traffic flow {flow.resource_id} rate percent must be an integer"
+        )
+    line_rate = int(flow.rate_percent)
+    if not 1 <= line_rate <= 100:
+        _unsupported(
+            f"IXIA traffic flow {flow.resource_id} rate percent must be from 1 "
+            "through 100"
+        )
+    frame_size_settings = None
+    if flow.frame_size_bytes is not None:
+        if flow.frame_size_bytes <= 0:
+            _unsupported(
+                f"IXIA traffic flow {flow.resource_id} frame size must be positive"
+            )
+        frame_size_settings = ixia_types.FrameSize(
+            type=ixia_types.FrameSizeType.FIXED,
+            fixed_size=flow.frame_size_bytes,
+        )
+    groups = {group.resource_id: group for group in request.plan.device_groups}
+    advertisements = {
+        advertisement.resource_id: advertisement
+        for advertisement in request.plan.advertisements
+    }
+    source = groups[flow.source_device_group_id]
+    destination_advertisement = advertisements[flow.destination_advertisement_id]
+    destination = groups[destination_advertisement.device_group_id]
+    return taac_types.BasicTrafficItemConfig(
+        name=flow.logical_name,
+        src_endpoints=[_traffic_endpoint(request, source)],
+        dest_endpoints=[
+            _traffic_endpoint(
+                request,
+                destination,
+                network_group_index=(
+                    destination_advertisement.prefix_window.network_group_index
+                ),
+            )
+        ],
+        traffic_type=(
+            ixia_types.TrafficType.IPV4
+            if flow.afi is AddressFamily.IPV4
+            else ixia_types.TrafficType.IPV6
+        ),
+        line_rate=line_rate,
+        line_rate_type=ixia_types.RateType.PERCENT_LINE_RATE,
+        tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
+        frame_size_settings=frame_size_settings,
+        bidirectional=flow.bidirectional,
+        merge_destinations=True,
+        src_dest_mesh=ixia_types.SrcDestMeshType.MANY_TO_MANY,
+        route_mesh=ixia_types.RouteMeshType.ROUTE_FULL_MESH,
+        enabled=flow.enabled,
+    )
+
+
+def _traffic_endpoint(
+    request: TrafficGeneratorRenderRequest,
+    group: IxiaDeviceGroupPlan,
+    *,
+    network_group_index: int | None = None,
+) -> taac_types.TrafficEndpoint:
+    port = next(
+        port for port in request.plan.ports if port.resource_id == group.port_id
+    )
+    presentation = resolve_ixia_device_group_presentation(
+        request.plan,
+        request.legacy_identity,
+        group,
+    )
+    return taac_types.TrafficEndpoint(
+        name=f"{port.dut_physical_identifier}:{port.dut_interface}",
+        device_group_index=presentation.device_group_index,
+        network_group_index=network_group_index,
+    )
 
 
 def _traffic_generator_lifecycle_fragments(

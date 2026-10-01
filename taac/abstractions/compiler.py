@@ -4895,10 +4895,11 @@ class ProfileFreeEosBgpCppCompiler(TopologyCompiler):
             return _preserve_ug_new_peer_join_task_artifacts(bound)
         if _is_profile_free_ug_backpressure(bound):
             return _preserve_ug_backpressure_task_artifacts(bound)
-        if _is_profile_free_ebb_full_scale(bound) and any(
-            group.ixia_children for group in bound.device_groups
+        if _is_profile_free_ebb_full_scale(bound) and (
+            bound.logical_topology.traffic_flows
+            or any(group.ixia_children for group in bound.device_groups)
         ):
-            return _compile_route_sharded_ebb_full_scale(bound)
+            return _compile_native_ebb_full_scale_with_legacy_tasks(bound)
         native_artifacts = compile_profile_free_eos_if_supported(bound)
         if native_artifacts is None:
             return EosBgpCppCompiler().compile(bound)
@@ -5480,7 +5481,7 @@ def _compile_established_artifacts_with_native_basic_port_shadow(
     return established_artifacts
 
 
-def _compile_route_sharded_ebb_full_scale(
+def _compile_native_ebb_full_scale_with_legacy_tasks(
     bound: BoundTopology,
 ) -> CompiledTaacArtifacts:
     device_config = bound.device_config or bound.logical_topology.device_config

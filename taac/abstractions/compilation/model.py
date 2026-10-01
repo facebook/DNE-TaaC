@@ -46,6 +46,7 @@ class ResourceKind(str, Enum):
     IXIA_DEVICE_GROUP = "ixia_device_group"
     IXIA_BGP_SESSION = "ixia_bgp_session"
     IXIA_ADVERTISEMENT = "ixia_advertisement"
+    IXIA_TRAFFIC_FLOW = "ixia_traffic_flow"
     OPENR = "openr"
 
 
@@ -705,6 +706,59 @@ class IxiaAdvertisementPlan:
 
 
 @dataclass(frozen=True)
+class IxiaTrafficFlowPlan:
+    resource_id: ResourceId
+    logical_name: str
+    source_device_group_id: ResourceId
+    destination_advertisement_id: ResourceId
+    afi: AddressFamily
+    traffic_profile: str | None = None
+    rate_percent: float | None = None
+    rate_bps: int | None = None
+    frame_size_bytes: int | None = None
+    bidirectional: bool = False
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        _require_kind(self.resource_id, ResourceKind.IXIA_TRAFFIC_FLOW)
+        _require_kind(
+            self.source_device_group_id,
+            ResourceKind.IXIA_DEVICE_GROUP,
+        )
+        _require_kind(
+            self.destination_advertisement_id,
+            ResourceKind.IXIA_ADVERTISEMENT,
+        )
+        if not self.logical_name:
+            raise ValueError("IXIA traffic-flow logical name must be nonempty")
+        if not isinstance(self.afi, AddressFamily):
+            raise TypeError("IXIA traffic-flow address family must be typed")
+        if self.traffic_profile is not None and not self.traffic_profile:
+            raise ValueError("IXIA traffic-flow profile must be nonempty")
+        if self.rate_percent is not None and (
+            isinstance(self.rate_percent, bool)
+            or not isinstance(self.rate_percent, (int, float))
+        ):
+            raise TypeError("IXIA traffic-flow rate percent must be numeric")
+        if self.rate_bps is not None and (
+            isinstance(self.rate_bps, bool) or not isinstance(self.rate_bps, int)
+        ):
+            raise TypeError("IXIA traffic-flow bit rate must be an integer")
+        if self.frame_size_bytes is not None and (
+            isinstance(self.frame_size_bytes, bool)
+            or not isinstance(self.frame_size_bytes, int)
+        ):
+            raise TypeError("IXIA traffic-flow frame size must be an integer")
+        if self.rate_percent is not None and self.rate_bps is not None:
+            raise ValueError("IXIA traffic flow cannot set both rate units")
+        if not isinstance(self.bidirectional, bool) or not isinstance(
+            self.enabled,
+            bool,
+        ):
+            raise TypeError("IXIA traffic-flow flags must be bools")
+
+
+@dataclass(frozen=True)
 class OpenRPlan:
     resource_id: ResourceId
     endpoint_id: ResourceId
@@ -732,6 +786,7 @@ ResourcePlan = (
     | IxiaDeviceGroupPlan
     | IxiaBgpSessionPlan
     | IxiaAdvertisementPlan
+    | IxiaTrafficFlowPlan
     | OpenRPlan
 )
 
@@ -775,6 +830,7 @@ class IxiaPlan:
     device_groups: tuple[IxiaDeviceGroupPlan, ...] = ()
     bgp_sessions: tuple[IxiaBgpSessionPlan, ...] = ()
     advertisements: tuple[IxiaAdvertisementPlan, ...] = ()
+    traffic_flows: tuple[IxiaTrafficFlowPlan, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_unique_resource_ids(self.iter_resources())
@@ -786,6 +842,7 @@ class IxiaPlan:
             *self.device_groups,
             *self.bgp_sessions,
             *self.advertisements,
+            *self.traffic_flows,
         )
 
     def iter_resource_ids(self) -> tuple[ResourceId, ...]:
@@ -1079,6 +1136,14 @@ def _validate_ixia_internal_references(plan: IxiaPlan) -> None:
     _validate_ixia_device_group_internal_references(plan, ports)
     _validate_ixia_session_internal_references(plan, device_groups)
     _validate_ixia_advertisement_internal_references(plan, device_groups)
+    _validate_ixia_traffic_flow_internal_references(
+        plan,
+        device_groups,
+        {
+            advertisement.resource_id: advertisement
+            for advertisement in plan.advertisements
+        },
+    )
 
 
 def _validate_ixia_device_group_internal_references(
@@ -1170,6 +1235,47 @@ def _validate_ixia_advertisement_internal_references(
                     f"IXIA advertisement {advertisement.resource_id} peer-prefix "
                     "exclusion must leave at least one active peer"
                 )
+
+
+def _validate_ixia_traffic_flow_internal_references(
+    plan: IxiaPlan,
+    device_groups: dict[ResourceId, IxiaDeviceGroupPlan],
+    advertisements: dict[ResourceId, IxiaAdvertisementPlan],
+) -> None:
+    for flow in plan.traffic_flows:
+        source_group = device_groups.get(flow.source_device_group_id)
+        if source_group is None:
+            raise ValueError(
+                f"IXIA traffic flow {flow.resource_id} references unknown source "
+                f"device group {flow.source_device_group_id}"
+            )
+        destination = advertisements.get(flow.destination_advertisement_id)
+        if destination is None:
+            raise ValueError(
+                f"IXIA traffic flow {flow.resource_id} references unknown "
+                f"destination advertisement {flow.destination_advertisement_id}"
+            )
+        destination_group = device_groups.get(destination.device_group_id)
+        if destination_group is None:
+            raise ValueError(
+                f"IXIA traffic flow {flow.resource_id} destination advertisement "
+                f"{destination.resource_id} references unknown device group "
+                f"{destination.device_group_id}"
+            )
+        if destination.afi is not flow.afi:
+            raise ValueError(
+                f"IXIA traffic flow {flow.resource_id} address family does not "
+                "match its destination"
+            )
+        if source_group.afi is not flow.afi or destination_group.afi is not flow.afi:
+            raise ValueError(
+                f"IXIA traffic flow {flow.resource_id} endpoint group address family "
+                "does not match its traffic"
+            )
+        if destination.route_count <= 0:
+            raise ValueError(
+                f"IXIA traffic flow {flow.resource_id} destination advertises no routes"
+            )
 
 
 def _validate_ixia_topology_references(plan: TopologyCompilationPlan) -> None:

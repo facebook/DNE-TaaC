@@ -148,6 +148,10 @@ def ixia_advertisement_resource_id(
     )
 
 
+def ixia_traffic_flow_resource_id(logical_name: str) -> ResourceId:
+    return ResourceId(ResourceKind.IXIA_TRAFFIC_FLOW, (logical_name,))
+
+
 def _ixia_instance_path(
     device_group_name: str,
     child_name: str | None,
@@ -166,6 +170,7 @@ __all__ = (
     "ixia_device_group_resource_id",
     "ixia_port_resource_id",
     "ixia_session_resource_id",
+    "ixia_traffic_flow_resource_id",
     "is_dut_endpoint",
     "link_resource_id",
     "openr_resource_id",

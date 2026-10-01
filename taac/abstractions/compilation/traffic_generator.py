@@ -669,9 +669,11 @@ class TrafficGeneratorRenderResult:
                 f"expected={expected_port_count}, "
                 f"actual={len(self.basic_port_configs)}"
             )
-        if self.basic_traffic_item_configs:
+        if len(self.basic_traffic_item_configs) != len(request.plan.traffic_flows):
             raise ValueError(
-                "traffic-generator traffic-item rendering is outside Phase 1.5"
+                "traffic-generator traffic-item config count mismatch: "
+                f"expected={len(request.plan.traffic_flows)}, "
+                f"actual={len(self.basic_traffic_item_configs)}"
             )
         lifecycle_is_active = any(
             activation.emit_lifecycle for activation in request.endpoint_activations
