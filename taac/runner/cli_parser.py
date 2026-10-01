@@ -52,6 +52,15 @@ def create_argument_parser() -> argparse.ArgumentParser:
             "so the OSS topology loader picks up your environment's links."
         ),
     )
+    parser.add_argument(
+        "--secrets-file",
+        help=(
+            "Path to an OSS TAAC JSON credentials file. The supported schema "
+            "contains shared or hostname-specific DUT credentials and common "
+            "IXIA username/password fields. The file must not be accessible "
+            "by group or other users (chmod 600)."
+        ),
+    )
 
     # Device selection
     parser.add_argument(

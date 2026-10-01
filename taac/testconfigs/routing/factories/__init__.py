@@ -12,12 +12,19 @@ See ``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``
 for the factory contract.
 """
 
-from taac.testconfigs.routing.factories import (  # noqa: F401
-    bgp_dc_chronos_node,
-    bgp_ebb_characteristic,
-    bgp_ebb_full_scale,
-    bgp_ebb_full_scale_mimic,
-    bgp_features,
-    cte_ucmp,
-    qual_bgp_update_group,
-)
+import os
+
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+if TAAC_OSS:
+    from taac.testconfigs.routing.factories import qual_rbb  # noqa: F401
+else:
+    from taac.testconfigs.routing.factories import (  # noqa: F401
+        bgp_dc_chronos_node,
+        bgp_ebb_characteristic,
+        bgp_ebb_full_scale,
+        bgp_ebb_full_scale_mimic,
+        bgp_features,
+        cte_ucmp,
+        qual_bgp_update_group,
+    )

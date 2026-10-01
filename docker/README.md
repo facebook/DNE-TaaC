@@ -125,7 +125,14 @@ After pulling the derived image, local edits to TAAC source or thrift schemas ca
 ./docker/run_taac_docker.sh --image <image> --regen
 
 # Mount a different directory as the workspace
-./docker/run_taac_docker.sh --workspace /path/to/other/checkout
+export TAAC_CHECKOUT_DIR="$HOME/src/DNE-TaaC"
+./docker/run_taac_docker.sh --workspace "$TAAC_CHECKOUT_DIR"
+
+# Load a Docker KEY=value non-secret profile. OSS runner credentials use its
+# separate --secrets-file JSON input.
+export TAAC_PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/taac"
+./docker/run_taac_docker.sh \
+  --env-file "$TAAC_PROFILE_DIR/lab.local.env"
 
 # Run a one-shot command (non-interactive, safe for CI)
 ./docker/run_taac_docker.sh run python3 -c 'import taac; print("ok")'

@@ -7,7 +7,11 @@ every routing ``Playbook(...)`` site. Consumers import the owning module or
 subpackage directly; this initializer is not a root-level symbol facade.
 """
 
-from taac.playbooks.routing import (  # noqa: F401
-    bgp_ebb_playbooks,
-    factories,
-)
+import os
+
+TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+
+from taac.playbooks.routing import factories  # noqa: F401
+
+if not TAAC_OSS:
+    from taac.playbooks.routing import bgp_ebb_playbooks  # noqa: F401
