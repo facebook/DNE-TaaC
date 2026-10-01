@@ -106,7 +106,7 @@ def log_results_table(
           LLDP_CHECK                          PASS
           IXIA_PACKET_LOSS_CHECK              FAIL        Packet loss > 0.01%
           ---------------------------------------------------------------------------
-          Overall: 2 PASSED, 1 FAILED
+          Overall: 2 PASSED, 1 FAILED, 1 SKIPPED  (SKIPPED shown only when nonzero)
     """
     _logger = logger or get_root_logger()
     if not results:

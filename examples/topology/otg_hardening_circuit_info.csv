@@ -1,0 +1,10 @@
+# Circuit info for the OTG BGP + platform hardening conveyor.
+# Pass via: --circuit-info-csv examples/topology/otg_hardening_circuit_info.csv
+#
+# Format: hostname,local_interface,local_platform,local_parent_interface,neighbor_hostname,neighbor_interface,neighbor_platform,neighbor_parent_interface,status,role
+#
+# Two TGEN links are required. Replace the interface names with the DUT's
+# actual TGEN-facing ports and the neighbor interfaces with the OTG port
+# locations (ixia-c: interface names; Keysight OTG: controller endpoints).
+device,eth1/9/1,FBOSS,,ixia,eth1,ixia,,3,IXIA
+device,eth1/10/1,FBOSS,,ixia,eth2,ixia,,3,IXIA
