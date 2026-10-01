@@ -2383,6 +2383,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             setup_tasks=[],
             teardown_tasks=[],
             basic_port_configs=[],
+            basic_traffic_item_configs=[],
         )
         topology_target = (
             "neteng.test_infra.dne.taac.testconfigs.routing.factories."
@@ -2420,6 +2421,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             setup_tasks=[],
             teardown_tasks=[],
             basic_port_configs=[],
+            basic_traffic_item_configs=[],
         )
         topology_target = (
             "neteng.test_infra.dne.taac.testconfigs.routing.factories."
@@ -2480,6 +2482,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             setup_tasks=[],
             teardown_tasks=[],
             basic_port_configs=[],
+            basic_traffic_item_configs=[],
         )
         topology_target = (
             "neteng.test_infra.dne.taac.testconfigs.routing.factories."
@@ -2608,6 +2611,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             setup_tasks=[],
             teardown_tasks=[],
             basic_port_configs=[],
+            basic_traffic_item_configs=[],
         )
         available = [
             taac_types.Playbook(name=name) for name in ("first", "second", "third")

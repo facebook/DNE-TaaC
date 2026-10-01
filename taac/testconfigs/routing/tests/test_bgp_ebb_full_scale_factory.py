@@ -59,6 +59,7 @@ def _compiled_topology() -> mock.MagicMock:
         setup_tasks=[],
         teardown_tasks=[],
         basic_port_configs=[],
+        basic_traffic_item_configs=[],
     )
     return topology
 

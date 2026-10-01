@@ -29,6 +29,7 @@ from taac.abstractions.topology import (
     BoundDeviceGroup,
     BoundTopology,
     FormulaicPrefixSource,
+    LogicalTopology,
     NextHopIntent,
     NextHopMode,
     OpenRMode,
@@ -1491,6 +1492,7 @@ def create_bgp_ebb_full_scale_test_config(  # noqa: C901
     fibagent_bgp_nhg_watermark_high: int = EBB_FIBAGENT_BGP_NHG_WATERMARK_HIGH,
     fibagent_bgp_nhg_watermark_low: int = EBB_FIBAGENT_BGP_NHG_WATERMARK_LOW,
     setup_only: bool = False,
+    topology_override: LogicalTopology | None = None,
 ) -> TestConfig:
     """Build one selectable test suite on the canonical EBB full-scale topology.
 
@@ -1521,6 +1523,8 @@ def create_bgp_ebb_full_scale_test_config(  # noqa: C901
         setup_only: Compile setup and teardown for the selected topology without
             adding Playbooks. This explicit mode leaves the existing empty-list
             selector behavior unchanged.
+        topology_override: Optional already-authored topology for an ad-hoc
+            lifecycle binding. The standard EBB topology remains the default.
     """
     if setup_only and playbooks_selected is not None:
         raise ValueError("setup_only requires playbooks_selected=None")
@@ -1576,7 +1580,7 @@ def create_bgp_ebb_full_scale_test_config(  # noqa: C901
         if enable_runtime_update
         else _DEFAULT_EBGP_PREFIX_COUNT
     )
-    topology = ebb_full_scale_topology(
+    topology = topology_override or ebb_full_scale_topology(
         next_hops=next_hops,
         openr_mode=openr_mode,
         include_bgpmon=include_auxiliary_observers,
@@ -1685,5 +1689,10 @@ def create_bgp_ebb_full_scale_test_config(  # noqa: C901
         setup_tasks=compiled.setup_tasks,
         teardown_tasks=compiled.teardown_tasks,
         basic_port_configs=compiled.basic_port_configs,
+        basic_traffic_item_configs=(
+            compiled.basic_traffic_item_configs
+            if compiled.basic_traffic_item_configs
+            else None
+        ),
         playbooks=playbooks,
     )
