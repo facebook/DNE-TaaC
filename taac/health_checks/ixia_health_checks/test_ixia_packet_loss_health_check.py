@@ -252,6 +252,101 @@ class TestIxiaPacketLossRun(unittest.IsolatedAsyncioTestCase):
         new_callable=AsyncMock,
         return_value="https://everpaste.test",
     )
+    async def test_failure_reports_all_observed_loss_metrics(self, mock_everpaste):
+        self.mock_ixia.has_traffic_items.return_value = True
+        self.mock_ixia.get_traffic_start_time.return_value = 0
+        self.mock_ixia.get_latest_stats.return_value = [
+            _make_stat(
+                "TRAFFIC_A",
+                duration=125.0,
+                frame_delta=42,
+                percentage=0.5,
+            ),
+        ]
+        mock_item = MagicMock()
+        mock_item.Enabled = True
+        mock_tracking = MagicMock()
+        mock_tracking.find.return_value.TrackBy = ["trackingenabled0"]
+        mock_item.Tracking = mock_tracking
+        self.mock_ixia.get_traffic_items.return_value = [mock_item]
+
+        result = await self.health_check._run(
+            self.mock_ixia,
+            hc_types.IxiaPacketLossHealthCheckIn(
+                thresholds=[
+                    hc_types.PacketLossThreshold(
+                        names=["TRAFFIC_A"],
+                        str_value="0",
+                        metric=hc_types.PacketLossMetric.FRAME_DELTA,
+                    )
+                ],
+                sleep_time=0,
+            ),
+            {},
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("duration=125.0ms", result.message)
+        self.assertIn("loss=0.5%", result.message)
+        self.assertIn("frame_delta=42", result.message)
+        details = mock_everpaste.await_args.args[0]
+        self.assertIn("Observed IXIA packet-loss statistics", details)
+        self.assertIn("TRAFFIC_A", details)
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.ixia_health_checks"
+        ".ixia_packet_loss_health_check.async_everpaste_str",
+        new_callable=AsyncMock,
+        return_value="https://everpaste.test",
+    )
+    async def test_failure_falls_back_for_unmatched_stat_identifier(
+        self,
+        mock_everpaste,
+    ) -> None:
+        result = await self.health_check._failure_result(
+            [{"name": "UNMATCHED", "str_value": "42"}],
+            [],
+            [_make_stat("TRAFFIC_A", frame_delta=42)],
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("UNMATCHED: observed=42", result.message)
+        self.assertNotIn("duration=?ms", result.message)
+        self.logger.warning.assert_called_once()
+        mock_everpaste.assert_awaited_once()
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.ixia_health_checks"
+        ".ixia_packet_loss_health_check.async_everpaste_str",
+        new_callable=AsyncMock,
+        return_value="https://everpaste.test",
+    )
+    async def test_failure_reports_every_duplicate_identifier_row(
+        self,
+        mock_everpaste,
+    ) -> None:
+        result = await self.health_check._failure_result(
+            [{"name": "TRAFFIC_A", "str_value": "0.5"}],
+            [],
+            [
+                _make_stat("TRAFFIC_A", duration=10, frame_delta=20),
+                _make_stat("TRAFFIC_A", duration=30, frame_delta=40),
+            ],
+        )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("duration=10ms", result.message)
+        self.assertIn("frame_delta=20", result.message)
+        self.assertIn("duration=30ms", result.message)
+        self.assertIn("frame_delta=40", result.message)
+        mock_everpaste.assert_awaited_once()
+
+    @patch(
+        "neteng.test_infra.dne.taac.health_checks.ixia_health_checks"
+        ".ixia_packet_loss_health_check.async_everpaste_str",
+        new_callable=AsyncMock,
+        return_value="https://everpaste.test",
+    )
     async def test_empty_stats_fail_for_unnamed_threshold(self, mock_everpaste):
         self.mock_ixia.has_traffic_items.return_value = True
         self.mock_ixia.get_traffic_start_time.return_value = 0

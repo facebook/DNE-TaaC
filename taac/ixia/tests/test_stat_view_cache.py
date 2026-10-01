@@ -5,7 +5,7 @@
 import threading
 import typing as t
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import call, MagicMock, patch
 
 from taac.ixia.taac_ixia import (
     IxiaOperationTimeoutError,
@@ -49,6 +49,238 @@ class BeginTestCaseTest(unittest.TestCase):
         self.ixia.begin_test_case("second")
 
         self.ixia.start.assert_not_called()
+
+    def test_begin_test_case_generates_before_apply(self):
+        self.ixia.sample_time = 0
+        self.ixia.capturing = False
+        self.ixia.paused = True
+        self.ixia._current_playbook_name = None
+        self.ixia.rotate_api_trace_phase = MagicMock()
+        calls = MagicMock()
+        self.ixia.enable_traffic = calls.enable_traffic
+        self.ixia.prepare_traffic = calls.prepare_traffic
+
+        self.ixia.begin_test_case("test", ["^traffic$"])
+
+        self.assertEqual(
+            calls.mock_calls,
+            [
+                call.enable_traffic(["^traffic$"], apply_changes=False),
+                call.prepare_traffic(),
+            ],
+        )
+
+    def test_begin_test_case_defers_routed_traffic_preparation(self):
+        self.ixia.sample_time = 0
+        self.ixia.capturing = False
+        self.ixia.paused = True
+        self.ixia._current_playbook_name = None
+        self.ixia._defer_traffic_preparation = True
+        self.ixia.rotate_api_trace_phase = MagicMock()
+        self.ixia.enable_traffic = MagicMock()
+        self.ixia.prepare_traffic = MagicMock()
+
+        self.ixia.begin_test_case("test", ["^traffic$"])
+
+        self.ixia.enable_traffic.assert_not_called()
+        self.ixia.prepare_traffic.assert_not_called()
+        self.assertTrue(self.ixia._traffic_preparation_pending)
+        self.assertFalse(self.ixia._deferred_traffic_generation_complete)
+        self.assertFalse(self.ixia._traffic_start_pending)
+        self.assertEqual(["^traffic$"], self.ixia._pending_traffic_regexes)
+
+    def test_first_start_prepares_deferred_routed_traffic(self):
+        self.ixia._traffic_preparation_pending = True
+        self.ixia._pending_traffic_regexes = ["^traffic$"]
+        self.ixia.is_traffic_running = MagicMock(side_effect=[False, True])
+        self.ixia.regenerate_traffic_items = MagicMock()
+        self.ixia.finalize_deferred_traffic_item_replacements = MagicMock()
+        self.ixia.enable_traffic = MagicMock()
+        self.ixia.wait_for_view_assistants_ready = MagicMock()
+
+        with patch(
+            "neteng.test_infra.dne.taac.ixia.taac_ixia.Ixia.start_traffic"
+        ) as base_start:
+            self.ixia.start_traffic(regenerate_traffic_items=True)
+
+        self.ixia.enable_traffic.assert_called_once_with(
+            ["^traffic$"], apply_changes=False
+        )
+        self.ixia.regenerate_traffic_items.assert_called_once_with()
+        self.ixia.finalize_deferred_traffic_item_replacements.assert_called_once_with()
+        base_start.assert_called_once_with(regenerate_traffic_items=False)
+        self.ixia.wait_for_view_assistants_ready.assert_called_once_with()
+        self.assertFalse(self.ixia._traffic_preparation_pending)
+        self.assertFalse(self.ixia._traffic_start_pending)
+        self.assertFalse(self.ixia._traffic_view_readiness_pending)
+        self.assertIsNone(self.ixia._pending_traffic_regexes)
+
+    def test_first_start_stops_retained_traffic_before_regeneration(self):
+        self.ixia._traffic_preparation_pending = True
+        self.ixia._traffic_view_readiness_pending = True
+        self.ixia._pending_traffic_regexes = ["^traffic$"]
+        self.ixia.is_traffic_running = MagicMock(side_effect=[True, True])
+        self.ixia.stop_traffic = MagicMock()
+        self.ixia.regenerate_traffic_items = MagicMock()
+        self.ixia.finalize_deferred_traffic_item_replacements = MagicMock()
+        self.ixia.enable_traffic = MagicMock()
+        self.ixia.wait_for_view_assistants_ready = MagicMock()
+
+        with patch(
+            "neteng.test_infra.dne.taac.ixia.taac_ixia.Ixia.start_traffic"
+        ) as base_start:
+            self.ixia.start_traffic()
+
+        self.ixia.stop_traffic.assert_called_once_with()
+        self.ixia.enable_traffic.assert_called_once_with(
+            ["^traffic$"], apply_changes=False
+        )
+        self.ixia.regenerate_traffic_items.assert_called_once_with()
+        self.ixia.finalize_deferred_traffic_item_replacements.assert_called_once_with()
+        base_start.assert_called_once_with(regenerate_traffic_items=False)
+        self.assertFalse(self.ixia._traffic_preparation_pending)
+        self.assertFalse(self.ixia._traffic_start_pending)
+        self.assertFalse(self.ixia._traffic_view_readiness_pending)
+        self.assertIsNone(self.ixia._pending_traffic_regexes)
+
+    def test_failed_first_start_retries_without_repeating_preparation(self):
+        self.ixia._traffic_preparation_pending = True
+        self.ixia._pending_traffic_regexes = ["^traffic$"]
+        self.ixia.is_traffic_running = MagicMock(
+            side_effect=[False, False, False, True]
+        )
+        self.ixia.regenerate_traffic_items = MagicMock()
+        self.ixia.finalize_deferred_traffic_item_replacements = MagicMock()
+        self.ixia.enable_traffic = MagicMock()
+        self.ixia.wait_for_view_assistants_ready = MagicMock()
+
+        with patch(
+            "neteng.test_infra.dne.taac.ixia.taac_ixia.Ixia.start_traffic",
+            side_effect=[RuntimeError("apply failed"), None],
+        ) as base_start:
+            with self.assertRaisesRegex(RuntimeError, "apply failed"):
+                self.ixia.start_traffic()
+            self.assertTrue(self.ixia._traffic_preparation_pending)
+            self.assertTrue(self.ixia._deferred_traffic_generation_complete)
+            self.assertTrue(self.ixia._traffic_start_pending)
+            self.assertFalse(self.ixia._traffic_view_readiness_pending)
+            self.assertEqual(["^traffic$"], self.ixia._pending_traffic_regexes)
+
+            self.ixia.start_traffic(regenerate_traffic_items=True)
+
+        self.assertEqual(
+            [
+                call(regenerate_traffic_items=False),
+                call(regenerate_traffic_items=False),
+            ],
+            base_start.call_args_list,
+        )
+        self.ixia.regenerate_traffic_items.assert_called_once_with()
+        self.ixia.finalize_deferred_traffic_item_replacements.assert_called_once_with()
+        self.assertEqual(
+            [
+                call(["^traffic$"], apply_changes=False),
+                call(["^traffic$"], apply_changes=False),
+            ],
+            self.ixia.enable_traffic.call_args_list,
+        )
+        self.ixia.wait_for_view_assistants_ready.assert_called_once_with()
+        self.assertFalse(self.ixia._traffic_preparation_pending)
+        self.assertFalse(self.ixia._deferred_traffic_generation_complete)
+        self.assertFalse(self.ixia._traffic_start_pending)
+        self.assertFalse(self.ixia._traffic_view_readiness_pending)
+        self.assertIsNone(self.ixia._pending_traffic_regexes)
+
+    def test_failed_finalize_retries_without_regenerating_swapped_items(self):
+        self.ixia._traffic_preparation_pending = True
+        self.ixia._deferred_traffic_generation_complete = False
+        self.ixia._pending_traffic_regexes = ["^traffic$"]
+        self.ixia.is_traffic_running = MagicMock(side_effect=[False, False, True])
+        self.ixia.regenerate_traffic_items = MagicMock()
+        self.ixia.finalize_deferred_traffic_item_replacements = MagicMock(
+            side_effect=[RuntimeError("swap failed"), None]
+        )
+        self.ixia.enable_traffic = MagicMock()
+        self.ixia.wait_for_view_assistants_ready = MagicMock()
+
+        with patch(
+            "neteng.test_infra.dne.taac.ixia.taac_ixia.Ixia.start_traffic"
+        ) as base_start:
+            with self.assertRaisesRegex(RuntimeError, "swap failed"):
+                self.ixia.start_traffic()
+            self.assertTrue(self.ixia._traffic_preparation_pending)
+            self.assertTrue(self.ixia._deferred_traffic_generation_complete)
+            self.assertFalse(self.ixia._traffic_start_pending)
+
+            self.ixia.start_traffic()
+
+        self.ixia.regenerate_traffic_items.assert_called_once_with()
+        self.assertEqual(
+            2,
+            self.ixia.finalize_deferred_traffic_item_replacements.call_count,
+        )
+        base_start.assert_called_once_with(regenerate_traffic_items=False)
+        self.assertFalse(self.ixia._traffic_preparation_pending)
+        self.assertFalse(self.ixia._deferred_traffic_generation_complete)
+        self.assertFalse(self.ixia._traffic_start_pending)
+
+    def test_failed_post_start_stats_wait_does_not_rearm_preparation(self):
+        self.ixia._traffic_preparation_pending = True
+        self.ixia._pending_traffic_regexes = ["^traffic$"]
+        self.ixia.is_traffic_running = MagicMock(side_effect=[False, True, True])
+        self.ixia.regenerate_traffic_items = MagicMock()
+        self.ixia.finalize_deferred_traffic_item_replacements = MagicMock()
+        self.ixia.enable_traffic = MagicMock()
+        self.ixia.wait_for_view_assistants_ready = MagicMock(
+            side_effect=[RuntimeError("statistics unavailable"), None]
+        )
+
+        with patch(
+            "neteng.test_infra.dne.taac.ixia.taac_ixia.Ixia.start_traffic"
+        ) as base_start:
+            with self.assertRaisesRegex(RuntimeError, "statistics unavailable"):
+                self.ixia.start_traffic()
+            self.ixia.start_traffic()
+
+        self.assertEqual(
+            [call(regenerate_traffic_items=False)],
+            base_start.call_args_list,
+        )
+        self.ixia.enable_traffic.assert_called_once_with(
+            ["^traffic$"], apply_changes=False
+        )
+        self.assertEqual(2, self.ixia.wait_for_view_assistants_ready.call_count)
+        self.assertFalse(self.ixia._traffic_preparation_pending)
+        self.assertFalse(self.ixia._traffic_start_pending)
+        self.assertFalse(self.ixia._traffic_view_readiness_pending)
+        self.assertIsNone(self.ixia._pending_traffic_regexes)
+
+    def test_deferred_start_without_running_traffic_raises_and_keeps_start_pending(
+        self,
+    ):
+        self.ixia._traffic_preparation_pending = True
+        self.ixia._pending_traffic_regexes = ["^missing$"]
+        self.ixia.is_traffic_running = MagicMock(side_effect=[False, False])
+        self.ixia.regenerate_traffic_items = MagicMock()
+        self.ixia.finalize_deferred_traffic_item_replacements = MagicMock()
+        self.ixia.enable_traffic = MagicMock()
+        self.ixia.wait_for_view_assistants_ready = MagicMock()
+
+        with patch(
+            "neteng.test_infra.dne.taac.ixia.taac_ixia.Ixia.start_traffic"
+        ) as base_start:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "IXIA traffic did not start after deferred preparation",
+            ):
+                self.ixia.start_traffic()
+
+        base_start.assert_called_once_with(regenerate_traffic_items=False)
+        self.ixia.wait_for_view_assistants_ready.assert_not_called()
+        self.assertTrue(self.ixia._traffic_preparation_pending)
+        self.assertTrue(self.ixia._traffic_start_pending)
+        self.assertFalse(self.ixia._traffic_view_readiness_pending)
+        self.assertEqual(["^missing$"], self.ixia._pending_traffic_regexes)
 
 
 class GetOrCreateStatViewTest(unittest.TestCase):

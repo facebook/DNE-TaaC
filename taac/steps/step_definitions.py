@@ -5348,6 +5348,7 @@ def create_validation_step(
     stage: taac_types.ValidationStage = taac_types.ValidationStage.MID_TEST,
     description: t.Optional[str] = None,
     start_traffic: bool = True,
+    fail_on_failure: bool = False,
 ) -> Step:
     """
     Create a validation step with point-in-time health checks.
@@ -5359,10 +5360,15 @@ def create_validation_step(
         start_traffic: Whether the generic step pre-hook should ensure IXIA
             traffic is running. Set False for recovery validation that must run
             while traffic remains stopped.
+        fail_on_failure: Whether a failed MID_TEST check must stop the workload.
 
     Returns:
         Step object for validation
     """
+    params_dict: t.Dict[str, t.Any] = {}
+    _add_skip_start_traffic_param(params_dict, start_traffic)
+    if fail_on_failure:
+        params_dict["fail_on_failure"] = True
     return Step(
         name=StepName.VALIDATION_STEP,
         input_json=thrift_to_json(
@@ -5372,7 +5378,9 @@ def create_validation_step(
             )
         ),
         description=description,
-        step_params=_skip_start_traffic_step_params(start_traffic),
+        step_params=(
+            Params(json_params=json.dumps(params_dict)) if params_dict else None
+        ),
     )
 
 
@@ -12429,7 +12437,10 @@ class ValidationStep(StepBase[taac_types.ValidationInput]):
     ) -> None:
         if input.stage == taac_types.ValidationStage.PRE_TEST:
             exception_cls = TestbedError
-        elif input.stage == taac_types.ValidationStage.POST_TEST:
+        elif (
+            input.stage == taac_types.ValidationStage.POST_TEST
+            or params.get("fail_on_failure", False)
+        ):
             exception_cls = TestCaseFailure
         else:
             exception_cls = None

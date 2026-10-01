@@ -19,6 +19,7 @@ import re
 import threading
 import time
 import typing as t
+import uuid
 import warnings
 from collections import defaultdict, namedtuple
 from contextlib import AbstractContextManager, contextmanager
@@ -28,6 +29,7 @@ from ipaddress import ip_address, IPv6Address
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
 if not TAAC_OSS:
+    import pyjk as justknobs
     from configerator.client import ConfigeratorClient
 else:
     # OSS mode: no Meta config service. Stub the client to a no-op so the
@@ -1121,6 +1123,7 @@ class Ixia:
     _tracer: t.Optional[IxiaTracer] = None
     _current_playbook_name: t.Optional[str] = None
     _current_testconfig_name: t.Optional[str] = None
+    _defer_traffic_preparation: bool = False
 
     def __init__(
         self,
@@ -1270,6 +1273,11 @@ class Ixia:
         # hits rebuild it with `rehydrate_vport_indices`.
         self.vport_indices: t.Dict[str, VportIndex] = {}
         self._traffic_start_time: float = 0.0
+        self._defer_traffic_preparation = False
+        self._deferred_traffic_item_replacements: t.List[t.Tuple[str, str]] = []
+        self._deferred_traffic_item_replacement_swaps_started: set[
+            tuple[str, str]
+        ] = set()
         self.cfgr_client = ConfigeratorClient()
         self.ptp_configured: bool = False
         self.tag_name_to_device_group_name_list = defaultdict(list)
@@ -3658,10 +3666,11 @@ class Ixia:
 
         return packet_header_field_obj
 
-    def create_traffic_items(
+    def create_traffic_items(  # noqa: C901
         self,
         traffic_items: t.Sequence[ixia_types.TrafficItem],
         override_traffic_items: bool = False,
+        generate_traffic_items: bool = True,
     ) -> None:
         """API to create traffic item
 
@@ -3695,27 +3704,36 @@ class Ixia:
                 f"[GLOBAL] Attempting to create traffic item {traffic_item_name}"
             )
 
-            traffic_item_obj: "IxiaTrafficItem" = (
-                self.ixnetwork.Traffic.TrafficItem.find(Name=rf"^{traffic_item_name}&")
+            existing_traffic_item_obj: "IxiaTrafficItem" = (
+                self.ixnetwork.Traffic.TrafficItem.find(
+                    Name=rf"^{re.escape(traffic_item_name)}$"
+                )
             )
-            if traffic_item_obj and not override_traffic_items:
+            if existing_traffic_item_obj and not override_traffic_items:
                 self.logger.info(
                     f"[{traffic_item_name}] There is already an existing Traffic "
                     f"item instance {traffic_item_name}. Hence not creating a new one!"
                 )
                 continue
-            else:
-                # [STEP 1]: Creating the base traffic item object
-                traffic_item_obj: "IxiaTrafficItem" = (
-                    self.ixnetwork.Traffic.TrafficItem.add(
-                        Name=traffic_item_name,
-                        TrafficType=ixia_types.TRAFFIC_TYPE_MAP[
-                            traffic_item_info.traffic_type
-                        ],
+            replacement_name = traffic_item_name
+            if existing_traffic_item_obj:
+                while True:
+                    replacement_name = (
+                        f"{traffic_item_name}__taac_replacement_{uuid.uuid4().hex}"
                     )
-                )
-                if traffic_item_info.traffic_type == ixia_types.TrafficType.RAW:
-                    traffic_item_obj.TrafficItemType = "l2L3"
+                    if not self.ixnetwork.Traffic.TrafficItem.find(
+                        Name=rf"^{re.escape(replacement_name)}$"
+                    ):
+                        break
+            # [STEP 1]: Creating the base traffic item object
+            traffic_item_obj = self.ixnetwork.Traffic.TrafficItem.add(
+                Name=replacement_name,
+                TrafficType=ixia_types.TRAFFIC_TYPE_MAP[
+                    traffic_item_info.traffic_type
+                ],
+            )
+            if traffic_item_info.traffic_type == ixia_types.TrafficType.RAW:
+                traffic_item_obj.TrafficItemType = "l2L3"
             self.logger.debug(
                 f"[{traffic_item_name}] Successfully found or created the base "
                 "traffic item object"
@@ -3843,20 +3861,206 @@ class Ixia:
                 "statistics tracking type for this tracking item"
             )
             # [STEP 9]: Regenerate traffic item
-            traffic_item_obj.Generate()
-            self.logger.debug(
-                f"[{traffic_item_name}] Successfully regenerated the traffic item"
+            if generate_traffic_items:
+                traffic_item_obj.Generate()
+                self.logger.debug(
+                    f"[{traffic_item_name}] Successfully regenerated the traffic item"
+                )
+            else:
+                self.logger.info(
+                    f"[{traffic_item_name}] Deferred traffic generation until "
+                    "the first traffic start after DUT setup"
+                )
+            traffic_item_obj.update(
+                Enabled=(traffic_item_info.enabled if generate_traffic_items else False)
             )
-            traffic_item_obj.update(Enabled=traffic_item_info.enabled)
 
             # [STEP 9]: Modify traffic options. This will enable the capture of
             # packet loss duration in ms while fetching the traffic statistics
             self.modify_traffic_options()
 
+            if existing_traffic_item_obj:
+                if generate_traffic_items:
+                    existing_traffic_item_obj.remove()
+                    traffic_item_obj.update(Name=traffic_item_name)
+                    self.logger.info(
+                        f"[{traffic_item_name}] Replaced the existing traffic item"
+                    )
+                else:
+                    pending_replacements = [
+                        replacement
+                        for replacement in getattr(
+                            self, "_deferred_traffic_item_replacements", ()
+                        )
+                        if replacement[0] != traffic_item_name
+                    ]
+                    pending_replacements.append(
+                        (traffic_item_name, replacement_name)
+                    )
+                    self._deferred_traffic_item_replacements = pending_replacements
+                    self._deferred_traffic_item_replacement_swaps_started = getattr(
+                        self,
+                        "_deferred_traffic_item_replacement_swaps_started",
+                        set(),
+                    )
+                    self._deferred_traffic_item_replacement_swaps_started.discard(
+                        (traffic_item_name, replacement_name)
+                    )
+                    self.logger.info(
+                        f"[{traffic_item_name}] Kept the existing traffic item until "
+                        "its deferred replacement is generated"
+                    )
             self.logger.info(
                 "[GLOBAL] Successfully configured all parameters for the "
                 f"traffic item {traffic_item_name}"
             )
+
+    def finalize_deferred_traffic_item_replacements(self) -> None:  # noqa: C901
+        """Install generated replacements with an idempotent per-item retry path."""
+        pending_replacements = list(
+            dict.fromkeys(
+                getattr(self, "_deferred_traffic_item_replacements", ())
+            )
+        )
+        swaps_started = getattr(
+            self,
+            "_deferred_traffic_item_replacement_swaps_started",
+            set(),
+        )
+        self._deferred_traffic_item_replacement_swaps_started = swaps_started
+        resolved_replacements = []
+        for traffic_item_name, replacement_name in pending_replacements:
+            replacement_key = (traffic_item_name, replacement_name)
+            previous_name = f"{replacement_name}__previous"
+            replacement = self.ixnetwork.Traffic.TrafficItem.find(
+                Name=rf"^{re.escape(replacement_name)}$"
+            )
+            previous_item = None
+            previous_item_needs_rename = False
+            installed_replacement = None
+            if replacement_key in swaps_started:
+                previous_item = self.ixnetwork.Traffic.TrafficItem.find(
+                    Name=rf"^{re.escape(previous_name)}$"
+                )
+            if replacement and not previous_item:
+                previous_item = self.ixnetwork.Traffic.TrafficItem.find(
+                    Name=rf"^{re.escape(traffic_item_name)}$"
+                )
+                previous_item_needs_rename = bool(previous_item)
+            elif not replacement and replacement_key in swaps_started:
+                installed_replacement = self.ixnetwork.Traffic.TrafficItem.find(
+                    Name=rf"^{re.escape(traffic_item_name)}$"
+                )
+            if not replacement and not installed_replacement:
+                raise RuntimeError(
+                    f"Deferred replacement {replacement_name} is missing for "
+                    f"traffic item {traffic_item_name}"
+                )
+            if replacement and not previous_item:
+                raise RuntimeError(
+                    f"Original traffic item {traffic_item_name} is missing while "
+                    f"installing deferred replacement {replacement_name}"
+                )
+            resolved_replacements.append(
+                (
+                    traffic_item_name,
+                    replacement_name,
+                    previous_name,
+                    previous_item,
+                    previous_item_needs_rename,
+                    replacement,
+                )
+            )
+
+        failures: list[tuple[str, Exception]] = []
+        for (
+            traffic_item_name,
+            replacement_name,
+            previous_name,
+            previous_item,
+            previous_item_needs_rename,
+            replacement,
+        ) in resolved_replacements:
+            replacement_key = (traffic_item_name, replacement_name)
+            if not replacement:
+                try:
+                    if previous_item:
+                        previous_item.remove()
+                except Exception as exc:
+                    failures.append((traffic_item_name, exc))
+                    continue
+                self._deferred_traffic_item_replacements = [
+                    pending
+                    for pending in self._deferred_traffic_item_replacements
+                    if pending != replacement_key
+                ]
+                swaps_started.discard(replacement_key)
+                self.logger.info(
+                    f"[{traffic_item_name}] Confirmed a deferred replacement "
+                    "installed by the prior attempt"
+                )
+                continue
+            if replacement is None or previous_item is None:
+                raise RuntimeError(
+                    f"Invalid deferred replacement state for {traffic_item_name}"
+                )
+            swaps_started.add(replacement_key)
+            try:
+                if previous_item_needs_rename:
+                    previous_item.update(Name=previous_name)
+                replacement.update(Name=traffic_item_name)
+                previous_item.remove()
+            except Exception as exc:
+                failures.append((traffic_item_name, exc))
+                continue
+            self._deferred_traffic_item_replacements = [
+                pending
+                for pending in self._deferred_traffic_item_replacements
+                if pending != replacement_key
+            ]
+            swaps_started.discard(replacement_key)
+            self.logger.info(
+                f"[{traffic_item_name}] Installed the generated deferred replacement"
+            )
+        if failures:
+            failure_details = "; ".join(
+                f"{name}: {error}" for name, error in failures
+            )
+            remaining_names = ", ".join(
+                name for name, _ in self._deferred_traffic_item_replacements
+            )
+            raise RuntimeError(
+                f"Failed to install deferred replacements: {failure_details}; "
+                f"pending replacements: {remaining_names}"
+            ) from failures[0][1]
+
+    def _requires_post_setup_traffic_preparation(
+        self,
+        traffic_items: t.Sequence[ixia_types.TrafficItem],
+    ) -> bool:
+        routed_items = tuple(
+            any(
+                endpoint.network_group_index is not None
+                for endpoint in (
+                    *traffic_item.source_endpoints,
+                    *traffic_item.dest_endpoints,
+                )
+            )
+            for traffic_item in traffic_items
+        )
+        if any(routed_items) and not all(routed_items):
+            self.logger.warning(
+                "Mixed routed and directly connected IXIA traffic items defer "
+                "preparation for the entire set"
+            )
+        return any(routed_items)
+
+    def _is_deferred_routed_traffic_preparation_enabled(self) -> bool:
+        if TAAC_OSS:
+            return True
+        return justknobs.check(
+            "dne_pit/taac:enable_deferred_routed_traffic_preparation"
+        )
 
     def modify_bgp_capabilities(
         self,
@@ -7571,6 +7775,15 @@ class Ixia:
         """
 
         setup_start = time.time()
+        configured_traffic_items = (
+            self.ixia_config.traffic_items if self.ixia_config else ()
+        )
+        self._deferred_traffic_item_replacements = []
+        self._deferred_traffic_item_replacement_swaps_started = set()
+        self._defer_traffic_preparation = (
+            self._is_deferred_routed_traffic_preparation_enabled()
+            and self._requires_post_setup_traffic_preparation(configured_traffic_items)
+        )
         # Use warning level so messages pass through suppress_console_logs
         _log = self.logger.warning
 
@@ -7695,26 +7908,37 @@ class Ixia:
             num_items = len(traffic_items)
             _log(f"{_CYAN}{_BOLD}[6/7] Creating {num_items} traffic item(s)...{_RESET}")
             _step_start = time.time()
-            self.create_traffic_items(traffic_items)
+            self.create_traffic_items(
+                traffic_items,
+                override_traffic_items=self.override_traffic_items,
+                generate_traffic_items=not self._defer_traffic_preparation,
+            )
             _log(
                 f"{_GREEN}[IXIA]{_RESET} {num_items} traffic item(s) created in "
                 f"{time.time() - _step_start:.0f}s"
             )
 
             # ── Step 7: Trial traffic ────────────────────────────
-            _log(
-                f"{_CYAN}{_BOLD}[7/7] Trial traffic for ARP/NDP resolution "
-                f"({trial_traffic_interval_s}s)...{_RESET}"
-            )
-            _step_start = time.time()
-            self.start_traffic()
-            _log(f"{_DIM}[IXIA] Waiting {trial_traffic_interval_s}s...{_RESET}")
-            time.sleep(trial_traffic_interval_s)
-            self.stop_traffic()
-            _log(
-                f"{_GREEN}[IXIA]{_RESET} Trial traffic complete in "
-                f"{time.time() - _step_start:.0f}s"
-            )
+            if self._defer_traffic_preparation:
+                _log(
+                    f"{_DIM}[IXIA] Step 7 deferred — routed traffic will be "
+                    "generated and applied after post-IXIA DUT setup"
+                    f"{_RESET}"
+                )
+            else:
+                _log(
+                    f"{_CYAN}{_BOLD}[7/7] Trial traffic for ARP/NDP resolution "
+                    f"({trial_traffic_interval_s}s)...{_RESET}"
+                )
+                _step_start = time.time()
+                self.start_traffic()
+                _log(f"{_DIM}[IXIA] Waiting {trial_traffic_interval_s}s...{_RESET}")
+                time.sleep(trial_traffic_interval_s)
+                self.stop_traffic()
+                _log(
+                    f"{_GREEN}[IXIA]{_RESET} Trial traffic complete in "
+                    f"{time.time() - _step_start:.0f}s"
+                )
         else:
             _log(f"{_DIM}[IXIA] Steps 6-7 skipped — no traffic items to create{_RESET}")
 
@@ -8394,7 +8618,10 @@ class Ixia:
     @external_api
     @require_traffic_item
     def enable_traffic(
-        self, regexes: t.Optional[t.List[str]] = None, enable: bool = True
+        self,
+        regexes: t.Optional[t.List[str]] = None,
+        enable: bool = True,
+        apply_changes: bool = True,
     ) -> None:
         """
         Enable or disable traffic items that match the given regexes.
@@ -8403,6 +8630,7 @@ class Ixia:
         Args:
             regexes (List[str], t.optional): Regexes of traffic items to enable/disable. Defaults to None.
             enable (bool, t.optional): Whether to enable or disable traffic items. Defaults to True.
+            apply_changes: Whether to apply the traffic configuration immediately.
         """
         all_traffic_items = self.ixnetwork.Traffic.TrafficItem.find()
         name_to_traffic_item = {item.Name: item for item in all_traffic_items}
@@ -8437,7 +8665,8 @@ class Ixia:
         self.logger.info(
             f"Successfully {action} traffic item(s) {[traffic_item.Name for traffic_item in traffic_items]}"
         )
-        self.apply_traffic()
+        if apply_changes:
+            self.apply_traffic()
 
     def configure_line_rate(
         self,

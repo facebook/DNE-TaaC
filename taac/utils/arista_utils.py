@@ -52,6 +52,7 @@ class EosSystemLogClassification:
 
     issues: tuple[str, ...]
     excluded: tuple[str, ...]
+    issues_with_indexes: tuple[tuple[int, str], ...] = ()
 
 
 def find_pid_in_output(output: str) -> t.Optional[str]:
@@ -471,18 +472,19 @@ def classify_eos_system_log_entries(
     entries: t.Sequence[str],
 ) -> EosSystemLogClassification:
     """Exclude recovery mnemonics and classify every other entry as an issue."""
-    issues: list[str] = []
+    issues_with_indexes: list[tuple[int, str]] = []
     excluded: list[str] = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         mnemonic_match = _EOS_LOG_MNEMONIC_RE.search(entry)
         mnemonic = mnemonic_match.group(1).upper() if mnemonic_match else ""
         if any(mnemonic.endswith(suffix) for suffix in _EOS_EXCLUDED_MNEMONIC_SUFFIXES):
             excluded.append(entry)
         else:
-            issues.append(entry)
+            issues_with_indexes.append((index, entry))
     return EosSystemLogClassification(
-        issues=tuple(issues),
+        issues=tuple(entry for _, entry in issues_with_indexes),
         excluded=tuple(excluded),
+        issues_with_indexes=tuple(issues_with_indexes),
     )
 
 

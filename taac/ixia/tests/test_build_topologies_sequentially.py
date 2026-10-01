@@ -8,7 +8,7 @@
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import call, MagicMock, patch
 
 from taac.ixia.ixia import (
     DESIRED_DEVICE_GROUP_NAME,
@@ -46,6 +46,7 @@ def _create_ixia_instance():
     ixia.create_topology = MagicMock(return_value=MagicMock(Name="TOPOLOGY_MOCK"))
     ixia.create_device_groups = MagicMock()
     ixia.configure_l1_settings = MagicMock()
+    ixia._is_deferred_routed_traffic_preparation_enabled = MagicMock(return_value=True)
     return ixia
 
 
@@ -174,6 +175,451 @@ class RehydrateVportIndicesTest(unittest.TestCase):
             "Retained IXIA session 524 does not match the requested topology",
         ):
             ixia._create_basic_setup(trial_traffic_interval_s=0)
+
+    def test_existing_session_can_replace_traffic_items(self):
+        ixia = _create_ixia_instance()
+        port_configs = [MagicMock()]
+        traffic_items = [SimpleNamespace(source_endpoints=[], dest_endpoints=[])]
+        ixia.ixia_recovery = None
+        ixia.session_id = 524
+        ixia.is_existing_session = True
+        ixia.cleanup_config = True
+        ixia.override_traffic_items = True
+        ixia.ixia_config = SimpleNamespace(
+            port_configs=port_configs,
+            traffic_items=traffic_items,
+        )
+        ixia.connect = MagicMock()
+        ixia.rehydrate_vport_indices = MagicMock()
+        ixia.verify_ip_advertise_gating = MagicMock()
+        ixia.start_and_verify_protocols = MagicMock()
+        ixia.create_traffic_items = MagicMock()
+        ixia.start_traffic = MagicMock()
+        ixia.stop_traffic = MagicMock()
+
+        ixia._create_basic_setup(trial_traffic_interval_s=0)
+
+        ixia.create_traffic_items.assert_called_once_with(
+            traffic_items,
+            override_traffic_items=True,
+            generate_traffic_items=True,
+        )
+        ixia.start_traffic.assert_called_once_with()
+        ixia.stop_traffic.assert_called_once_with()
+
+    def test_routed_traffic_generation_is_deferred_until_after_dut_setup(self):
+        ixia = _create_ixia_instance()
+        port_configs = [MagicMock()]
+        traffic_items = [
+            SimpleNamespace(
+                source_endpoints=[SimpleNamespace(network_group_index=None)],
+                dest_endpoints=[SimpleNamespace(network_group_index=0)],
+            )
+        ]
+        ixia.ixia_recovery = None
+        ixia.session_id = 524
+        ixia.is_existing_session = True
+        ixia.cleanup_config = True
+        ixia.override_traffic_items = True
+        ixia.ixia_config = SimpleNamespace(
+            port_configs=port_configs,
+            traffic_items=traffic_items,
+        )
+        ixia.connect = MagicMock()
+        ixia.rehydrate_vport_indices = MagicMock()
+        ixia.verify_ip_advertise_gating = MagicMock()
+        ixia.start_and_verify_protocols = MagicMock()
+        ixia.create_traffic_items = MagicMock()
+        ixia.start_traffic = MagicMock()
+        ixia.stop_traffic = MagicMock()
+
+        ixia._create_basic_setup(trial_traffic_interval_s=0)
+
+        ixia.create_traffic_items.assert_called_once_with(
+            traffic_items,
+            override_traffic_items=True,
+            generate_traffic_items=False,
+        )
+        self.assertTrue(ixia._defer_traffic_preparation)
+        ixia.start_traffic.assert_not_called()
+        ixia.stop_traffic.assert_not_called()
+
+    def test_disabled_gate_preserves_immediate_routed_traffic_setup(self):
+        ixia = _create_ixia_instance()
+        port_configs = [MagicMock()]
+        traffic_items = [
+            SimpleNamespace(
+                source_endpoints=[SimpleNamespace(network_group_index=None)],
+                dest_endpoints=[SimpleNamespace(network_group_index=0)],
+            )
+        ]
+        ixia.ixia_recovery = None
+        ixia.session_id = 524
+        ixia.is_existing_session = True
+        ixia.cleanup_config = True
+        ixia.override_traffic_items = True
+        ixia.ixia_config = SimpleNamespace(
+            port_configs=port_configs,
+            traffic_items=traffic_items,
+        )
+        ixia.connect = MagicMock()
+        ixia.rehydrate_vport_indices = MagicMock()
+        ixia.verify_ip_advertise_gating = MagicMock()
+        ixia.start_and_verify_protocols = MagicMock()
+        ixia.create_traffic_items = MagicMock()
+        ixia.start_traffic = MagicMock()
+        ixia.stop_traffic = MagicMock()
+        ixia._is_deferred_routed_traffic_preparation_enabled.return_value = False
+
+        ixia._create_basic_setup(trial_traffic_interval_s=0)
+
+        ixia.create_traffic_items.assert_called_once_with(
+            traffic_items,
+            override_traffic_items=True,
+            generate_traffic_items=True,
+        )
+        self.assertFalse(ixia._defer_traffic_preparation)
+        ixia.start_traffic.assert_called_once_with()
+        ixia.stop_traffic.assert_called_once_with()
+
+    def test_mixed_routed_and_direct_traffic_defers_entire_set(self):
+        ixia = _create_ixia_instance()
+        routed = SimpleNamespace(
+            source_endpoints=[SimpleNamespace(network_group_index=None)],
+            dest_endpoints=[SimpleNamespace(network_group_index=0)],
+        )
+        direct = SimpleNamespace(
+            source_endpoints=[SimpleNamespace(network_group_index=None)],
+            dest_endpoints=[SimpleNamespace(network_group_index=None)],
+        )
+
+        self.assertTrue(ixia._requires_post_setup_traffic_preparation([routed, direct]))
+        ixia.logger.warning.assert_called_once_with(
+            "Mixed routed and directly connected IXIA traffic items defer "
+            "preparation for the entire set"
+        )
+
+    def test_override_defers_unique_replacement_without_deleting_collision(self):
+        ixia = _create_ixia_instance()
+        existing = MagicMock()
+        colliding_item = MagicMock()
+        replacement = MagicMock()
+        replacement.ConfigElement.find.return_value = [MagicMock()]
+        ixia.ixnetwork.Traffic.TrafficItem.find.side_effect = [
+            existing,
+            colliding_item,
+            None,
+        ]
+        ixia.ixnetwork.Traffic.TrafficItem.add.return_value = replacement
+        ixia.configure_frame_setup = MagicMock()
+        ixia.configure_rate_setup = MagicMock()
+        ixia.modify_traffic_options = MagicMock()
+        traffic_item = MagicMock()
+        traffic_item.name = "replacement_flow"
+        traffic_item.traffic_type = ixia_types.TrafficType.IPV4
+        traffic_item.source_endpoints = []
+        traffic_item.dest_endpoints = []
+        traffic_item.packet_headers = []
+        traffic_item.hoplimit_config = None
+        traffic_item.qos_config = None
+        traffic_item.l4_protocol_config = None
+        traffic_item.enabled = True
+        traffic_item.traffic_flow_config = SimpleNamespace(tracking_types=[])
+
+        with (
+            patch(
+                "neteng.test_infra.dne.taac.ixia.ixia.uuid.uuid4",
+                side_effect=[
+                    SimpleNamespace(hex="collision"),
+                    SimpleNamespace(hex="unique"),
+                ],
+            ),
+            patch.object(Ixia, "update_traffic_item_global_params"),
+            patch.object(Ixia, "configure_traffic_stats_tracking"),
+        ):
+            ixia.create_traffic_items(
+                [traffic_item],
+                override_traffic_items=True,
+                generate_traffic_items=False,
+            )
+
+        existing.remove.assert_not_called()
+        colliding_item.remove.assert_not_called()
+        ixia.ixnetwork.Traffic.TrafficItem.find.assert_has_calls(
+            [
+                call(Name=r"^replacement_flow$"),
+                call(Name=r"^replacement_flow__taac_replacement_collision$"),
+                call(Name=r"^replacement_flow__taac_replacement_unique$"),
+            ]
+        )
+        ixia.ixnetwork.Traffic.TrafficItem.add.assert_called_once_with(
+            Name="replacement_flow__taac_replacement_unique",
+            TrafficType=ixia_types.TRAFFIC_TYPE_MAP[ixia_types.TrafficType.IPV4],
+        )
+        replacement.update.assert_called_once_with(Enabled=False)
+        replacement.Generate.assert_not_called()
+        self.assertEqual(
+            [
+                (
+                    "replacement_flow",
+                    "replacement_flow__taac_replacement_unique",
+                )
+            ],
+            ixia._deferred_traffic_item_replacements,
+        )
+
+    def test_finalize_deferred_replacement_swaps_generated_item(self):
+        ixia = _create_ixia_instance()
+        existing = MagicMock()
+        replacement = MagicMock()
+        ixia._deferred_traffic_item_replacements = [
+            ("replacement_flow", "replacement_flow__taac_replacement")
+        ]
+        ixia.ixnetwork.Traffic.TrafficItem.find.side_effect = [
+            replacement,
+            existing,
+        ]
+        operations = MagicMock()
+        operations.attach_mock(existing.update, "rename_previous")
+        operations.attach_mock(replacement.update, "install_replacement")
+        operations.attach_mock(existing.remove, "remove_previous")
+
+        ixia.finalize_deferred_traffic_item_replacements()
+
+        self.assertEqual(
+            [
+                call.rename_previous(
+                    Name="replacement_flow__taac_replacement__previous"
+                ),
+                call.install_replacement(Name="replacement_flow"),
+                call.remove_previous(),
+            ],
+            operations.mock_calls,
+        )
+        existing.update.assert_called_once_with(
+            Name="replacement_flow__taac_replacement__previous"
+        )
+        existing.remove.assert_called_once_with()
+        replacement.update.assert_called_once_with(Name="replacement_flow")
+        self.assertEqual([], ixia._deferred_traffic_item_replacements)
+
+    def test_finalize_deferred_replacement_deduplicates_pending_state(self):
+        ixia = _create_ixia_instance()
+        existing = MagicMock()
+        replacement = MagicMock()
+        replacement_key = (
+            "replacement_flow",
+            "replacement_flow__taac_replacement",
+        )
+        ixia._deferred_traffic_item_replacements = [
+            replacement_key,
+            replacement_key,
+        ]
+        ixia.ixnetwork.Traffic.TrafficItem.find.side_effect = [
+            replacement,
+            existing,
+        ]
+
+        ixia.finalize_deferred_traffic_item_replacements()
+
+        existing.update.assert_called_once_with(
+            Name="replacement_flow__taac_replacement__previous"
+        )
+        existing.remove.assert_called_once_with()
+        replacement.update.assert_called_once_with(Name="replacement_flow")
+        self.assertEqual([], ixia._deferred_traffic_item_replacements)
+
+    def test_finalize_deferred_replacements_validates_all_before_swapping(self):
+        ixia = _create_ixia_instance()
+        first_existing = MagicMock()
+        first_replacement = MagicMock()
+        ixia._deferred_traffic_item_replacements = [
+            ("first_flow", "first_flow__taac_replacement"),
+            ("second_flow", "second_flow__taac_replacement"),
+        ]
+        ixia.ixnetwork.Traffic.TrafficItem.find.side_effect = [
+            first_replacement,
+            first_existing,
+            None,
+        ]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Deferred replacement second_flow__taac_replacement is missing",
+        ):
+            ixia.finalize_deferred_traffic_item_replacements()
+
+        first_existing.update.assert_not_called()
+        first_existing.remove.assert_not_called()
+        first_replacement.update.assert_not_called()
+        self.assertEqual(
+            [
+                ("first_flow", "first_flow__taac_replacement"),
+                ("second_flow", "second_flow__taac_replacement"),
+            ],
+            ixia._deferred_traffic_item_replacements,
+        )
+
+    def test_finalize_deferred_replacements_retries_only_unfinished_swaps(self):
+        ixia = _create_ixia_instance()
+        first_existing = MagicMock()
+        first_replacement = MagicMock()
+        second_existing = MagicMock()
+        second_replacement = MagicMock()
+        third_existing = MagicMock()
+        third_replacement = MagicMock()
+        second_replacement.update.side_effect = [RuntimeError("rename failed"), None]
+        ixia._deferred_traffic_item_replacements = [
+            ("first_flow", "first_flow__taac_replacement"),
+            ("second_flow", "second_flow__taac_replacement"),
+            ("third_flow", "third_flow__taac_replacement"),
+        ]
+        ixia._deferred_traffic_item_replacement_swaps_started = set()
+        ixia.ixnetwork.Traffic.TrafficItem.find.side_effect = [
+            first_replacement,
+            first_existing,
+            second_replacement,
+            second_existing,
+            third_replacement,
+            third_existing,
+        ]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Failed to install deferred replacements: second_flow: rename failed; "
+            "pending replacements: second_flow",
+        ):
+            ixia.finalize_deferred_traffic_item_replacements()
+
+        self.assertEqual(
+            [("second_flow", "second_flow__taac_replacement")],
+            ixia._deferred_traffic_item_replacements,
+        )
+        self.assertEqual(
+            {("second_flow", "second_flow__taac_replacement")},
+            ixia._deferred_traffic_item_replacement_swaps_started,
+        )
+        second_existing.update.assert_called_once_with(
+            Name="second_flow__taac_replacement__previous"
+        )
+        second_existing.remove.assert_not_called()
+
+        ixia.ixnetwork.Traffic.TrafficItem.find.side_effect = [
+            second_replacement,
+            second_existing,
+        ]
+        ixia.finalize_deferred_traffic_item_replacements()
+
+        first_existing.remove.assert_called_once_with()
+        first_replacement.update.assert_called_once_with(Name="first_flow")
+        second_existing.remove.assert_called_once_with()
+        third_existing.remove.assert_called_once_with()
+        third_replacement.update.assert_called_once_with(Name="third_flow")
+        self.assertEqual(2, second_replacement.update.call_count)
+        self.assertEqual([], ixia._deferred_traffic_item_replacements)
+        self.assertEqual(set(), ixia._deferred_traffic_item_replacement_swaps_started)
+
+    def test_finalize_deferred_replacement_retries_backup_removal(self):
+        ixia = _create_ixia_instance()
+        previous_item = MagicMock()
+        previous_item.remove.side_effect = [RuntimeError("remove failed"), None]
+        replacement = MagicMock()
+        installed_replacement = MagicMock()
+        replacement_key = (
+            "replacement_flow",
+            "replacement_flow__taac_replacement",
+        )
+        ixia._deferred_traffic_item_replacements = [replacement_key]
+        ixia._deferred_traffic_item_replacement_swaps_started = set()
+        ixia.ixnetwork.Traffic.TrafficItem.find.side_effect = [
+            replacement,
+            previous_item,
+        ]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Failed to install deferred replacements: replacement_flow: remove failed",
+        ):
+            ixia.finalize_deferred_traffic_item_replacements()
+
+        self.assertEqual([replacement_key], ixia._deferred_traffic_item_replacements)
+        self.assertEqual(
+            {replacement_key},
+            ixia._deferred_traffic_item_replacement_swaps_started,
+        )
+
+        ixia.ixnetwork.Traffic.TrafficItem.find.side_effect = [
+            None,
+            previous_item,
+            installed_replacement,
+        ]
+        ixia.finalize_deferred_traffic_item_replacements()
+
+        previous_item.update.assert_called_once_with(
+            Name="replacement_flow__taac_replacement__previous"
+        )
+        replacement.update.assert_called_once_with(Name="replacement_flow")
+        self.assertEqual(2, previous_item.remove.call_count)
+        self.assertEqual([], ixia._deferred_traffic_item_replacements)
+        self.assertEqual(set(), ixia._deferred_traffic_item_replacement_swaps_started)
+
+    def test_finalize_deferred_replacement_cleans_up_backup_after_prior_rename(self):
+        ixia = _create_ixia_instance()
+        previous_item = MagicMock()
+        installed_replacement = MagicMock()
+        replacement_key = (
+            "replacement_flow",
+            "replacement_flow__taac_replacement",
+        )
+        ixia._deferred_traffic_item_replacements = [replacement_key]
+        ixia._deferred_traffic_item_replacement_swaps_started = {replacement_key}
+        ixia.ixnetwork.Traffic.TrafficItem.find.side_effect = [
+            None,
+            previous_item,
+            installed_replacement,
+        ]
+
+        ixia.finalize_deferred_traffic_item_replacements()
+
+        previous_item.remove.assert_called_once_with()
+        installed_replacement.remove.assert_not_called()
+        installed_replacement.update.assert_not_called()
+        self.assertEqual([], ixia._deferred_traffic_item_replacements)
+        self.assertEqual(set(), ixia._deferred_traffic_item_replacement_swaps_started)
+
+    def test_override_keeps_existing_item_when_replacement_configuration_fails(self):
+        ixia = _create_ixia_instance()
+        existing = MagicMock()
+        replacement = MagicMock()
+        replacement.ConfigElement.find.return_value = [MagicMock()]
+        ixia.ixnetwork.Traffic.TrafficItem.find.side_effect = [existing, None]
+        ixia.ixnetwork.Traffic.TrafficItem.add.return_value = replacement
+        ixia.configure_frame_setup = MagicMock(
+            side_effect=RuntimeError("frame setup failed")
+        )
+        traffic_item = MagicMock()
+        traffic_item.name = "replacement_flow"
+        traffic_item.traffic_type = ixia_types.TrafficType.IPV4
+        traffic_item.source_endpoints = []
+        traffic_item.dest_endpoints = []
+        traffic_item.packet_headers = []
+        traffic_item.hoplimit_config = None
+        traffic_item.qos_config = None
+        traffic_item.l4_protocol_config = None
+        traffic_item.enabled = True
+        traffic_item.traffic_flow_config = SimpleNamespace(tracking_types=[])
+
+        with (
+            patch.object(Ixia, "update_traffic_item_global_params"),
+            self.assertRaisesRegex(RuntimeError, "frame setup failed"),
+        ):
+            ixia.create_traffic_items(
+                [traffic_item],
+                override_traffic_items=True,
+                generate_traffic_items=False,
+            )
+
+        existing.remove.assert_not_called()
 
     def test_rehydrates_existing_topology_from_declarative_config(self):
         ixia = _create_ixia_instance()

@@ -26,12 +26,45 @@ _RESOURCE_ACCOUNTANT_REJECTION_RE = re.compile(
     re.IGNORECASE,
 )
 _AGENT_LOG_TIMESTAMP_RE = re.compile(r"\b[A-Z]\d{4} \d{2}:\d{2}:\d{2}")
+_EOS_LOG_MNEMONIC_RE = re.compile(
+    r"%[A-Z0-9_]+-\d+-([A-Z0-9_]+):",
+    re.IGNORECASE,
+)
+_EOS_RESOURCE_STATE_SUFFIX_RE = re.compile(r"_(?:FULL|NORMAL)$", re.IGNORECASE)
 _RESOURCE_ACCOUNTANT_GREP_PATTERN = (
     "Total (NDP|ARP|l2|unified neighbor) entries in new switchState: "
     "[0-9]+ exceeds the limit: [0-9]+|"
     "Invalid route update - exceeding (DLB|route or ECMP) resource limits|"
     "State updated rejected by resource accountant"
 )
+
+
+def _eos_log_mnemonic(entry: str) -> str | None:
+    match = _EOS_LOG_MNEMONIC_RE.search(entry)
+    return match.group(1).upper() if match else None
+
+
+def _has_eos_resource_state(entry: str, mnemonic: str, state: str) -> bool:
+    return _eos_log_mnemonic(entry) == f"{mnemonic}_{state}".upper()
+
+
+def _normalize_eos_resource_mnemonic(mnemonic: str) -> str:
+    return _EOS_RESOURCE_STATE_SUFFIX_RE.sub("", mnemonic).upper()
+
+
+def _recovered_eos_resource_full_indexes(
+    entries: t.Iterable[str],
+    mnemonic: str,
+) -> frozenset[int]:
+    pending_full_indexes = []
+    recovered_full_indexes = set()
+    for index, entry in enumerate(entries):
+        if _has_eos_resource_state(entry, mnemonic, "FULL"):
+            pending_full_indexes.append(index)
+        elif _has_eos_resource_state(entry, mnemonic, "NORMAL"):
+            recovered_full_indexes.update(pending_full_indexes)
+            pending_full_indexes.clear()
+    return frozenset(recovered_full_indexes)
 
 
 def find_resource_accountant_rejections(
@@ -193,6 +226,25 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
                 f"end_time ({end_time}) must not be earlier than start_time "
                 f"({start_time})"
             )
+        allowed_recovered_resource_mnemonics = check_params.get(
+            "allowed_recovered_resource_mnemonics", []
+        )
+        if not isinstance(allowed_recovered_resource_mnemonics, list) or any(
+            not isinstance(mnemonic, str) or not mnemonic
+            for mnemonic in allowed_recovered_resource_mnemonics
+        ):
+            raise ValueError(
+                "allowed_recovered_resource_mnemonics must be a list of "
+                "non-empty strings"
+            )
+        normalized_resource_mnemonics = tuple(
+            _normalize_eos_resource_mnemonic(mnemonic)
+            for mnemonic in allowed_recovered_resource_mnemonics
+        )
+        if any(not mnemonic for mnemonic in normalized_resource_mnemonics):
+            raise ValueError(
+                "allowed_recovered_resource_mnemonics must name an EOS resource"
+            )
 
         return {
             "start_time": start_time,
@@ -200,6 +252,7 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
             "include_regex": include_regex,
             "exclude_regex": exclude_regex,
             "agent_name": check_params.get("agent_name"),
+            "allowed_recovered_resource_mnemonics": normalized_resource_mnemonics,
         }
 
     async def _handle_arista_agent_logs(
@@ -273,9 +326,49 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
         system_logs = await arista_utils.check_eos_system_logs(
             self.driver, params.get("start_time"), params.get("end_time")
         )
+        allowed_recovered_resource_mnemonics = params[
+            "allowed_recovered_resource_mnemonics"
+        ]
+        recovered_full_indexes_by_mnemonic = {}
+        for mnemonic in allowed_recovered_resource_mnemonics:
+            recovered_full_indexes_by_mnemonic[mnemonic] = (
+                _recovered_eos_resource_full_indexes(system_logs, mnemonic)
+            )
         classification = arista_utils.classify_eos_system_log_entries(system_logs)
         recovery_context = list(classification.excluded)
-        system_log_issues = list(classification.issues)
+        system_log_issues = []
+        tolerated_issues = []
+        indexed_issues = classification.issues_with_indexes
+        if tuple(issue for _, issue in indexed_issues) != classification.issues:
+            self.logger.warning(
+                "Bypassing allowed recovered EOS resource tolerance because "
+                "indexed issue evidence does not align with classified issues "
+                "(%d indexed entries for %d issues)",
+                len(indexed_issues),
+                len(classification.issues),
+            )
+            system_log_issues.extend(classification.issues)
+        else:
+            for index, issue in indexed_issues:
+                issue_mnemonic = _eos_log_mnemonic(issue)
+                is_allowed_recovered_resource = any(
+                    index in recovered_indexes
+                    and issue_mnemonic == f"{mnemonic.upper()}_FULL"
+                    for mnemonic, recovered_indexes in (
+                        recovered_full_indexes_by_mnemonic.items()
+                    )
+                )
+                target = (
+                    tolerated_issues
+                    if is_allowed_recovered_resource
+                    else system_log_issues
+                )
+                target.append(issue)
+        if tolerated_issues:
+            self.logger.warning(
+                "Observed allowed recovered EOS resource issues: %s",
+                tolerated_issues,
+            )
 
         if recovery_context:
             self.logger.warning(
@@ -300,11 +393,16 @@ class LogParsingHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn
             if recovery_context
             else ""
         )
+        tolerated_suffix = (
+            f"; allowed recovered resource issues: {tolerated_issues}"
+            if tolerated_issues
+            else ""
+        )
         return hc_types.HealthCheckResult(
             status=hc_types.HealthCheckStatus.PASS,
             message=(
                 "No emergency/critical/error issues found in EOS system logs"
-                f"{recovery_suffix}"
+                f"{recovery_suffix}{tolerated_suffix}"
             ),
         )
 

@@ -439,3 +439,241 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
         self.assertIn("L3_HOST_RESOURCE_FULL", result.message)
         self.assertIn("recovery context", result.message)
+
+    async def test_arista_allowed_recovered_resource_full_passes(self) -> None:
+        issue = (
+            "[ERROR] switch: %SAND-3-FEC_RESOURCE_FULL: "
+            "Not all FECs are programmed in hardware"
+        )
+        repeated_issue = (
+            "[ERROR] switch: %SAND-3-FEC_RESOURCE_FULL: "
+            "FEC programming remains constrained"
+        )
+        recovery = (
+            "[ERROR] switch: %ROUTING-3-FEC_RESOURCE_NORMAL: "
+            "All FECs are programmed in hardware"
+        )
+        for configured_mnemonic in (
+            "FEC_RESOURCE",
+            "FEC_RESOURCE_FULL",
+            "fec_resource_normal",
+        ):
+            with (
+                self.subTest(configured_mnemonic=configured_mnemonic),
+                patch.object(
+                    log_parsing_health_check_module.arista_utils,
+                    "check_eos_system_logs",
+                    new=AsyncMock(return_value=[issue, repeated_issue, recovery]),
+                ),
+                patch.object(
+                    log_parsing_health_check_module.arista_utils,
+                    "classify_eos_system_log_entries",
+                    wraps=(
+                        log_parsing_health_check_module.arista_utils.classify_eos_system_log_entries
+                    ),
+                ) as classify_logs,
+            ):
+                result = await self.health_check._run_arista(
+                    self.device,
+                    self.input,
+                    {
+                        "check_system_logs": True,
+                        "allowed_recovered_resource_mnemonics": [configured_mnemonic],
+                    },
+                )
+
+            self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
+            self.assertIn("allowed recovered resource issues", result.message)
+            self.assertIn("FEC_RESOURCE_FULL", result.message)
+            classify_logs.assert_called_once_with([issue, repeated_issue, recovery])
+
+    async def test_arista_recovered_resource_does_not_mask_same_line_issue(
+        self,
+    ) -> None:
+        mixed_issue = (
+            "[ERROR] switch: %SYS-3-CONTROL_PLANE_FAILURE: unrelated alarm; "
+            "%SAND-3-FEC_RESOURCE_FULL: FEC programming is constrained"
+        )
+        recovery = (
+            "[ERROR] switch: %ROUTING-3-FEC_RESOURCE_NORMAL: "
+            "All FECs are programmed in hardware"
+        )
+        with patch.object(
+            log_parsing_health_check_module.arista_utils,
+            "check_eos_system_logs",
+            new=AsyncMock(return_value=[mixed_issue, recovery]),
+        ):
+            result = await self.health_check._run_arista(
+                self.device,
+                self.input,
+                {
+                    "check_system_logs": True,
+                    "allowed_recovered_resource_mnemonics": ["FEC_RESOURCE"],
+                },
+            )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("CONTROL_PLANE_FAILURE", result.message)
+
+    async def test_arista_unrelated_primary_recovery_mnemonic_does_not_recover(
+        self,
+    ) -> None:
+        issue = (
+            "[ERROR] switch: %SAND-3-FEC_RESOURCE_FULL: "
+            "Not all FECs are programmed in hardware"
+        )
+        unrelated_recovery = (
+            "[ERROR] switch: %SAND-3-L3_HOST_RESOURCE_NORMAL: "
+            "diagnostic context mentions FEC_RESOURCE_NORMAL:"
+        )
+        with patch.object(
+            log_parsing_health_check_module.arista_utils,
+            "check_eos_system_logs",
+            new=AsyncMock(return_value=[issue, unrelated_recovery]),
+        ):
+            result = await self.health_check._run_arista(
+                self.device,
+                self.input,
+                {
+                    "check_system_logs": True,
+                    "allowed_recovered_resource_mnemonics": ["FEC_RESOURCE"],
+                },
+            )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("FEC_RESOURCE_FULL", result.message)
+
+    async def test_arista_invalid_index_evidence_fails_without_duplicates(
+        self,
+    ) -> None:
+        issue = "[ERROR] switch: %SYS-3-CONTROL_PLANE_FAILURE: unrelated alarm"
+        classification = (
+            log_parsing_health_check_module.arista_utils.EosSystemLogClassification(
+                issues=(issue,),
+                excluded=(),
+                issues_with_indexes=((0, issue), (0, issue)),
+            )
+        )
+        with (
+            patch.object(
+                log_parsing_health_check_module.arista_utils,
+                "check_eos_system_logs",
+                new=AsyncMock(return_value=[issue]),
+            ),
+            patch.object(
+                log_parsing_health_check_module.arista_utils,
+                "classify_eos_system_log_entries",
+                return_value=classification,
+            ),
+        ):
+            result = await self.health_check._run_arista(
+                self.device,
+                self.input,
+                {
+                    "check_system_logs": True,
+                    "allowed_recovered_resource_mnemonics": ["FEC_RESOURCE"],
+                },
+            )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("Found 1 system log issues", result.message)
+        self.logger.warning.assert_any_call(
+            "Bypassing allowed recovered EOS resource tolerance because "
+            "indexed issue evidence does not align with classified issues "
+            "(%d indexed entries for %d issues)",
+            2,
+            1,
+        )
+
+    async def test_arista_allowed_unrecovered_resource_full_fails(self) -> None:
+        issue = (
+            "[ERROR] switch: %SAND-3-FEC_RESOURCE_FULL: "
+            "Not all FECs are programmed in hardware"
+        )
+        with patch.object(
+            log_parsing_health_check_module.arista_utils,
+            "check_eos_system_logs",
+            new=AsyncMock(return_value=[issue]),
+        ):
+            result = await self.health_check._run_arista(
+                self.device,
+                self.input,
+                {
+                    "check_system_logs": True,
+                    "allowed_recovered_resource_mnemonics": ["FEC_RESOURCE"],
+                },
+            )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("FEC_RESOURCE_FULL", result.message)
+
+    async def test_arista_allowed_resource_must_finish_recovered(self) -> None:
+        recovery = (
+            "[ERROR] switch: %ROUTING-3-FEC_RESOURCE_NORMAL: "
+            "All FECs are programmed in hardware"
+        )
+        issue = (
+            "[ERROR] switch: %SAND-3-FEC_RESOURCE_FULL: "
+            "Not all FECs are programmed in hardware"
+        )
+        with patch.object(
+            log_parsing_health_check_module.arista_utils,
+            "check_eos_system_logs",
+            new=AsyncMock(return_value=[issue, recovery, issue]),
+        ):
+            result = await self.health_check._run_arista(
+                self.device,
+                self.input,
+                {
+                    "check_system_logs": True,
+                    "allowed_recovered_resource_mnemonics": ["FEC_RESOURCE"],
+                },
+            )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("FEC_RESOURCE_FULL", result.message)
+
+    def test_arista_classification_preserves_duplicate_issue_indexes(self) -> None:
+        issue = (
+            "[ERROR] switch: %SAND-3-FEC_RESOURCE_FULL: "
+            "Not all FECs are programmed in hardware"
+        )
+        recovery = (
+            "[ERROR] switch: %ROUTING-3-FEC_RESOURCE_NORMAL: "
+            "All FECs are programmed in hardware"
+        )
+
+        classification = log_parsing_health_check_module.arista_utils.classify_eos_system_log_entries(
+            [issue, recovery, issue]
+        )
+
+        self.assertEqual((issue, issue), classification.issues)
+        self.assertEqual(((0, issue), (2, issue)), classification.issues_with_indexes)
+
+    async def test_arista_allowed_recovery_does_not_match_longer_mnemonic(
+        self,
+    ) -> None:
+        issue = (
+            "[ERROR] switch: %SAND-3-ROUTING_FEC_RESOURCE_FULL: "
+            "Not all routing FECs are programmed in hardware"
+        )
+        recovery = (
+            "[ERROR] switch: %ROUTING-3-FEC_RESOURCE_NORMAL: "
+            "All FECs are programmed in hardware"
+        )
+        with patch.object(
+            log_parsing_health_check_module.arista_utils,
+            "check_eos_system_logs",
+            new=AsyncMock(return_value=[issue, recovery]),
+        ):
+            result = await self.health_check._run_arista(
+                self.device,
+                self.input,
+                {
+                    "check_system_logs": True,
+                    "allowed_recovered_resource_mnemonics": ["FEC_RESOURCE"],
+                },
+            )
+
+        self.assertEqual(hc_types.HealthCheckStatus.FAIL, result.status)
+        self.assertIn("ROUTING_FEC_RESOURCE_FULL", result.message)

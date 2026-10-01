@@ -92,6 +92,12 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
+    _traffic_preparation_pending: bool = False
+    _deferred_traffic_generation_complete: bool = False
+    _traffic_start_pending: bool = False
+    _traffic_view_readiness_pending: bool = False
+    _pending_traffic_regexes: t.Optional[t.List[str]] = None
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         Thread.__init__(self, daemon=True)
@@ -105,6 +111,11 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self.test_case_uuid: t.Optional[str] = None
         self.paused = False
         self._in_flight = False
+        self._traffic_preparation_pending = False
+        self._deferred_traffic_generation_complete = False
+        self._traffic_start_pending = False
+        self._traffic_view_readiness_pending = False
+        self._pending_traffic_regexes = None
         self.saved_configs = {}
 
         self.traffic_item_view_assistant = None
@@ -2084,13 +2095,86 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
         self.apply_traffic()
         self.wait_for_view_assistants_ready()
 
+    def _complete_deferred_traffic_start(self) -> None:
+        self._traffic_preparation_pending = False
+        self._deferred_traffic_generation_complete = False
+        self._traffic_start_pending = False
+        self._traffic_view_readiness_pending = True
+        self._pending_traffic_regexes = None
+
+    def start_traffic(self, regenerate_traffic_items: bool = False) -> None:
+        if self._traffic_start_pending and self.is_traffic_running():
+            self._complete_deferred_traffic_start()
+        if (
+            self._traffic_view_readiness_pending
+            and not self._traffic_preparation_pending
+            and self.is_traffic_running()
+        ):
+            self.wait_for_view_assistants_ready()
+            self._traffic_view_readiness_pending = False
+            return
+        deferred = self._traffic_preparation_pending
+        if deferred and self.is_traffic_running():
+            self.logger.info(
+                "Stopping retained-session traffic before deferred regeneration"
+            )
+            self.stop_traffic()
+        if deferred and not self._traffic_start_pending:
+            # Generate temporary replacements before removing the retained,
+            # generated items that they supersede.
+            if not self._deferred_traffic_generation_complete:
+                self.regenerate_traffic_items()
+                self._deferred_traffic_generation_complete = True
+            self.finalize_deferred_traffic_item_replacements()
+            self._traffic_start_pending = True
+        if self._traffic_start_pending:
+            self.enable_traffic(
+                self._pending_traffic_regexes,
+                apply_changes=False,
+            )
+        super().start_traffic(
+            regenerate_traffic_items=(
+                regenerate_traffic_items
+                and not deferred
+                and not self._traffic_start_pending
+            )
+        )
+        if self._traffic_start_pending:
+            if not self.is_traffic_running():
+                raise RuntimeError(
+                    "IXIA traffic did not start after deferred preparation; "
+                    "traffic start remains pending for retry"
+                )
+            self._complete_deferred_traffic_start()
+        if self._traffic_view_readiness_pending:
+            self.wait_for_view_assistants_ready()
+            self._traffic_view_readiness_pending = False
+
     def begin_test_case(self, test_case_uuid, traffic_regexes=None) -> None:
         self.test_case_uuid = test_case_uuid
         # The REST trace is cut here so the calls this test case drives land
         # in their own slice, separate from setup and from its neighbours.
         self.rotate_api_trace_phase(self._current_playbook_name or test_case_uuid)
-        self.enable_traffic(traffic_regexes)
-        self.prepare_traffic()
+        if self._defer_traffic_preparation:
+            self._traffic_preparation_pending = True
+            self._deferred_traffic_generation_complete = False
+            self._traffic_start_pending = False
+            self._traffic_view_readiness_pending = False
+            self._pending_traffic_regexes = (
+                list(traffic_regexes) if traffic_regexes is not None else None
+            )
+            self.logger.info(
+                "Deferred routed traffic selection, generation, and apply until "
+                "the first post-setup traffic start"
+            )
+        else:
+            self._traffic_preparation_pending = False
+            self._deferred_traffic_generation_complete = False
+            self._traffic_start_pending = False
+            self._traffic_view_readiness_pending = False
+            self._pending_traffic_regexes = None
+            self.enable_traffic(traffic_regexes, apply_changes=False)
+            self.prepare_traffic()
         if self.sample_time > 0:
             if not self.capturing:
                 self.start()

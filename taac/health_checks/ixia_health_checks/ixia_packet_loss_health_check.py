@@ -89,7 +89,11 @@ class IxiaPacketLossHealthCheck(
             )
         violations_dict = [try_thrift_to_dict(violation) for violation in violations]
         if violations or missing_identifiers:
-            result = await self._failure_result(violations_dict, missing_identifiers)
+            result = await self._failure_result(
+                violations_dict,
+                missing_identifiers,
+                latest_stats,
+            )
         else:
             result = hc_types.HealthCheckResult(status=hc_types.HealthCheckStatus.PASS)
         # Only clear traffic stats if not explicitly disabled.
@@ -101,6 +105,7 @@ class IxiaPacketLossHealthCheck(
         self,
         violations: t.List[t.Dict[str, t.Any]],
         missing_identifiers: t.List[str],
+        latest_stats: t.List[t.Dict[str, t.Any]],
     ) -> hc_types.HealthCheckResult:
         unique_missing = sorted(set(missing_identifiers))
         details = ""
@@ -112,18 +117,41 @@ class IxiaPacketLossHealthCheck(
             )
         if violations:
             details += tabulate(violations, headers="keys", tablefmt="simple_grid")
+        if latest_stats:
+            details += "\nObserved IXIA packet-loss statistics:\n"
+            details += tabulate(latest_stats, headers="keys", tablefmt="simple_grid")
         # Everpaste URLs are already clickable; avoid the throttled fburl tier.
         everpaste_url = await async_everpaste_str(details)
 
+        # IXIA can emit multiple directional rows for one traffic-item name.
+        stats_by_violation_name: dict[str, list[t.Dict[str, t.Any]]] = {}
+        for stat in latest_stats:
+            identifier = stat.get("identifier")
+            if isinstance(identifier, str):
+                stats_by_violation_name.setdefault(identifier, []).append(stat)
         rendered: t.List[str] = []
         if unique_missing:
             rendered.extend(f"missing={item}" for item in unique_missing[:5])
         remaining_slots = max(0, 5 - len(rendered))
-        rendered.extend(
-            f"{violation.get('name', 'unknown')}: "
-            f"observed={violation.get('str_value', '?')}"
-            for violation in violations[:remaining_slots]
-        )
+        for violation in violations[:remaining_slots]:
+            name = violation.get("name", "unknown")
+            observed_rows = stats_by_violation_name.get(name)
+            if not observed_rows:
+                self.logger.warning(
+                    "No IXIA statistic matched packet-loss violation %r",
+                    name,
+                )
+                rendered.append(f"{name}: observed={violation.get('str_value', '?')}")
+            else:
+                observed = "; ".join(
+                    f"duration={stat.get('packet_loss_duration', '?')}ms, "
+                    f"loss={stat.get('packet_loss_percentage', '?')}%, "
+                    f"frame_delta={stat.get('frame_delta', '?')}"
+                    for stat in observed_rows
+                )
+                rendered.append(
+                    f"{name}: {observed} (evaluated={violation.get('str_value', '?')})"
+                )
         total_count = len(unique_missing) + len(violations)
         suffix = (
             f" (+{total_count - len(rendered)} more)"
