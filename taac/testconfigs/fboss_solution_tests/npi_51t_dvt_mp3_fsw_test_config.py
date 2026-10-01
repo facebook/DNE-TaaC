@@ -77,4 +77,10 @@ NPI_51T_DVT_MP3_FSW_TEST_CONFIG = create_dctypef_npi_test_config(
     bgpd_restart_no_of_interations=5,
     wedge_agent_restart_no_of_interations=5,
     basset_pool="dne.test",
+    # Pinned rather than resolved: netwhoami no longer resolves this DUT, and
+    # the lookup runs at import, so leaving it live breaks the import of every
+    # config module in this package. Minipack3 queues, per CPU_QUEUES_BY_HARDWARE.
+    low_queue=0,
+    mid_queue=2,
+    high_queue=9,
 )

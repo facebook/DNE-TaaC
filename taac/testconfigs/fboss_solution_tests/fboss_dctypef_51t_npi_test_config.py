@@ -161,9 +161,24 @@ def _add_common_checks_to_npi_playbooks(
     return result
 
 
-def get_cpu_queue_constants(hostname: str):
+# (low_queue, mid_queue, high_queue) keyed by the netwhoami Hardware enum name.
+CPU_QUEUES_BY_HARDWARE: t.Dict[str, t.Tuple[int, int, int]] = {
+    "MONTBLANC": (0, 2, 9),  # MONTBLANC = 40 (Minipack3)
+    "MINIPACK3BA": (0, 2, 9),  # MINIPACK3BA = 72
+    "ICECUBE800BC": (0, 2, 9),  # ICECUBE800BC = 70 (IcePack TH6)
+    "MORGAN800CC": (0, 2, 7),  # MORGAN800CC = 46 (Kodiak3)
+}
+
+
+def get_cpu_queue_constants(hostname: str) -> t.Tuple[int, int, int]:
     """
     Determine CPU queue constants based on hardware type using netwhoami.
+
+    This is a LIVE netwhoami lookup, and callers run it while building a
+    TestConfig at module import. A device that has been decommissioned or is
+    otherwise absent from netwhoami therefore takes down the import of every
+    config module in the package, not just its own -- so a caller that knows
+    its silicon should pass the queues explicitly instead of relying on this.
 
     Args:
         hostname: Device hostname to query hardware information
@@ -172,8 +187,10 @@ def get_cpu_queue_constants(hostname: str):
         tuple: (low_queue, mid_queue, high_queue) values based on hardware
 
     Raises:
-        ValueError: If hardware type is unknown or unsupported
-        Exception: If netwhoami fetch fails
+        ValueError: If the device cannot be resolved, or resolves to a hardware
+            type with no queue mapping. Not defaulted: the queue indices decide
+            which CPU queue the test asserts on, so a guess would let a run
+            measure the wrong queue and report a green result for it.
     """
     try:
         # Use asyncio.run to call the async fetch_whoami function synchronously
@@ -181,26 +198,21 @@ def get_cpu_queue_constants(hostname: str):
         # Normalize hardware to its symbolic name so this works identically for
         # the Meta NetWhoAmI thrift (enum .name) and the OSS stand-in (string name).
         hardware = netwhoami.hw.name if netwhoami.hw else ""
-
-        # Check against specific Hardware names from the thrift Hardware enum.
-        if hardware in (
-            "MONTBLANC",  # MONTBLANC = 40 (for minipack3)
-            "MINIPACK3BA",  # MINIPACK3BA = 72
-        ):
-            return (0, 2, 9)
-        elif hardware == "MORGAN800CC":  # MORGAN800CC = 46 (Kodiak3)
-            return (0, 2, 7)
-        else:
-            raise ValueError(
-                f"Unknown or unsupported hardware type '{hardware}' for {hostname}. "
-                f"Please add CPU queue constants for this hardware type."
-            )
     except Exception as e:
-        if isinstance(e, ValueError):
-            # Re-raise ValueError (unknown hardware type)
-            raise
-        # For all other exceptions (netwhoami fetch failures), raise with context
-        raise Exception(f"Failed to fetch netwhoami for {hostname}: {e}") from e
+        raise ValueError(
+            f"Failed to resolve netwhoami hardware for {hostname}: {e}. "
+            f"Pass low_queue/mid_queue/high_queue explicitly to keep this "
+            f"config importable while the device is unresolvable."
+        ) from e
+
+    queues = CPU_QUEUES_BY_HARDWARE.get(hardware)
+    if queues is None:
+        raise ValueError(
+            f"Unknown or unsupported hardware type '{hardware}' for {hostname}. "
+            f"Add it to CPU_QUEUES_BY_HARDWARE, or pass "
+            f"low_queue/mid_queue/high_queue explicitly."
+        )
+    return queues
 
 
 def create_dctypef_npi_test_config(
@@ -256,6 +268,9 @@ def create_dctypef_npi_test_config(
     wedge_agent_restart_no_of_interations=1,
     direct_ixia_connections=None,
     basset_pool=None,
+    low_queue=None,
+    mid_queue=None,
+    high_queue=None,
 ):
     """Build the DC-TypeF 51T NPI base TestConfig.
 
@@ -287,12 +302,18 @@ def create_dctypef_npi_test_config(
             Restart iteration counts (sic — preserves historical typo).
         direct_ixia_connections: Optional explicit direct-IXIA connection mapping.
         basset_pool: Override basset pool selection.
+        low_queue / mid_queue / high_queue: CPU queue indices. When all three are
+            provided they bypass the netwhoami-driven get_cpu_queue_constants()
+            lookup. Required for a device netwhoami cannot resolve, since that
+            lookup runs at import and its failure would otherwise break every
+            config module in this package.
 
     Returns:
         TestConfig: The DC-TypeF NPI base TestConfig.
     """
     # Get hardware-specific CPU queue constants
-    low_queue, mid_queue, high_queue = get_cpu_queue_constants(device_name)
+    if low_queue is None or mid_queue is None or high_queue is None:
+        low_queue, mid_queue, high_queue = get_cpu_queue_constants(device_name)
     # Create and return the complete test configuration
     return TestConfig(
         name=test_config_name,
