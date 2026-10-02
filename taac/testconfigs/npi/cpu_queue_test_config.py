@@ -2118,6 +2118,9 @@ NPI_51T_DVT_KO3_SSW_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
     bgpd_restart_no_of_interations=5,
     wedge_agent_restart_no_of_interations=5,
     basset_pool="dne.test",
+    low_queue=0,
+    mid_queue=2,
+    high_queue=7,
 )
 
 
@@ -2183,6 +2186,9 @@ NPI_51T_DVT_MP3_XSW_CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
     bgpd_restart_no_of_interations=5,
     wedge_agent_restart_no_of_interations=5,
     basset_pool="dne.test",
+    low_queue=0,
+    mid_queue=2,
+    high_queue=9,
 )
 
 
@@ -2285,6 +2291,9 @@ NPI_DVT_ICEPACK_GTSW__CPU_QUEUE_TEST_CONFIG = create_npi_cpu_queue_test_config(
     bgpd_restart_no_of_interations=5,
     wedge_agent_restart_no_of_interations=5,
     basset_pool="dne.test",
+    low_queue=0,
+    mid_queue=2,
+    high_queue=9,
     # Drop `openr` from the postcheck ServiceRestartHealthCheck monitored list.
     # IcePack GTSW is a backend platform and does not run Open/R — the service
     # is not loaded on this DUT. The precheck SystemctlActiveStateHealthCheck
