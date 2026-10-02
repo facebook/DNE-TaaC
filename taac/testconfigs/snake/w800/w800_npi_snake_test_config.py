@@ -44,11 +44,12 @@ from taac.testconfigs.snake.test_test_config import (
 from taac.test_as_a_config import types as taac_types
 
 
-# Everything gen_snake_playbooks emits except test_72hr_longevity (3-day soak,
-# run on its own once the short soaks are clean) and the three system-reboot
-# playbooks (need BMC reachability from the test host). Spelled as an allowlist
-# rather than playbooks_to_skip because gen_snake_test_config validates
-# playbooks_to_include against the generated set and raises on an unknown name.
+# Everything gen_snake_playbooks emits except the FSDB disruptions,
+# test_72hr_longevity (3-day soak, run on its own once the short soaks are clean),
+# and the three system-reboot playbooks (need BMC reachability from the test
+# host). Spelled as an allowlist rather than playbooks_to_skip because
+# gen_snake_test_config validates playbooks_to_include against the generated set
+# and raises on an unknown name.
 _W800_NPI_CORE_PLAYBOOKS = [
     "test_one_min_longevity",
     "test_ten_min_longevity",
@@ -63,8 +64,6 @@ _W800_NPI_CORE_PLAYBOOKS = [
     "test_snake_agent_crash",
     "test_snake_qsfp_service_restart",
     "test_snake_qsfp_service_crash",
-    "test_snake_fsdb_restart",
-    "test_snake_fsdb_crash",
 ]
 
 # FR4 optics on these beds do not relink within a single postcheck sample after a
