@@ -8,6 +8,9 @@ from unittest.mock import patch
 
 from taac.abstractions.churn.route import RouteStorm
 from taac.constants import BgpPlusPlusProfile
+from taac.playbooks.routing import (
+    bgp_ebb_playbooks as _bgp_ebb_playbooks,
+)
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_route_storm_playbook,
 )
@@ -146,10 +149,12 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
         )
 
     def test_openr_profile_enables_ibgp_pnh_check(self) -> None:
-        target = (
-            "neteng.test_infra.dne.taac.playbooks.routing."
-            "bgp_ebb_playbooks.get_profile_checks"
-        )
+        # Patch the module under the name this test imported it as, so the
+        # patch lands on the same module object the factory calls through.
+        # ShipIt rewrites import statements but not string literals, so a
+        # hardcoded dotted path is only correct in one of the two worlds; read
+        # the name off the imported module instead.
+        target = f"{_bgp_ebb_playbooks.__name__}.get_profile_checks"
         with patch(target) as get_checks:
             get_checks.return_value = SimpleNamespace(
                 prechecks=[],

@@ -12,6 +12,22 @@ its entry (or its parent directory) from the appropriate list.
 
 import os
 
+import pytest
+from taac.libs.collectors.registry import clear_collectors
+
+
+@pytest.fixture(autouse=True)
+def _reset_collector_registry():
+    """Reset the process-wide collector registry between tests.
+
+    ``taac_runner.run_test_case`` stamps ``set_test_case_start_time(time.time())``
+    on every playbook iteration, so any test exercising it leaks a live
+    timestamp into tests that assert on the unset-anchor fallback.
+    """
+    yield
+    clear_collectors()
+
+
 # ---------------------------------------------------------------------------
 # Directories where *every* test depends on non-OSS modules.
 # ---------------------------------------------------------------------------
@@ -28,6 +44,8 @@ _NON_OSS_TEST_DIRS = [
 # (production code whose ``test_`` prefix causes pytest to pick them up).
 # ---------------------------------------------------------------------------
 _NON_OSS_TEST_FILES = [
+    # Imports taac.testconfigs.routing.factories, which needs taac.abstractions.
+    "taac/playbooks/routing/tests/test_bgp_attribute_churn_playbook.py",
     # Non-test modules (production code with test_ prefix)
     "taac/test_configs.py",
     "taac/libs/test_setup_orchestrator.py",
@@ -43,6 +61,8 @@ _NON_OSS_TEST_FILES = [
 # after `run_tests.sh -- <path>` passes on its own.
 # ---------------------------------------------------------------------------
 _OSS_READY_TEST_FILES = [
+    "taac/health_checks/tests/test_common_utils.py",
+    "taac/health_checks/tests/test_convergence_observer.py",
     "taac/tasks/tests/test_oss_gating.py",
 ]
 
