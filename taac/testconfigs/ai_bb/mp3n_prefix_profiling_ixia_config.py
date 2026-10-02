@@ -143,6 +143,17 @@ DIST_NON_CONTIGUOUS: str = "non_contiguous"
 SUPPORTED_PREFIX_LENGTHS: list[int] = [48, 64, 80, 128]
 DEFAULT_PREFIX_LENGTH: int = 64
 
+# Switch-wide BGP prefix limit these tests configure, via
+# create_bgp_switch_limit_patcher_task in create_mp3n_setup_tasks.
+#
+# Named because PREFIX_LIMIT_CHECK asserts EXACT equality against the limit
+# bgpd is running with -- not the observed route count -- so the postcheck's
+# expected value and the value the patcher writes must be the same number.
+# Keeping one definition makes that impossible to get wrong; the two were
+# previously a literal here and route-count estimates in
+# DISTRIBUTION_PREFIX_LIMITS, which can never agree.
+MP3N_SWITCH_PREFIX_LIMIT: int = 75000
+
 
 # -----------------------------------------------------------------------------
 # 2.2 Device Configuration
@@ -748,7 +759,7 @@ def create_mp3n_setup_tasks(
     ingress_policy: str = "PROPAGATE_RTSW_IXIA_PREFIX_PROFILING_IN",
     egress_policy: str = "PROPAGATE_RTSW_IXIA_PREFIX_PROFILING_OUT",
     patcher_suffix: str = "rtsw_ixia",
-    prefix_limit: int = 75000,
+    prefix_limit: int = MP3N_SWITCH_PREFIX_LIMIT,
     hold_time_seconds: int = 30,
     keep_alive_seconds: int = 10,
     next_hop_self: bool = True,
@@ -1095,6 +1106,7 @@ def create_warmboot_playbook(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
+    prefix_limit: int | None = None,
 ) -> Playbook:
     """Create a TAAC Playbook for Warmboot testing.
 
@@ -1128,7 +1140,11 @@ def create_warmboot_playbook(
             hc_types.CheckName.SERVICE_RESTART_CHECK,
         ],
         postchecks=_create_common_postchecks(
-            prefix_limit=profile.prefix_limit(distribution_type),
+            prefix_limit=(
+                prefix_limit
+                if prefix_limit is not None
+                else profile.prefix_limit(distribution_type)
+            ),
             resource_sampling_s=timing["resource_sampling_s"],
             bgp_convergence_threshold=300,
         )
@@ -1259,6 +1275,7 @@ def create_bgp_restart_playbook(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
+    prefix_limit: int | None = None,
 ) -> Playbook:
     """Create a TAAC Playbook for BGP Restart testing.
 
@@ -1292,7 +1309,11 @@ def create_bgp_restart_playbook(
             hc_types.CheckName.SERVICE_RESTART_CHECK,
         ],
         postchecks=_create_common_postchecks(
-            prefix_limit=profile.prefix_limit(distribution_type),
+            prefix_limit=(
+                prefix_limit
+                if prefix_limit is not None
+                else profile.prefix_limit(distribution_type)
+            ),
             resource_sampling_s=timing["resource_sampling_s"],
             bgp_convergence_threshold=300,
         )
@@ -1423,6 +1444,7 @@ def create_coldboot_playbook(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
+    prefix_limit: int | None = None,
 ) -> Playbook:
     """Create a TAAC Playbook for Coldboot testing.
 
@@ -1457,7 +1479,11 @@ def create_coldboot_playbook(
             hc_types.CheckName.SERVICE_RESTART_CHECK,
         ],
         postchecks=_create_common_postchecks(
-            prefix_limit=profile.prefix_limit(distribution_type),
+            prefix_limit=(
+                prefix_limit
+                if prefix_limit is not None
+                else profile.prefix_limit(distribution_type)
+            ),
             resource_sampling_s=timing["resource_sampling_s"],
             bgp_convergence_threshold=300,
         )
@@ -1633,6 +1659,7 @@ def create_warmboot_playbooks_for_distribution(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
+    prefix_limit: int | None = None,
 ) -> list[Playbook]:
     """Create warmboot playbooks for a distribution type."""
     if prefix_lengths is None:
@@ -1650,6 +1677,7 @@ def create_warmboot_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             profile=profile,
+            prefix_limit=prefix_limit,
         )
         for pl in prefix_lengths
     ]
@@ -1661,6 +1689,7 @@ def create_bgp_restart_playbooks_for_distribution(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
+    prefix_limit: int | None = None,
 ) -> list[Playbook]:
     """Create BGP restart playbooks for a distribution type."""
     if prefix_lengths is None:
@@ -1678,6 +1707,7 @@ def create_bgp_restart_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             profile=profile,
+            prefix_limit=prefix_limit,
         )
         for pl in prefix_lengths
     ]
@@ -1689,6 +1719,7 @@ def create_coldboot_playbooks_for_distribution(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
+    prefix_limit: int | None = None,
 ) -> list[Playbook]:
     """Create coldboot playbooks for a distribution type."""
     if prefix_lengths is None:
@@ -1706,6 +1737,7 @@ def create_coldboot_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             profile=profile,
+            prefix_limit=prefix_limit,
         )
         for pl in prefix_lengths
     ]
@@ -1717,6 +1749,7 @@ def create_all_playbooks_for_distribution(
     device_name: str = DEVICE_NAME,
     distribution_interface_map: Dict[str, str] | None = None,
     profile: PrefixProfilingProfile = MP3N_PREFIX_PROFILE,
+    prefix_limit: int | None = None,
 ) -> list[Playbook]:
     """Create all playbooks (warmboot, BGP restart, coldboot) for a distribution."""
     if distribution_interface_map is None:
@@ -1728,6 +1761,7 @@ def create_all_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             profile=profile,
+            prefix_limit=prefix_limit,
         )
         + create_bgp_restart_playbooks_for_distribution(
             distribution_type,
@@ -1735,6 +1769,7 @@ def create_all_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             profile=profile,
+            prefix_limit=prefix_limit,
         )
         + create_coldboot_playbooks_for_distribution(
             distribution_type,
@@ -1742,6 +1777,7 @@ def create_all_playbooks_for_distribution(
             device_name=device_name,
             distribution_interface_map=distribution_interface_map,
             profile=profile,
+            prefix_limit=prefix_limit,
         )
     )
 
