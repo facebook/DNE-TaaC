@@ -15944,6 +15944,7 @@ def gen_snake_benchmark_playbooks(
     duration_s: int = SNAKE_BENCHMARK_DURATION_S,
     prechecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
     postchecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
+    min_rate_gbps_by_packet_size: t.Optional[t.Dict[int, int]] = None,
 ) -> t.List[taac_types.Playbook]:
     """One throughput-benchmark playbook per packet size.
 
@@ -15962,6 +15963,9 @@ def gen_snake_benchmark_playbooks(
         duration_s: Soak per packet size (default 12 minutes).
         prechecks: Playbook prechecks, typically ``gen_common_hcs`` output.
         postchecks: Playbook postchecks; the loss + rate checks are appended.
+        min_rate_gbps_by_packet_size: Frame size (bytes) -> minimum Tx and Rx
+            rate (Gbps) for that size's traffic item. When ``None`` the rate
+            check carries no thresholds and always passes.
 
     Returns:
         One Playbook per entry, ordered by ascending packet size.
@@ -15969,6 +15973,18 @@ def gen_snake_benchmark_playbooks(
     playbooks: t.List[taac_types.Playbook] = []
     for packet_size in sorted(traffic_item_name_by_packet_size):
         traffic_item_name = traffic_item_name_by_packet_size[packet_size]
+        rate_check = create_ixia_traffic_rate_check()
+        if min_rate_gbps_by_packet_size:
+            # Scoped to this size's item so the disabled items (0 Gbps) are ignored.
+            rate_check = create_ixia_traffic_rate_check(
+                thresholds=[
+                    hc_types.TrafficRateThreshold(
+                        names=[traffic_item_name],
+                        value=min_rate_gbps_by_packet_size[packet_size],
+                        threshold_type=hc_types.ThresholdType.ABSOLUTE,
+                    )
+                ]
+            )
         playbooks.append(
             taac_types.Playbook(
                 name=f"test_snake_benchmark_{packet_size}b",
@@ -15980,7 +15996,7 @@ def gen_snake_benchmark_playbooks(
                 postchecks=(postchecks or [])
                 + [
                     create_ixia_packet_loss_check(clear_traffic_stats=False),
-                    create_ixia_traffic_rate_check(),
+                    rate_check,
                 ],
                 traffic_items_to_start=[traffic_item_name],
                 stages=[
@@ -16172,6 +16188,7 @@ def gen_snake_playbooks(
     manual_test_interfaces: t.Optional[t.List[str]] = None,
     benchmark_traffic_item_name_by_packet_size: t.Optional[t.Dict[int, str]] = None,
     benchmark_duration_s: int = SNAKE_BENCHMARK_DURATION_S,
+    benchmark_min_rate_gbps_by_packet_size: t.Optional[t.Dict[int, int]] = None,
     use_ipv6_ping: bool = True,
     use_cross_device_half_interface_toggle: bool = False,
     qsfp_service_restart_postchecks: t.Optional[
@@ -16943,6 +16960,7 @@ def gen_snake_playbooks(
                 duration_s=benchmark_duration_s,
                 prechecks=_prechecks,
                 postchecks=_postchecks,
+                min_rate_gbps_by_packet_size=benchmark_min_rate_gbps_by_packet_size,
             )
         )
 

@@ -39,6 +39,39 @@ from taac.test_as_a_config import types as taac_types
 
 BENCHMARK_TRAFFIC_ITEM_PREFIX = "SNAKE_BENCHMARK_"
 
+# Preamble + SFD (8B) and minimum inter-frame gap (12B) per Ethernet frame.
+_ETHERNET_L1_OVERHEAD_BYTES = 20
+
+# Benchmark items keep BasicTrafficItemConfig's default bidirectional=True, and the
+# IXIA "Traffic Item Statistics" row sums Tx/Rx over both directions.
+_BENCHMARK_TRAFFIC_DIRECTIONS = 2
+
+
+def gen_benchmark_min_rate_gbps(
+    link_speed_gbps: int,
+    line_rate: int,
+    packet_size: int,
+    min_rate_percent: int,
+) -> int:
+    """Minimum Tx/Rx rate (Gbps) a FIXED-size benchmark item must sustain.
+
+    IXIA applies ``line_rate`` at L1 (frame plus preamble and inter-frame gap),
+    while ``IXIA_TRAFFIC_RATE_CHECK`` reads the L2 ``Tx/Rx Rate (Mbps)`` columns,
+    which exclude that overhead and sum both directions of the bidirectional
+    item. The expected rate is therefore
+    ``2 * link_speed * line_rate * size / (size + 20)``; the threshold is
+    ``min_rate_percent`` of it, floored to whole Gbps (the check's unit). Losing
+    either direction drops the item below the threshold.
+    """
+    expected_l2_gbps = (
+        _BENCHMARK_TRAFFIC_DIRECTIONS
+        * link_speed_gbps
+        * (line_rate / 100.0)
+        * packet_size
+        / (packet_size + _ETHERNET_L1_OVERHEAD_BYTES)
+    )
+    return int(expected_l2_gbps * min_rate_percent / 100.0)
+
 
 def gen_basic_traffic_item_configs(
     snake_configs: t.List[taac_types.SnakeConfig],
@@ -161,6 +194,8 @@ def gen_snake_test_config(
     include_benchmark: bool = False,
     benchmark_packet_sizes: t.Optional[t.List[int]] = None,
     benchmark_line_rate: int = 100,
+    benchmark_link_speed_gbps: t.Optional[int] = None,
+    benchmark_min_rate_percent: int = 98,
     use_ipv6_ping: bool = True,
     additional_dut_hostnames: t.Optional[t.List[str]] = None,
     playbooks_to_include: t.Optional[t.List[str]] = None,
@@ -265,6 +300,13 @@ def gen_snake_test_config(
                 need an operator-pinned target set.
             include_ptp: Whether to create per-loop IXIA PTP master/slave
                 stacks. Defaults to True to preserve existing snake configs.
+            benchmark_link_speed_gbps: Snake port speed. When set (with
+                ``include_benchmark``), each benchmark playbook's traffic-rate
+                check requires its item to sustain ``benchmark_min_rate_percent``
+                of the expected L2 rate (see ``gen_benchmark_min_rate_gbps``).
+                When ``None`` the rate check has no thresholds.
+            benchmark_min_rate_percent: Percent of the expected L2 rate a
+                benchmark item must sustain (default 98).
             skip_ixia_protocol_verification: Skip IXIA's protocol-summary gate.
                 The traffic precheck still verifies end-to-end forwarding.
             ixia_protocol_verification_timeout: Settle time used when protocol
@@ -292,6 +334,7 @@ def gen_snake_test_config(
     # the standard playbooks set none and fall back to the TestConfig-level regex
     # below, which keeps the benchmark items disabled while they run.
     benchmark_name_by_packet_size = None
+    benchmark_min_rate_gbps_by_packet_size = None
     traffic_items_to_start = None
     if include_benchmark:
         benchmark_traffic_item_configs, benchmark_name_by_packet_size = (
@@ -308,6 +351,16 @@ def gen_snake_test_config(
         # enables every traffic item. Matched with re.match, so this selects every
         # item whose name does not start with the benchmark prefix.
         traffic_items_to_start = [f"(?!{BENCHMARK_TRAFFIC_ITEM_PREFIX})"]
+        if benchmark_link_speed_gbps is not None:
+            benchmark_min_rate_gbps_by_packet_size = {
+                packet_size: gen_benchmark_min_rate_gbps(
+                    benchmark_link_speed_gbps,
+                    benchmark_line_rate,
+                    packet_size,
+                    benchmark_min_rate_percent,
+                )
+                for packet_size in benchmark_name_by_packet_size
+            }
 
     common_hcs = gen_common_hcs(skip_lldp_check)
 
@@ -403,6 +456,7 @@ def gen_snake_test_config(
         common_postchecks=common_postchecks,
         manual_test_interfaces=manual_test_interfaces,
         benchmark_traffic_item_name_by_packet_size=benchmark_name_by_packet_size,
+        benchmark_min_rate_gbps_by_packet_size=benchmark_min_rate_gbps_by_packet_size,
         use_ipv6_ping=use_ipv6_ping,
         use_cross_device_half_interface_toggle=use_cross_device_half_interface_toggle,
         qsfp_service_restart_postchecks=qsfp_service_restart_postchecks,
