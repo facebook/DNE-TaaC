@@ -70,4 +70,7 @@ NPI_51T_DVT_MP3_SSW_TEST_CONFIG = create_dctypef_npi_test_config(
     bgpd_restart_no_of_interations=5,
     wedge_agent_restart_no_of_interations=5,
     basset_pool="dne.test",
+    low_queue=0,
+    mid_queue=2,
+    high_queue=9,
 )
