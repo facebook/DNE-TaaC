@@ -27,7 +27,8 @@ Those orderings are fixed by the landed static topologies
 
 Each bed gets two configs: a core one scoped to
 ``_W800_NPI_CORE_PLAYBOOKS``, and a full-suite one that takes everything
-``gen_snake_playbooks`` emits. IXIA endpoints are discovered over LLDP
+``gen_snake_playbooks`` emits plus the 10-size throughput benchmark
+(``test_snake_benchmark_*``). IXIA endpoints are discovered over LLDP
 (every bed presents exactly two clean IXIA neighbours), so no config
 needs explicit ``direct_ixia_connections``.
 
@@ -72,6 +73,13 @@ _W800_NPI_CORE_PLAYBOOKS = [
 # matching what the shipped Icepack FR4 snake configs use.
 _W800_RECOVERY_RETRY_COUNT = 6
 
+# Same rate as the base traffic. MP3 800G snakes showed TC0 congestion discards
+# at 100% line rate and none at 99% (T227297634).
+_W800_BENCHMARK_LINE_RATE = 99
+
+# The MP3 benchmark sweep with 9000B in place of 9124B as the jumbo point.
+_W800_BENCHMARK_PACKET_SIZES = [64, 192, 320, 640, 1280, 2560, 5120, 6400, 8320, 9000]
+
 # Chain end for the 64-port beds (32 cages x /1 + /5) and for the 32-port 800G
 # beds (one port per cage).
 _SNAKE_END_64_PORT = "eth1/32/5"
@@ -91,6 +99,7 @@ def _gen_w800_snake_test_config(
     destination_interface: str,
     playbooks_to_include: t.Optional[t.List[str]] = None,
     frame_size_settings: t.Optional[ixia_types.FrameSize] = None,
+    benchmark_link_speed_gbps: t.Optional[int] = None,
 ) -> taac_types.TestConfig:
     """Build one W800 snake TestConfig.
 
@@ -108,6 +117,10 @@ def _gen_w800_snake_test_config(
             keeps everything ``gen_snake_playbooks`` emits (the full suite).
         frame_size_settings: IXIA frame-size policy; ``None`` uses the IXIA
             default.
+        benchmark_link_speed_gbps: The bed's port speed. When set, adds the
+            ``_W800_BENCHMARK_PACKET_SIZES`` throughput sweep at
+            ``_W800_BENCHMARK_LINE_RATE``, with a traffic-rate threshold
+            derived from this speed. ``None`` leaves the benchmark out.
 
     Returns:
         A ``TestConfig`` for ``W800_NPI_SNAKE_TEST_CONFIGS``.
@@ -129,6 +142,10 @@ def _gen_w800_snake_test_config(
         frame_size_settings=frame_size_settings,
         postcheck_port_state_retry_count=_W800_RECOVERY_RETRY_COUNT,
         flap_recovery_check_retry_count=_W800_RECOVERY_RETRY_COUNT,
+        include_benchmark=benchmark_link_speed_gbps is not None,
+        benchmark_packet_sizes=_W800_BENCHMARK_PACKET_SIZES,
+        benchmark_line_rate=_W800_BENCHMARK_LINE_RATE,
+        benchmark_link_speed_gbps=benchmark_link_speed_gbps,
     )
 
 
@@ -205,16 +222,19 @@ WEDGE800BACT_NPI_SNAKE_TEST_CONFIG_800G = _gen_w800_snake_test_config(
 # ---------------------------------------------------------------------------
 # Full-suite configs -- no playbooks_to_include, so gen_snake_playbooks emits
 # its whole default set: the 15 core playbooks plus test_72hr_longevity and the
-# three system-reboot playbooks. The 72-hour soak alone puts a complete run at
-# roughly 3.5 days, and the reboot playbooks need BMC reachability from the test
-# host, which is why these live as separate TestConfigs rather than replacing
-# the core ones. Select a subset at run time with --regex.
+# three system-reboot playbooks, plus the 10 test_snake_benchmark_* playbooks
+# (12 minutes each, about 2 hours in total). The 72-hour soak alone puts a
+# complete run at roughly 3.5 days, and the reboot playbooks need BMC
+# reachability from the test host, which is why these live as separate
+# TestConfigs rather than replacing the core ones. Select a subset at run time
+# with --regex (e.g. 'test_snake_benchmark' for the sweep alone).
 # ---------------------------------------------------------------------------
 
 WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_100G = _gen_w800_snake_test_config(
     name="WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_100G",
     hostname="fboss338726354.ash6",
     destination_interface=_SNAKE_END_64_PORT,
+    benchmark_link_speed_gbps=100,
 )
 
 
@@ -222,6 +242,7 @@ WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_200G = _gen_w800_snake_test_config
     name="WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_200G",
     hostname="fboss338726372.ash6",
     destination_interface=_SNAKE_END_64_PORT,
+    benchmark_link_speed_gbps=200,
 )
 
 
@@ -229,6 +250,7 @@ WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G = _gen_w800_snake_test_config
     name="WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G",
     hostname="fboss338726358.ash6",
     destination_interface=_SNAKE_END_64_PORT,
+    benchmark_link_speed_gbps=400,
 )
 
 
@@ -237,6 +259,7 @@ WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_800G = _gen_w800_snake_test_config
     hostname="fboss338726375.ash6",
     destination_interface=_SNAKE_END_32_PORT,
     frame_size_settings=_W800_800G_IMIX,
+    benchmark_link_speed_gbps=800,
 )
 
 
@@ -244,6 +267,7 @@ WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_100G = _gen_w800_snake_test_config
     name="WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_100G",
     hostname="fboss338826494.ash6",
     destination_interface=_SNAKE_END_64_PORT,
+    benchmark_link_speed_gbps=100,
 )
 
 
@@ -251,6 +275,7 @@ WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_200G = _gen_w800_snake_test_config
     name="WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_200G",
     hostname="fboss338826578.ash6",
     destination_interface=_SNAKE_END_64_PORT,
+    benchmark_link_speed_gbps=200,
 )
 
 
@@ -258,6 +283,7 @@ WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G = _gen_w800_snake_test_config
     name="WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G",
     hostname="fboss338826479.ash6",
     destination_interface=_SNAKE_END_64_PORT,
+    benchmark_link_speed_gbps=400,
 )
 
 
@@ -266,6 +292,7 @@ WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_800G = _gen_w800_snake_test_config
     hostname="fboss338826570.ash6",
     destination_interface=_SNAKE_END_32_PORT,
     frame_size_settings=_W800_800G_IMIX,
+    benchmark_link_speed_gbps=800,
 )
 
 
