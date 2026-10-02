@@ -37,6 +37,9 @@ from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 
 
+BENCHMARK_TRAFFIC_ITEM_PREFIX = "SNAKE_BENCHMARK_"
+
+
 def gen_basic_traffic_item_configs(
     snake_configs: t.List[taac_types.SnakeConfig],
     line_rate: int,
@@ -112,7 +115,7 @@ def gen_benchmark_traffic_item_configs(
     traffic_item_configs: t.List[taac_types.BasicTrafficItemConfig] = []
     name_by_packet_size: t.Dict[int, str] = {}
     for packet_size in packet_sizes:
-        traffic_item_name = f"SNAKE_BENCHMARK_{packet_size}B"
+        traffic_item_name = f"{BENCHMARK_TRAFFIC_ITEM_PREFIX}{packet_size}B"
         name_by_packet_size[packet_size] = traffic_item_name
         traffic_item_configs.extend(
             gen_basic_traffic_item_configs(
@@ -285,9 +288,11 @@ def gen_snake_test_config(
     )
 
     # Benchmark sweep: one extra FIXED-frame-size traffic item per packet size.
-    # They are configured but not started by the standard playbooks -- each
-    # benchmark playbook selects its own via `traffic_items_to_start`.
+    # Each benchmark playbook selects its own item via `traffic_items_to_start`;
+    # the standard playbooks set none and fall back to the TestConfig-level regex
+    # below, which keeps the benchmark items disabled while they run.
     benchmark_name_by_packet_size = None
+    traffic_items_to_start = None
     if include_benchmark:
         benchmark_traffic_item_configs, benchmark_name_by_packet_size = (
             gen_benchmark_traffic_item_configs(
@@ -299,6 +304,10 @@ def gen_snake_test_config(
         basic_traffic_item_configs = (
             basic_traffic_item_configs + benchmark_traffic_item_configs
         )
+        # The runner uses playbook.traffic_items_to_start or this value, and None
+        # enables every traffic item. Matched with re.match, so this selects every
+        # item whose name does not start with the benchmark prefix.
+        traffic_items_to_start = [f"(?!{BENCHMARK_TRAFFIC_ITEM_PREFIX})"]
 
     common_hcs = gen_common_hcs(skip_lldp_check)
 
@@ -424,6 +433,7 @@ def gen_snake_test_config(
         ixia_protocol_verification_timeout=ixia_protocol_verification_timeout,
         snake_configs=snake_configs,
         basic_traffic_item_configs=basic_traffic_item_configs,
+        traffic_items_to_start=traffic_items_to_start,
         ptp_configs=ptp_configs,
         endpoints=[
             taac_types.Endpoint(
