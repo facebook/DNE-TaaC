@@ -17,7 +17,9 @@ place (preserving loopbacks / the core iBGP session / originated networks) to:
 
 It can also add the edge L3 RIF to ``/etc/coop/agent.conf`` (live reload) when
 the selected edge SVI has no address yet, so the eBGP session and
-the decapped-inner forwarding have an L3 next-hop.
+the decapped-inner forwarding have an L3 next-hop. On R2, the overlay can also
+reconcile a retained device-only bootstrap by withdrawing its synthetic local
+tail route and enabling next-hop-self before IXIA advertises that exact route.
 
 Fully reversible: every file is backed up to ``<path>.taac-rbb-edge-orig`` before the
 first edit; ``action="restore"`` copies the pristine originals back and bounces
@@ -49,6 +51,7 @@ from taac.testconfigs.routing.util.bgp_rbb_bootstrap_config import (
 from taac.testconfigs.routing.util.bgp_rbb_edge_config import (
     add_edge_ebgp_peer,
     enable_ipv6_afi_on_ibgp,
+    withdraw_originated_ipv6_network,
 )
 from taac.utils.driver_factory import async_get_device_driver
 from taac.utils.oss_taac_lib_utils import ConsoleFileLogger
@@ -89,6 +92,11 @@ class RbbEdgeEbgpTask(BaseTask):
             ibgp_peer_addr: exact core iBGP peer whose group may be changed.
             ibgp_srv6_nexthop: advertised iBGP v6 next-hop (a routed loopback,
                 or the tail decap SID for SRv6 recursion); optional.
+            ibgp_next_hop_self: optional bool applied only to the selected iBGP
+                group. Traffic-mode R2 uses true when transitioning from a
+                retained device-only bootstrap.
+            withdraw_network6_prefix: optional exact local IPv6 network to
+                withdraw before IXIA advertises it. Other networks are preserved.
             edge_rif_cidr: edge SVI address to add to agent.conf if missing.
             edge_intf_id: optional AgentConfig SVI id; by default it is derived
                 from ``edge_port_name``'s ``ingressVlan``.
@@ -154,7 +162,14 @@ class RbbEdgeEbgpTask(BaseTask):
             raise ValueError("rbb_edge_ebgp edge_remote_as must be 1..4294967295")
         srv6_nexthop = params.get("ibgp_srv6_nexthop")
         ibgp_peer_addr = params.get("ibgp_peer_addr")
-        if (enable_v6 or srv6_nexthop) and not ibgp_peer_addr:
+        ibgp_next_hop_self = params.get("ibgp_next_hop_self")
+        if ibgp_next_hop_self is not None and not isinstance(ibgp_next_hop_self, bool):
+            raise ValueError(  # noqa: TRY004
+                "rbb_edge_ebgp ibgp_next_hop_self must be a JSON boolean"
+            )
+        if (enable_v6 or srv6_nexthop or ibgp_next_hop_self is not None) and not (
+            ibgp_peer_addr
+        ):
             raise ValueError(
                 "rbb_edge_ebgp requires 'ibgp_peer_addr' when changing the "
                 "iBGP IPv6 configuration"
@@ -199,6 +214,12 @@ class RbbEdgeEbgpTask(BaseTask):
             enable_v6=enable_v6,
             srv6_nexthop=str(srv6_nexthop) if srv6_nexthop else None,
             ibgp_peer_addr=str(ibgp_peer_addr) if ibgp_peer_addr else None,
+            ibgp_next_hop_self=ibgp_next_hop_self,
+            withdraw_network6_prefix=(
+                str(params["withdraw_network6_prefix"])
+                if params.get("withdraw_network6_prefix")
+                else None
+            ),
         )
 
         agent_cfg: dict[str, t.Any] | None = None
@@ -379,6 +400,8 @@ class RbbEdgeEbgpTask(BaseTask):
         enable_v6: bool,
         srv6_nexthop: str | None,
         ibgp_peer_addr: str | None,
+        ibgp_next_hop_self: bool | None,
+        withdraw_network6_prefix: str | None,
     ) -> tuple[dict[str, t.Any], bool]:
         raw = await async_read_file_or_none(driver, C.BGP_CONFIG_PATH)
         if not raw:
@@ -394,12 +417,15 @@ class RbbEdgeEbgpTask(BaseTask):
             ) from exc
 
         before = json.loads(json.dumps(cfg))
-        if enable_v6 or srv6_nexthop:
+        if enable_v6 or srv6_nexthop or ibgp_next_hop_self is not None:
             enable_ipv6_afi_on_ibgp(
                 cfg,
                 ibgp_next_hop6=str(srv6_nexthop) if srv6_nexthop else None,
                 ibgp_peer_addr=ibgp_peer_addr,
+                ibgp_next_hop_self=ibgp_next_hop_self,
             )
+        if withdraw_network6_prefix:
+            withdraw_originated_ipv6_network(cfg, withdraw_network6_prefix)
         add_edge_ebgp_peer(
             cfg,
             peer_addr=peer_addr,

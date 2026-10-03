@@ -21,12 +21,13 @@ def _strip_len(addr: str) -> str:
 
 # In-place edge-eBGP mutation (bgp.json-compatible; no bgpcpp/COOP).
 # These pure helpers edit an already-parsed ``/opt/bgpd/bgp.json`` dict in place
-# so the DUT's existing config (loopbacks, iBGP session, originated networks) is
-# preserved verbatim — only the IXIA-facing eBGP edge is added and, on an
-# iBGP-only tail that ships ``disable_ipv6_afi``, the v6 AFI is switched on so the
-# eBGP-learned v6 pool can propagate over the core iBGP. This is the OSS-safe
-# replacement for the shipped ``configure_ixia_interfaces`` (which patches the
-# COOP ``bgpcpp`` config and is incompatible with a ``/opt/bgpd/bgp.json`` box).
+# so the DUT's existing config (loopbacks, iBGP session, and unrelated originated
+# networks) is preserved — only the IXIA-facing eBGP edge and the exact RBB
+# traffic-route transition are changed. On an iBGP-only tail that ships
+# ``disable_ipv6_afi``, the v6 AFI is switched on so the eBGP-learned v6 pool can
+# propagate over the core iBGP. This is the OSS-safe replacement for the shipped
+# ``configure_ixia_interfaces`` (which patches the COOP ``bgpcpp`` config and is
+# incompatible with a ``/opt/bgpd/bgp.json`` box).
 
 EDGE_EBGP_PEER_GROUP: str = "RBB-IXIA-EDGE-EBGP"
 
@@ -36,8 +37,9 @@ def enable_ipv6_afi_on_ibgp(
     *,
     ibgp_next_hop6: str | None = None,
     ibgp_peer_addr: str | None = None,
+    ibgp_next_hop_self: bool | None = None,
 ) -> dict[str, t.Any]:
-    """Turn on v6 AFI for a safely selected iBGP group and set its v6 next-hop.
+    """Converge v6 settings for a safely selected iBGP group and peer.
 
     An iBGP peer group is one whose ``remote_as_4_byte`` equals the box's
     ``local_as_4_byte``. Supplying ``ibgp_peer_addr`` restricts the mutation to
@@ -45,10 +47,12 @@ def enable_ipv6_afi_on_ibgp(
     shared, the peer is missing/duplicated, or the existing next hop is unusable.
     When no peer selector is supplied, all iBGP groups are selected for backward
     compatibility. Passing the tail SRv6 **decap SID** as
-    ``ibgp_next_hop6`` (with ``next_hop_self`` already true) makes the receiver
-    install the edge pool with an underlay-resolvable SID next hop. The explicit
-    segment list on the head's TE_AGENT route triggers SRv6 encapsulation.
+    ``ibgp_next_hop6`` and ``ibgp_next_hop_self=True`` makes the receiver install
+    the edge pool with an underlay-resolvable SID next hop. The explicit segment
+    list on the head's TE_AGENT route triggers SRv6 encapsulation.
     """
+    if ibgp_next_hop_self is not None and not isinstance(ibgp_next_hop_self, bool):
+        raise ValueError("ibgp_next_hop_self must be a boolean or None")
     local_as = config.get("local_as_4_byte")
     if local_as is None:
         raise ValueError("BGP config has no local_as_4_byte")
@@ -132,9 +136,61 @@ def enable_ipv6_afi_on_ibgp(
     # Validate the complete target set before mutating the caller's document.
     for group in ibgp_groups:
         group["disable_ipv6_afi"] = False
+        if ibgp_next_hop_self is not None:
+            group["next_hop_self"] = ibgp_next_hop_self
     if nh6:
         for peer in ibgp_peers:
             peer["next_hop6"] = nh6
+    return config
+
+
+def withdraw_originated_ipv6_network(
+    config: dict[str, t.Any], prefix: str
+) -> dict[str, t.Any]:
+    """Remove one exact locally originated IPv6 prefix, preserving all others.
+
+    Device-only RBB bootstrap originates the synthetic tail route locally so the
+    route-lifecycle checks can run without IXIA.  In traffic mode IXIA owns that
+    exact prefix instead.  This helper makes the transition explicit and fails
+    closed on malformed or duplicate BGP network entries.
+    """
+    try:
+        target = ipaddress.ip_network(prefix, strict=True)
+    except ValueError as exc:
+        raise ValueError(f"invalid originated IPv6 prefix {prefix!r}") from exc
+    if target.version != 6:
+        raise ValueError(f"originated prefix {prefix!r} must be IPv6")
+
+    networks = config.get("networks6", [])
+    if not isinstance(networks, list) or any(
+        not isinstance(network, dict) for network in networks
+    ):
+        raise ValueError("BGP networks6 must be a list of objects")
+
+    matching_indexes: list[int] = []
+    for index, network in enumerate(networks):
+        candidate = network.get("prefix")
+        if not isinstance(candidate, str):
+            raise ValueError("BGP networks6 entry has no string prefix")
+        try:
+            parsed = ipaddress.ip_network(candidate, strict=True)
+        except ValueError as exc:
+            raise ValueError(
+                f"BGP networks6 contains invalid prefix {candidate!r}"
+            ) from exc
+        if parsed.version != 6:
+            raise ValueError(f"BGP networks6 contains non-IPv6 prefix {candidate!r}")
+        if parsed == target:
+            matching_indexes.append(index)
+
+    if len(matching_indexes) > 1:
+        raise ValueError(f"BGP networks6 contains duplicate prefix {target}")
+    if matching_indexes:
+        config["networks6"] = [
+            network
+            for index, network in enumerate(networks)
+            if index != matching_indexes[0]
+        ]
     return config
 
 

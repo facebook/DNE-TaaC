@@ -336,6 +336,10 @@ class RbbTestConfigStructureTest(unittest.TestCase):
         self.assertEqual(edge_params[1]["ibgp_peer_addr"], C.R1_ROUTER_ID)
         self.assertNotIn("ibgp_srv6_nexthop", edge_params[0])
         self.assertEqual(edge_params[1]["ibgp_srv6_nexthop"], C.SRV6_DECAP_SID)
+        self.assertNotIn("ibgp_next_hop_self", edge_params[0])
+        self.assertTrue(edge_params[1]["ibgp_next_hop_self"])
+        self.assertNotIn("withdraw_network6_prefix", edge_params[0])
+        self.assertEqual(edge_params[1]["withdraw_network6_prefix"], C.TAIL_DEST_PREFIX)
         teardown = [
             (task.task_name, json.loads(task.params.json_params))
             for task in (config.teardown_tasks or [])

@@ -27,6 +27,7 @@ from taac.testconfigs.routing.util.bgp_rbb_edge_config import (
     EDGE_EBGP_PEER_GROUP,
     add_edge_ebgp_peer,
     enable_ipv6_afi_on_ibgp,
+    withdraw_originated_ipv6_network,
 )
 
 _VERIFY_PATH = "taac.tasks.rbb_srv6_verify_task.async_get_device_driver"
@@ -492,6 +493,33 @@ class BgpEdgeConfigHelperTest(unittest.TestCase):
         self.assertFalse(pg["disable_ipv6_afi"])
         self.assertEqual(cfg["peers"][0]["next_hop6"], "2001:db8:7fff::")
 
+    def test_enable_ipv6_afi_sets_next_hop_self_on_selected_group(self) -> None:
+        cfg = _ibgp_bgp_json()
+        cfg["peer_groups"][0]["next_hop_self"] = False
+        enable_ipv6_afi_on_ibgp(
+            cfg,
+            ibgp_next_hop6="2001:db8:7fff::",
+            ibgp_peer_addr="192.0.2.2",
+            ibgp_next_hop_self=True,
+        )
+        self.assertTrue(cfg["peer_groups"][0]["next_hop_self"])
+
+    def test_withdraw_originated_ipv6_network_preserves_other_prefixes(self) -> None:
+        cfg = _ibgp_bgp_json()
+        cfg["networks6"] = [
+            {"prefix": "2001:db8:1::/64"},
+            {
+                "prefix": "2001:db8:10:1000::/64",
+                "nexthop": "2001:db8:7fff::",
+                "install_to_fib": False,
+            },
+        ]
+        withdraw_originated_ipv6_network(cfg, "2001:db8:10:1000::/64")
+        self.assertEqual(cfg["networks6"], [{"prefix": "2001:db8:1::/64"}])
+        # Reapplying the exact transition is intentionally idempotent.
+        withdraw_originated_ipv6_network(cfg, "2001:db8:10:1000::/64")
+        self.assertEqual(cfg["networks6"], [{"prefix": "2001:db8:1::/64"}])
+
     def test_enable_ipv6_afi_only_touches_ibgp_groups(self) -> None:
         cfg = _ibgp_bgp_json()
         # Add an eBGP group first; it must not have its next-hop rewritten.
@@ -720,7 +748,17 @@ class RbbEdgeEbgpTaskTest(unittest.IsolatedAsyncioTestCase):
 
         task = RbbEdgeEbgpTask(hostname="rbb-r2", logger=MagicMock())
         driver = self._driver()
-        bgp_raw = _json.dumps(_ibgp_bgp_json())
+        bgp_fixture = _ibgp_bgp_json()
+        bgp_fixture["peer_groups"][0]["next_hop_self"] = False
+        bgp_fixture["networks6"] = [
+            {"prefix": "2001:db8:1::/64"},
+            {
+                "prefix": "2001:db8:10:1000::/64",
+                "nexthop": "2001:db8:7fff::",
+                "install_to_fib": False,
+            },
+        ]
+        bgp_raw = _json.dumps(bgp_fixture)
         agent_raw = _json.dumps(
             {
                 "sw": {
@@ -781,6 +819,8 @@ class RbbEdgeEbgpTaskTest(unittest.IsolatedAsyncioTestCase):
                         "enable_ipv6_afi": True,
                         "ibgp_peer_addr": "192.0.2.2",
                         "ibgp_srv6_nexthop": "2001:db8:7fff::",
+                        "ibgp_next_hop_self": True,
+                        "withdraw_network6_prefix": "2001:db8:10:1000::/64",
                         "edge_rif_cidr": "2001:db8:a:10::1/64",
                         "edge_port_name": "eth1/1/1",
                     }
@@ -797,6 +837,8 @@ class RbbEdgeEbgpTaskTest(unittest.IsolatedAsyncioTestCase):
             any(pg["name"] == EDGE_EBGP_PEER_GROUP for pg in cfg["peer_groups"])
         )
         self.assertEqual(cfg["peers"][0]["next_hop6"], "2001:db8:7fff::")
+        self.assertTrue(cfg["peer_groups"][0]["next_hop_self"])
+        self.assertEqual(cfg["networks6"], [{"prefix": "2001:db8:1::/64"}])
         # The edge RIF got added to the empty SVI.
         acfg = next(w for w in written if "sw" in w)
         self.assertIn("2001:db8:a:10::1/64", acfg["sw"]["interfaces"][0]["ipAddresses"])
