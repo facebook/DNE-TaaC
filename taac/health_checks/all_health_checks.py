@@ -38,6 +38,9 @@ from taac.health_checks.device_health_checks.bgp_peer_route_set_equality_health_
 from taac.health_checks.device_health_checks.bgp_received_route_community_health_check import (
     BgpReceivedRouteCommunityHealthCheck,
 )
+from taac.health_checks.device_health_checks.bgp_rib_fib_consistency_health_check import (
+    BgpRibFibConsistencyHealthCheck,
+)
 from taac.health_checks.device_health_checks.bgp_route_count_verification_health_check import (
     BgpRouteCountVerificationHealthCheck,
 )
@@ -236,6 +239,7 @@ OSS_HEALTH_CHECKS: t.List[HealthCheck] = [
     # DsfPfcHealthCheck,  # neteng.test_infra.dne.taac dep, excluded in OSS
     CoreDumpsHealthCheck,
     PortStateHealthCheck,
+    BgpRibFibConsistencyHealthCheck,
     LldpHealthCheck,
     IxiaTrafficRateHealthCheck,
     PfcWdHealthCheck,

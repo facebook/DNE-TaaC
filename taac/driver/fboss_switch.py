@@ -1683,8 +1683,12 @@ class FbossSwitch(AbstractSwitch):
         """
         rib_entries = []
         async with await self._get_bgp_client() as bgp_client:
-            rib_entries.extend(await get_rib_entries(bgp_client, TBgpAfi.AFI_IPV6))
-            rib_entries.extend(await get_rib_entries(bgp_client, TBgpAfi.AFI_IPV4))
+            for afi in (TBgpAfi.AFI_IPV6, TBgpAfi.AFI_IPV4):
+                if TAAC_OSS:
+                    # canonical_rib_py3 is Meta-internal; the thrift RPC is not.
+                    rib_entries.extend(await bgp_client.getRibEntries(afi))
+                else:
+                    rib_entries.extend(await get_rib_entries(bgp_client, afi))
         return rib_entries
 
     @async_retryable(retries=3, sleep_time=1, exceptions=(Exception,))
