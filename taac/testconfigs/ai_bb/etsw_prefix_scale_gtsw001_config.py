@@ -34,8 +34,10 @@ Source: "[DCXOR] Backend LLD for UFv2 in DC-TypeG" -- IP Addressing tab
 (TH6)"), Routing tab ("Route Propagation Through the Fabric").
 """
 
+import csv
 import ipaddress
 import os
+from dataclasses import dataclass
 
 from ixia.ixia import types as ixia_types
 from taac.playbooks.playbook_definitions import (
@@ -44,6 +46,10 @@ from taac.playbooks.playbook_definitions import (
 from taac.stages.stage_definitions import create_steps_stage
 from taac.steps.step_definitions import (
     create_run_ssh_command_step,
+)
+from taac.task_definitions import (
+    create_coop_apply_patchers_task,
+    create_coop_register_patcher_task,
 )
 from taac.testconfigs.ai_bb.mp3n_prefix_profiling_ixia_config import (
     create_mp3n_setup_tasks,
@@ -56,6 +62,7 @@ from taac.testconfigs.ai_bb.prefix_block_spec import (
     format_ipv6_full,
     nexthop_pool,
     PrefixBlockSpec,
+    write_block_injection_csv,
     write_injection_csv,
 )
 from taac.test_as_a_config import types as taac_types
@@ -794,4 +801,476 @@ ETSW_PREFIX_SCALE_GTSW001_4PORT: TestConfig = TestConfig(
     ),
     teardown_tasks=create_mp3n_teardown_tasks(device_name=DEVICE_NAME),
     playbooks=[_4PORT_PLAYBOOK],
+)
+
+
+# =============================================================================
+# UFv2 ESL path-scale -- CSV-driven TestConfigs
+# =============================================================================
+# The TestConfig is driven entirely by the injection CSVs. Prefix count, path
+# count and the next-hop set are all READ from the CSVs, never hardcoded here,
+# so a user-supplied CSV (any ECMP width, any number of next-hop sets) works
+# without editing this file.
+#
+# What is derived from the CSVs:
+#   - unique next hops (union across all CSVs) -> sizes the NDP-supporting
+#     device group: every advertised next hop must be NDP-resolvable on the
+#     DUT or its paths are dropped
+#   - total prefixes and total paths -> descriptions and the observe step
+#
+# SMOKE and FULL below are just two CSV sets generated from EtswScaleProfile;
+# they share every other piece of the config.
+
+# Generator parameters for the two built-in CSV sets. The TestConfig itself
+# never reads these -- they only shape the CSVs that _etsw_scale_pool_csvs()
+# writes. A different next-hop layout means different CSVs, not code changes.
+ETSW_NH_TOTAL: int = 120
+ETSW_NH_BLOCK: int = 60
+ETSW_L2_NH_COUNT: int = 45
+
+ETSW_NH_ALL: list = nexthop_pool(f"{INTERCONNECT_V6}:0:0:0:a001", ETSW_NH_TOTAL)
+ETSW_NH_BLOCK1: list = ETSW_NH_ALL[:ETSW_NH_BLOCK]
+ETSW_NH_BLOCK2: list = ETSW_NH_ALL[ETSW_NH_BLOCK:]
+# Subset of the 120, NOT a disjoint set: the TH6 Virtual ARS supergroup caps
+# distinct next-hop members device-wide at 128 (T290458439).
+ETSW_NH_L2: list = ETSW_NH_ALL[-ETSW_L2_NH_COUNT:]
+
+# GSL aggregates live outside the VF /64 tree (6000::/46) and the remote-L2
+# root (6100::/39) so the three sets can never overlap into one RIB entry.
+ETSW_GSL_ROOT: str = "6200::"
+
+# Extra NDP responders beyond the next-hop range the CSVs need. Headroom so a
+# slightly larger user CSV does not silently drop paths.
+ETSW_NDP_BUFFER: int = 10
+
+
+@dataclass(frozen=True)
+class EtswScaleProfile:
+    """Generator input for one built-in CSV set. Shapes the CSVs only."""
+
+    slug: str
+    vf_blocks_per_half: int
+    gsl_prefixes: int
+    l2_agg_prefixes: int
+
+
+# Correctness profile: one /56 block per half. Small enough to converge in
+# about a minute, but still exercises every mechanic the full profile uses.
+ETSW_SCALE_SMOKE_PROFILE: EtswScaleProfile = EtswScaleProfile(
+    slug="smoke",
+    vf_blocks_per_half=1,
+    gsl_prefixes=2,
+    l2_agg_prefixes=2,
+)
+
+# Full UFv2 ESL scale: the complete 288-block VF tree, 200 GSL aggregates and
+# the 19 remote-L2 aggregates.
+ETSW_SCALE_FULL_PROFILE: EtswScaleProfile = EtswScaleProfile(
+    slug="full",
+    vf_blocks_per_half=144,
+    gsl_prefixes=200,
+    l2_agg_prefixes=19,
+)
+
+# IXIA ports, in CSV order: CSV i is injected on ETSW_SCALE_PORTS[i].
+ETSW_SCALE_PORTS: list = ETSW_4PORT_PORTS
+
+
+def _etsw_scale_specs(profile: EtswScaleProfile) -> list:
+    """Per-port (spec_list, next_hops) for one built-in profile, in port order.
+
+    Port 0/1 split the VF /64 tree into disjoint halves with one 60-wide
+    next-hop set each; port 2 carries the GSL /55s on all 120; port 3 carries
+    the remote-L2 /46s on 45 of the 120.
+    """
+    base = ETSW_RECEIVED_SPECS[0]
+    parent_size = 1 << (128 - base.parent_mask)
+    half_stride = profile.vf_blocks_per_half * parent_size
+    root_int = int(ipaddress.IPv6Address(base.root))
+
+    def vf_half(index: int) -> PrefixBlockSpec:
+        return PrefixBlockSpec(
+            root=format_ipv6_full(
+                ipaddress.IPv6Address(root_int + index * half_stride)
+            ),
+            root_mask=base.root_mask,
+            blocks=profile.vf_blocks_per_half,
+            parent_mask=base.parent_mask,
+            prefixes_per_block=base.prefixes_per_block,
+            prefix_length=base.prefix_length,
+            prefix_type=f"vf_gpu_half{index + 1}",
+        )
+
+    agg = ETSW_RECEIVED_SPECS[1]
+    return [
+        ([vf_half(0)], ETSW_NH_BLOCK1),
+        ([vf_half(1)], ETSW_NH_BLOCK2),
+        (
+            [
+                PrefixBlockSpec(
+                    root=ETSW_GSL_ROOT,
+                    root_mask=47,
+                    blocks=1,
+                    parent_mask=47,
+                    prefixes_per_block=profile.gsl_prefixes,
+                    prefix_length=55,
+                    prefix_type="gsl_agg",
+                )
+            ],
+            ETSW_NH_ALL,
+        ),
+        (
+            [
+                PrefixBlockSpec(
+                    root=agg.root,
+                    root_mask=agg.root_mask,
+                    blocks=profile.l2_agg_prefixes,
+                    parent_mask=agg.parent_mask,
+                    prefixes_per_block=agg.prefixes_per_block,
+                    prefix_length=agg.prefix_length,
+                    prefix_type=agg.prefix_type,
+                )
+            ],
+            ETSW_NH_L2,
+        ),
+    ]
+
+
+def _etsw_scale_pool_csvs(profile: EtswScaleProfile) -> list:
+    """Write a built-in profile's CSVs and return [[csv_path, pool_name], ...].
+
+    Block-consolidated: a contiguous run collapses to one row per next hop, so
+    the full profile is ~18k rows instead of ~4.2M (the IXIA port CPU rejects
+    oversized route configs: "Port <x> is not CPU ready").
+    """
+    pairs = []
+    for index, (specs, next_hops) in enumerate(_etsw_scale_specs(profile)):
+        csv_path = os.path.join(ETSW_CSV_DIR, f"etsw_scale_{profile.slug}_p{index}.csv")
+        write_block_injection_csv(csv_path, specs, next_hops)
+        pairs.append([csv_path, f"{VF_POOL_NAME}_P{index}"])
+    return pairs
+
+
+@dataclass(frozen=True)
+class EtswCsvSummary:
+    """What the TestConfig needs to know, read straight from the CSVs."""
+
+    next_hops: tuple  # unique next hops across all CSVs, sorted
+    prefixes: int
+    paths: int
+    # Per CSV: (first block "addr/len", unique next hops for that block).
+    first_blocks: tuple
+
+
+def _summarize_injection_csvs(pool_csvs: list) -> EtswCsvSummary:
+    """Read the injection CSVs and derive next hops, prefixes and paths.
+
+    Columns are resolved by header name. `AddressCount` is optional (absent =
+    one prefix per row), so both the block-consolidated and the flat
+    one-row-per-path formats work.
+    """
+    all_nh = set()
+    prefixes = 0
+    paths = 0
+    first_blocks = []
+    for csv_path, _pool in pool_csvs:
+        blocks = {}
+        first = None
+        first_nh = set()
+        with open(csv_path) as f:
+            for row in csv.DictReader(f):
+                addr = row["Address"].strip()
+                plen = row.get("PrefixLength", "64").strip() or "64"
+                count = int(row.get("AddressCount") or 1)
+                nh = row["Ipv6 Next Hop"].strip()
+                all_nh.add(nh)
+                blocks[(addr, plen)] = count
+                paths += count
+                if first is None:
+                    first = (addr, plen)
+                if (addr, plen) == first:
+                    first_nh.add(nh)
+        if first is None:
+            raise ValueError(f"injection CSV {csv_path} has no data rows")
+        prefixes += sum(blocks.values())
+        first_blocks.append((f"{first[0]}/{first[1]}", len(first_nh)))
+    return EtswCsvSummary(
+        next_hops=tuple(sorted(all_nh, key=lambda a: int(ipaddress.IPv6Address(a)))),
+        prefixes=prefixes,
+        paths=paths,
+        first_blocks=tuple(first_blocks),
+    )
+
+
+def _etsw_ndp_device_group(
+    summary: EtswCsvSummary, gateway_ip: str, buffer: int
+) -> taac_types.DeviceGroupConfig:
+    """NDP responder group sized from the CSVs' next hops.
+
+    IxNetwork builds the group as a ::1-increment range from a start address,
+    so it starts at the lowest next hop and spans up to the highest. For a
+    contiguous next-hop set that is exactly the unique count; gaps in the set
+    cost extra responders but never leave a next hop unresolved.
+    """
+    lo = int(ipaddress.IPv6Address(summary.next_hops[0]))
+    hi = int(ipaddress.IPv6Address(summary.next_hops[-1]))
+    return taac_types.DeviceGroupConfig(
+        device_group_index=1,
+        tag_name="NDP_SUPPORTING_NEXTHOP",
+        enable=True,
+        multiplier=(hi - lo + 1) + buffer,
+        v6_addresses_config=taac_types.IpAddressesConfig(
+            starting_ip=str(ipaddress.IPv6Address(lo)),
+            increment_ip="::1",
+            gateway_starting_ip=gateway_ip,
+            gateway_increment_ip="::",
+            mask=64,
+        ),
+    )
+
+
+def _make_etsw_scale_port_config(
+    index: int,
+    pool_name: str,
+    summary: EtswCsvSummary,
+    ndp_buffer: int,
+) -> taac_types.BasicPortConfig:
+    """One IXIA port: eBGP peer, plus the NDP responder group on port 0."""
+    iface, net, _cport = ETSW_SCALE_PORTS[index]
+    dut_ip = f"{net}::a"
+    ixia_ip = f"{net}::b"
+
+    dgs = [
+        taac_types.DeviceGroupConfig(
+            device_group_index=0,
+            tag_name=f"ETSW_SCALE_PEER_P{index}",
+            enable=True,
+            multiplier=1,
+            v6_addresses_config=taac_types.IpAddressesConfig(
+                starting_ip=ixia_ip,
+                gateway_starting_ip=dut_ip,
+                increment_ip="::",
+                gateway_increment_ip="::",
+                mask=64,
+            ),
+            v6_bgp_config=taac_types.BgpConfig(
+                local_as_4_bytes=ETSW_45NH_AS,
+                local_as_increment=0,
+                enable_4_byte_local_as=True,
+                bgp_peer_type=ixia_types.BgpPeerType.EBGP,
+                is_confed=False,
+                bgp_capabilities=[
+                    ixia_types.BgpCapability.IpV6Unicast,
+                    ixia_types.BgpCapability.Ipv6UnicastAddPath,
+                ],
+                route_scales=[
+                    taac_types.RouteScaleSpec(
+                        v6_route_scale=taac_types.RouteScale(
+                            prefix_name=pool_name,
+                            starting_prefixes=ETSW_RECEIVED_SPECS[0].root,
+                            prefix_length=64,
+                            prefix_step="0:0:0:1:0:0:0:0",
+                            prefix_count=1,
+                            multiplier=1,
+                            bgp_communities=[VF_COMMUNITY],
+                            pattern_type=taac_types.PrefixPatternType.INCREMENT,
+                        ),
+                        multiplier=1,
+                        network_group_index=0,
+                    ),
+                ],
+            ),
+        ),
+    ]
+    if index == 0:
+        dgs.append(_etsw_ndp_device_group(summary, dut_ip, ndp_buffer))
+
+    return taac_types.BasicPortConfig(
+        l1_config=MP3N_L1_CONFIG,
+        endpoint=f"{DEVICE_NAME}:{iface}",
+        device_group_configs=dgs,
+    )
+
+
+def _etsw_scale_endpoint(port_count: int) -> taac_types.Endpoint:
+    ports = ETSW_SCALE_PORTS[:port_count]
+    return taac_types.Endpoint(
+        name=DEVICE_NAME,
+        ixia_ports=[iface for iface, _n, _c in ports],
+        dut=True,
+        direct_ixia_connections=[
+            taac_types.DirectIxiaConnection(
+                interface=iface,
+                ixia_chassis_ip=IXIA_CHASSIS_IP,
+                ixia_port=cport,
+            )
+            for iface, _net, cport in ports
+        ],
+    )
+
+
+def _etsw_scale_observe_cmd(summary: EtswCsvSummary) -> str:
+    """Read-only report of what landed, next to what the CSVs advertised."""
+    lines = [
+        'echo "=== CSV advertised: paths=%d prefixes=%d unique_nh=%d ==="; '
+        "timeout 300 fboss2 show bgp summary 2>/dev/null "
+        "| grep -iE '^Paths:|^Loc-RIB'"
+        % (summary.paths, summary.prefixes, len(summary.next_hops))
+    ]
+    for prefix, width in summary.first_blocks:
+        lines.append(
+            'echo "=== %s CSV next hops=%d, installed: ==="; '
+            "timeout 300 fboss2 show route details %s 2>/dev/null "
+            "| grep -oE '%s::a[0-9a-f]+' | sort -u | wc -l"
+            % (prefix, width, prefix, INTERCONNECT_V6)
+        )
+    lines.append(
+        'echo "=== ARS supergroup rejections ==="; '
+        "grep -acE 'Virtual ARS supergroup unique member limit' "
+        "/var/facebook/logs/fboss/wedge_agent.log 2>/dev/null || true"
+    )
+    return "; ".join(lines)
+
+
+# Every non-IXIA front-panel port. eth1/1/{1,3,5,7} are the IXIA ports.
+ETSW_SCALE_FABRIC_PORTS: list = [
+    f"eth1/{_blade}/{_port}" for _blade in range(2, 65) for _port in (1, 3, 5, 7)
+]
+
+
+def _etsw_scale_shut_fabric_tasks() -> list:
+    """Admin-shut every non-IXIA port, and apply it.
+
+    Only wired in when the caller passes `shut_fabric_ports=True` -- needed on
+    Icepack, where the fabric next hops otherwise push the Virtual ARS
+    supergroup past `maxArsVirtualGroupWidth: 128` and `syncFib` (all-or-
+    nothing) stops programming every route. Registering a COOP patcher only
+    records it, so the apply task is what actually shuts the ports.
+
+    Must run AFTER `create_mp3n_setup_tasks`, which starts by unregistering
+    every patcher on the device.
+    """
+    return [
+        create_coop_register_patcher_task(
+            hostname=DEVICE_NAME,
+            config_name="agent",
+            patcher_name="etsw_scale_shut_fabric_uplinks",
+            task_name="change_port_admin_state",
+            patcher_args=dict.fromkeys(ETSW_SCALE_FABRIC_PORTS, "disable"),
+            py_func_name="change_port_admin_state",
+        ),
+        create_coop_apply_patchers_task([DEVICE_NAME], config_name="agent"),
+    ]
+
+
+def _make_etsw_scale_test_config(
+    name_suffix: str,
+    pool_csvs: list,
+    *,
+    shut_fabric_ports: bool = False,
+    ndp_buffer: int = ETSW_NDP_BUFFER,
+    settle_seconds: int = 300,
+) -> TestConfig:
+    """Build an ESL path-scale TestConfig from injection CSVs.
+
+    Args:
+        name_suffix: appended to the TestConfig name (e.g. "SMOKE", "FULL").
+        pool_csvs: [[csv_path, pool_name], ...]; CSV i goes on port i of
+            ETSW_SCALE_PORTS. Prefixes, paths and the next-hop set are read
+            from these files -- nothing about the load is hardcoded.
+        shut_fabric_ports: admin-shut all non-IXIA ports during setup. Turn on
+            for Icepack (frees the ARS 128 budget); off by default.
+        ndp_buffer: NDP responders added beyond the CSVs' next-hop range.
+        settle_seconds: time allowed for BGP/FIB to converge after injection.
+    """
+    if not pool_csvs or len(pool_csvs) > len(ETSW_SCALE_PORTS):
+        raise ValueError(
+            f"need 1..{len(ETSW_SCALE_PORTS)} CSVs (one per IXIA port), "
+            f"got {len(pool_csvs)}"
+        )
+    summary = _summarize_injection_csvs(pool_csvs)
+    ports = ETSW_SCALE_PORTS[: len(pool_csvs)]
+    slug = name_suffix.lower()
+
+    setup_tasks = create_mp3n_setup_tasks(
+        device_name=DEVICE_NAME,
+        peer_group=PEER_GROUP,
+        local_ip=DUT_IP,
+        peer_ip=IXIA_IP,
+        interface_configs=[
+            (iface, f"{net}::a", f"{net}::b", f"ixia_etsw_scale_p{i}")
+            for i, (iface, net, _c) in enumerate(ports)
+        ],
+        peer_description="ixia_etsw_scale",
+        remote_as=ETSW_45NH_AS,
+        ingress_policy=INGRESS_POLICY,
+        egress_policy=EGRESS_POLICY,
+        patcher_suffix=PATCHER_SUFFIX,
+        prefix_limit=PREFIX_LIMIT_45NH,
+        # Multi-million-path convergence stalls keepalives long enough to flap
+        # a 30/10 session.
+        hold_time_seconds=180,
+        keep_alive_seconds=60,
+        # MUST stay False: next_hop_self collapses an N-wide add-path
+        # advertisement to a single path.
+        next_hop_self=False,
+    )
+    if shut_fabric_ports:
+        setup_tasks = setup_tasks + _etsw_scale_shut_fabric_tasks()
+
+    return TestConfig(
+        name=f"ETSW_SCALE_GTSW001_C085_{name_suffix}",
+        basset_pool="dne.test",
+        ixia_protocol_verification_timeout=10,
+        skip_ixia_protocol_verification=True,
+        endpoints=[_etsw_scale_endpoint(len(pool_csvs))],
+        basic_port_configs=[
+            _make_etsw_scale_port_config(i, pool, summary, ndp_buffer)
+            for i, (_csv, pool) in enumerate(pool_csvs)
+        ],
+        basic_traffic_item_configs=[],
+        setup_tasks=setup_tasks,
+        teardown_tasks=create_mp3n_teardown_tasks(device_name=DEVICE_NAME),
+        playbooks=[
+            create_prefix_scale_inject_and_observe_playbook(
+                name=f"etsw_scale_{slug}_inject_and_observe",
+                description=(
+                    f"Advertise {summary.prefixes} prefixes / {summary.paths} "
+                    f"paths over {len(summary.next_hops)} unique next hops "
+                    f"from {len(pool_csvs)} CSV(s), and report what landed."
+                ),
+                pool_csvs=pool_csvs,
+                inject_description=(
+                    f"Inject {len(pool_csvs)} CSV pool(s) "
+                    f"({summary.prefixes} prefixes) in one mutation cycle"
+                ),
+                wait_after_inject=True,
+                settle_stage_id=f"settle_{slug}",
+                settle_seconds=settle_seconds,
+                observe_stage_id=f"observe_{slug}",
+                observe_description=(
+                    f"Report path/prefix totals and per-CSV next-hop counts "
+                    f"(CSV advertised {summary.paths} paths)"
+                ),
+                observe_commands=[
+                    (_etsw_scale_observe_cmd(summary), f"ESL {slug} report")
+                ],
+            )
+        ],
+    )
+
+
+# gtsw001 sits in the Icepack/TH6 role: with the fabric uplinks up, their
+# next hops plus the CSVs' 120 exceed the ARS 128 budget (seen on the
+# 2026-09-29 FULL run: 122 ports up, 358,149 supergroup rejections).
+ETSW_SCALE_GTSW001_SMOKE: TestConfig = _make_etsw_scale_test_config(
+    "SMOKE",
+    _etsw_scale_pool_csvs(ETSW_SCALE_SMOKE_PROFILE),
+    shut_fabric_ports=True,
+    settle_seconds=90,
+)
+ETSW_SCALE_GTSW001_FULL: TestConfig = _make_etsw_scale_test_config(
+    "FULL",
+    _etsw_scale_pool_csvs(ETSW_SCALE_FULL_PROFILE),
+    shut_fabric_ports=True,
 )

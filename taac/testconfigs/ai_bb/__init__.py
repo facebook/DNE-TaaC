@@ -33,6 +33,8 @@ from taac.testconfigs.ai_bb.etsw_prefix_scale_gtsw001_config import (
     ETSW_PREFIX_SCALE_GTSW001,
     ETSW_PREFIX_SCALE_GTSW001_45PEER,
     ETSW_PREFIX_SCALE_GTSW001_4PORT,
+    ETSW_SCALE_GTSW001_FULL,
+    ETSW_SCALE_GTSW001_SMOKE,
 )
 from taac.testconfigs.ai_bb.fa003_du003_qza1_prefix_profiling_config import (  # noqa: F401
     FA003_DU003_QZA1_CONTIGUOUS_PREFIX_ALL,
@@ -73,6 +75,8 @@ __all__ = [
     "ETSW_PREFIX_SCALE_GTSW001",
     "ETSW_PREFIX_SCALE_GTSW001_45PEER",
     "ETSW_PREFIX_SCALE_GTSW001_4PORT",
+    "ETSW_SCALE_GTSW001_FULL",
+    "ETSW_SCALE_GTSW001_SMOKE",
     "EXP1_1_5M_ECMP52",
     "EXP3_4M_ECMP120",
     "EXP5_4M_ECMP240",
