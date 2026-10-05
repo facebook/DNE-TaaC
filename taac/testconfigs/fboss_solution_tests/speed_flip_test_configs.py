@@ -2403,4 +2403,48 @@ SPEED_FLIP_TEST_CONFIGS = [
         ],
         churn_iterations=10,
     ),
+    # 51T Kodiak3 (MORGAN800CC): ssw003.s001 (DUT) <-> fsw003.p002 share a
+    # single dual cage that runs natively at 2x200G, hence
+    # target_port_cage_count=1. Registering the 100G patcher flips 200G -> 100G;
+    # unregistering it restores the native 200G.
+    SpeedFlipTestConfig(
+        endpoints=["ssw003.s001.m001.qzr1", "fsw003.p002.m001.qzr1"],
+        test_config_name="SPEED_FLIP_51T_KO3_SSW_FSW_TEST_PORTS_UP",
+        snapshot_health_check_params={
+            "ssw003.s001.m001.qzr1": ["eth1/10/1", "eth1/10/5"],
+            "fsw003.p002.m001.qzr1": ["eth1/3/1", "eth1/3/5"],
+        },
+        playbooks=[
+            SpeedFlipPlaybook(
+                stages=[
+                    SpeedTransitionStage(
+                        endpoints={
+                            "ssw003.s001.m001.qzr1": ["eth1/10/1", "eth1/10/5"],
+                            "fsw003.p002.m001.qzr1": ["eth1/3/1", "eth1/3/5"],
+                        },
+                        speed_in_gbps=100,
+                        patcher_name="change_speed_test_100",
+                        port_state_change=False,
+                        target_port_cage_count=1,
+                    ),
+                ],
+                health_check_params={
+                    "ssw003.s001.m001.qzr1": {
+                        "interfaces": [
+                            {"interface_name": "eth1/10/1", "expected_speed": 100},
+                            {"interface_name": "eth1/10/5", "expected_speed": 100},
+                        ]
+                    },
+                    "fsw003.p002.m001.qzr1": {
+                        "interfaces": [
+                            {"interface_name": "eth1/3/1", "expected_speed": 100},
+                            {"interface_name": "eth1/3/5", "expected_speed": 100},
+                        ]
+                    },
+                },
+                playbook_name="SPEED_FLIP_51T_KO3_SSW_FSW_TEST_PORTS_UP_200G_TO_100G_PLAYBOOK",
+                number_of_iterations=1,
+            ),
+        ],
+    ).build_test_config(),
 ]
