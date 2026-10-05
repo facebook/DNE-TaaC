@@ -244,6 +244,8 @@ class ProfileContext:
     cpu_baseline: float = 8.0
     check_cpu_load_average: bool = True
     check_ibgp_pnh: bool = False
+    ibgp_pnh_start_ipv4s: t.Optional[tuple[str, ...]] = None
+    ibgp_pnh_start_ipv6s: t.Optional[tuple[str, ...]] = None
     expected_peer_identity: t.Optional[t.Dict[str, str]] = None
     parent_prefixes_to_ignore: t.Optional[t.List[str]] = None
     # Whether to exclude BGP-MON peers from the session checks, and which
@@ -334,6 +336,8 @@ def _daemon_restart(ctx: ProfileContext) -> ProfileChecks:
             expected_established_sessions=(ctx.expected_established_sessions or 0),
             cpu_baseline=ctx.cpu_baseline,
             check_ibgp_pnh=ctx.check_ibgp_pnh,
+            ibgp_pnh_start_ipv4s=ctx.ibgp_pnh_start_ipv4s,
+            ibgp_pnh_start_ipv6s=ctx.ibgp_pnh_start_ipv6s,
             bgp_mon=ctx.bgp_mon,
         ),
         postchecks=create_standard_postchecks(
@@ -411,6 +415,8 @@ def _cold_start(ctx: ProfileContext) -> ProfileChecks:
             precheck_thresholds=ctx.precheck_thresholds,
             cpu_baseline=ctx.cpu_baseline,
             check_ibgp_pnh=ctx.check_ibgp_pnh,
+            ibgp_pnh_start_ipv4s=ctx.ibgp_pnh_start_ipv4s,
+            ibgp_pnh_start_ipv6s=ctx.ibgp_pnh_start_ipv6s,
             bgp_mon=ctx.bgp_mon,
         ),
         postchecks=create_standard_postchecks(
@@ -446,6 +452,8 @@ def _oscillation(ctx: ProfileContext) -> ProfileChecks:
             expected_established_sessions=ctx.expected_established_sessions,
             cpu_baseline=ctx.cpu_baseline,
             check_ibgp_pnh=ctx.check_ibgp_pnh,
+            ibgp_pnh_start_ipv4s=ctx.ibgp_pnh_start_ipv4s,
+            ibgp_pnh_start_ipv6s=ctx.ibgp_pnh_start_ipv6s,
             bgp_mon=ctx.bgp_mon,
         ),
         postchecks=create_standard_postchecks(
@@ -504,6 +512,8 @@ def _churn_storm(ctx: ProfileContext) -> ProfileChecks:
             expected_established_sessions=ctx.expected_established_sessions,
             check_cpu_load_average=ctx.check_cpu_load_average,
             check_ibgp_pnh=ctx.check_ibgp_pnh,
+            ibgp_pnh_start_ipv4s=ctx.ibgp_pnh_start_ipv4s,
+            ibgp_pnh_start_ipv6s=ctx.ibgp_pnh_start_ipv6s,
             bgp_mon=ctx.bgp_mon,
         ),
         postchecks=create_standard_postchecks(
@@ -553,6 +563,8 @@ def _igp_instability(ctx: ProfileContext) -> ProfileChecks:
             expected_established_sessions=ctx.expected_established_sessions,
             cpu_baseline=ctx.cpu_baseline,
             check_ibgp_pnh=ctx.check_ibgp_pnh,
+            ibgp_pnh_start_ipv4s=ctx.ibgp_pnh_start_ipv4s,
+            ibgp_pnh_start_ipv6s=ctx.ibgp_pnh_start_ipv6s,
             bgp_mon=ctx.bgp_mon,
         ),
         postchecks=postchecks,
@@ -677,6 +689,8 @@ def _runtime_update(ctx: ProfileContext) -> ProfileChecks:
             cpu_baseline=ctx.cpu_baseline,
             expected_established_sessions=(ctx.expected_established_sessions or None),
             check_ibgp_pnh=ctx.check_ibgp_pnh,
+            ibgp_pnh_start_ipv4s=ctx.ibgp_pnh_start_ipv4s,
+            ibgp_pnh_start_ipv6s=ctx.ibgp_pnh_start_ipv6s,
             bgp_mon=ctx.bgp_mon,
         )
         + [

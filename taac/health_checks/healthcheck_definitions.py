@@ -1406,6 +1406,8 @@ def create_ibgp_pnh_metric_check(
     expected_openr_metric: int,
     expected_openr_ad: int,
     check_id: t.Optional[str] = None,
+    start_ipv4s: t.Optional[t.Sequence[str]] = None,
+    start_ipv6s: t.Optional[t.Sequence[str]] = None,
 ) -> PointInTimeHealthCheck:
     """Create a point-in-time check of iBGP protocol-next-hop (PNH) metric/AD vs Open/R.
 
@@ -1418,20 +1420,24 @@ def create_ibgp_pnh_metric_check(
         expected_openr_metric: Required Open/R IGP metric for the PNH route.
         expected_openr_ad: Required Open/R administrative-distance value.
         check_id: Optional unique identifier for the check.
+        start_ipv4s: Optional IPv4 route-range starts from the bound topology.
+        start_ipv6s: Optional IPv6 route-range starts from the bound topology.
 
     Returns:
         A `PointInTimeHealthCheck` with `name=IBGP_PNH_METRIC_CHECK`.
     """
+    payload: t.Dict[str, t.Any] = {
+        "expected_openr_metric": expected_openr_metric,
+        "expected_openr_ad": expected_openr_ad,
+    }
+    if start_ipv4s is not None:
+        payload["start_ipv4s"] = list(start_ipv4s)
+    if start_ipv6s is not None:
+        payload["start_ipv6s"] = list(start_ipv6s)
+
     return PointInTimeHealthCheck(
         name=hc_types.CheckName.IBGP_PNH_METRIC_CHECK,
-        check_params=Params(
-            json_params=json.dumps(
-                {
-                    "expected_openr_metric": expected_openr_metric,
-                    "expected_openr_ad": expected_openr_ad,
-                }
-            )
-        ),
+        check_params=Params(json_params=json.dumps(payload)),
         check_id=check_id,
     )
 

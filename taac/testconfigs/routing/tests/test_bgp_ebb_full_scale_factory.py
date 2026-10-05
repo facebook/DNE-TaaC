@@ -7,6 +7,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 from taac.abstractions.topologies.ebb_full_scale import (
+    EBB_OPENR_INJECTED_START_IPV4S,
+    EBB_OPENR_INJECTED_START_IPV4S_IXIA03,
+    EBB_OPENR_INJECTED_START_IPV6S,
+    EBB_OPENR_INJECTED_START_IPV6S_IXIA03,
     EBB_PARENT_NETWORKS,
     EBB_PARENT_NETWORKS_IXIA03,
 )
@@ -41,6 +45,22 @@ _EBB_PLAYBOOK_BUILDERS = (
     "get_bgp_ebb_ibgp_route_oscillation_playbook",
     "get_bgp_ebb_igp_unresolvable_pnh_playbook",
     "get_bgp_ebb_nexthop_group_count_threshold_playbook",
+)
+_PNH_RANGE_BUILDERS = (
+    "get_bgp_ebb_attribute_churn_playbook",
+    "get_bgp_ebb_route_storm_playbook",
+    "get_bgp_ebb_route_registry_runtime_update_playbook",
+    "get_bgp_ebb_multipath_group_oscillation_playbook",
+    "get_bgp_ebb_daemon_restart_playbook",
+    "get_bgp_ebb_cold_start_playbook",
+    "get_bgp_ebb_ebgp_session_oscillation_playbook",
+    "get_bgp_ebb_ebgp_route_oscillation_playbook",
+    "get_bgp_ebb_ibgp_plane_session_oscillation_playbook",
+    "get_bgp_ebb_ibgp_route_oscillation_playbook",
+)
+_PNH_START_LIST_BUILDERS = (
+    "get_bgp_ebb_igp_pnh_metric_oscillation_playbook",
+    "get_bgp_ebb_igp_unresolvable_pnh_playbook",
 )
 
 
@@ -169,16 +189,27 @@ class BgpEbbFullScaleFactoryTest(unittest.TestCase):
                 EBB_PARENT_NETWORKS,
                 "2401:db00:e50d:22:a",
                 "2401:db00:e50d:44:a",
+                EBB_OPENR_INJECTED_START_IPV4S,
+                EBB_OPENR_INJECTED_START_IPV6S,
             ),
             (
                 "NRQ/IXIA03",
                 EBB_PARENT_NETWORKS_IXIA03,
                 "2401:db00:e50d:44:a",
                 "2401:db00:e50d:22:a",
+                EBB_OPENR_INJECTED_START_IPV4S_IXIA03,
+                EBB_OPENR_INJECTED_START_IPV6S_IXIA03,
             ),
         )
 
-        for profile, parent_networks, expected, forbidden in canonical_pairs:
+        for (
+            profile,
+            parent_networks,
+            expected,
+            forbidden,
+            start_ipv4s,
+            start_ipv6s,
+        ) in canonical_pairs:
             with self.subTest(profile=profile):
                 self.assertEqual(expected, parent_networks["bgpmon_v6"])
                 self.assertNotEqual(forbidden, parent_networks["bgpmon_v6"])
@@ -188,6 +219,8 @@ class BgpEbbFullScaleFactoryTest(unittest.TestCase):
                         device_config=SimpleNamespace(
                             fibagent_bgp_nhg_watermark_high=1000,
                             fibagent_bgp_nhg_watermark_low=1000,
+                            openr_injected_start_ipv4s=start_ipv4s,
+                            openr_injected_start_ipv6s=start_ipv6s,
                         ),
                         parent_networks=parent_networks,
                     ),
@@ -242,6 +275,18 @@ class BgpEbbFullScaleFactoryTest(unittest.TestCase):
                         ]
                         self.assertEqual(expected, configured)
                         self.assertNotEqual(forbidden, configured)
+
+                for builder_name in _PNH_RANGE_BUILDERS:
+                    with self.subTest(profile=profile, builder=builder_name):
+                        kwargs = builders[builder_name].call_args.kwargs
+                        self.assertEqual(start_ipv4s, kwargs["ibgp_pnh_start_ipv4s"])
+                        self.assertEqual(start_ipv6s, kwargs["ibgp_pnh_start_ipv6s"])
+
+                for builder_name in _PNH_START_LIST_BUILDERS:
+                    with self.subTest(profile=profile, builder=builder_name):
+                        kwargs = builders[builder_name].call_args.kwargs
+                        self.assertEqual(list(start_ipv4s), kwargs["start_ipv4s"])
+                        self.assertEqual(list(start_ipv6s), kwargs["start_ipv6s"])
 
     def test_full_scale_rejects_missing_bgp_mon_network(self) -> None:
         inventory = _inventory()

@@ -1,5 +1,6 @@
 # pyre-unsafe
 import dataclasses
+import typing as t
 
 from taac.constants import Gigabyte
 from taac.health_checks.healthcheck_definitions import (
@@ -176,6 +177,8 @@ def create_standard_prechecks(
     cpu_baseline: float = 5.0,
     check_cpu_load_average: bool = True,
     check_ibgp_pnh: bool = False,
+    ibgp_pnh_start_ipv4s: t.Optional[t.Sequence[str]] = None,
+    ibgp_pnh_start_ipv6s: t.Optional[t.Sequence[str]] = None,
     check_bgp_convergence: bool = True,
     check_hardware_capacity: bool = True,
     rp_file_path: str | None = None,
@@ -211,6 +214,8 @@ def create_standard_prechecks(
             when resource utilization is collected by non-terminating periodic
             telemetry instead.
         check_ibgp_pnh: Enable iBGP PNH metric check (only for Open/R profiles)
+        ibgp_pnh_start_ipv4s: IPv4 route-range starts from the bound topology.
+        ibgp_pnh_start_ipv6s: IPv6 route-range starts from the bound topology.
         check_bgp_convergence: Add the BGP++ initialization-events convergence
             precheck (default True). Asserts the device reached INITIALIZED
             within the convergence threshold (self-waits up to it). The strict
@@ -347,6 +352,8 @@ def create_standard_prechecks(
                 expected_openr_metric=10,
                 expected_openr_ad=10,
                 check_id="startup_ibgp_pnh_verification",
+                start_ipv4s=ibgp_pnh_start_ipv4s,
+                start_ipv6s=ibgp_pnh_start_ipv6s,
             )
         )
 

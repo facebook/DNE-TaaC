@@ -7,6 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from taac.abstractions.churn.route import RouteStorm
+from taac.abstractions.topologies.ebb_full_scale import (
+    EBB_OPENR_INJECTED_START_IPV4S_IXIA03,
+    EBB_OPENR_INJECTED_START_IPV6S_IXIA03,
+)
 from taac.constants import BgpPlusPlusProfile
 from taac.playbooks.routing import (
     bgp_ebb_playbooks as _bgp_ebb_playbooks,
@@ -155,6 +159,8 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
         # hardcoded dotted path is only correct in one of the two worlds; read
         # the name off the imported module instead.
         target = f"{_bgp_ebb_playbooks.__name__}.get_profile_checks"
+        start_ipv4s = EBB_OPENR_INJECTED_START_IPV4S_IXIA03[:1]
+        start_ipv6s = EBB_OPENR_INJECTED_START_IPV6S_IXIA03[:1]
         with patch(target) as get_checks:
             get_checks.return_value = SimpleNamespace(
                 prechecks=[],
@@ -169,7 +175,12 @@ class BgpRouteStormPlaybookTest(unittest.TestCase):
                 ixia_interface_mimic_ibgp="Ethernet2",
                 observer_peer_parent_prefix="2401:db00:e50d:22:a::/80",
                 profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+                ibgp_pnh_start_ipv4s=start_ipv4s,
+                ibgp_pnh_start_ipv6s=start_ipv6s,
             )
 
-        self.assertTrue(get_checks.call_args.args[1].check_ibgp_pnh)
-        self.assertFalse(get_checks.call_args.args[1].check_cpu_load_average)
+        context = get_checks.call_args.args[1]
+        self.assertTrue(context.check_ibgp_pnh)
+        self.assertFalse(context.check_cpu_load_average)
+        self.assertEqual(start_ipv4s, context.ibgp_pnh_start_ipv4s)
+        self.assertEqual(start_ipv6s, context.ibgp_pnh_start_ipv6s)

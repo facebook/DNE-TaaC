@@ -12,6 +12,10 @@ recovery race.
 import json
 import unittest
 
+from taac.abstractions.topologies.ebb_full_scale import (
+    EBB_OPENR_INJECTED_START_IPV4S_IXIA03,
+    EBB_OPENR_INJECTED_START_IPV6S_IXIA03,
+)
 from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
     create_standard_postchecks,
     create_standard_prechecks,
@@ -166,6 +170,37 @@ class CommonHealthChecksCpuLoadAverageTest(unittest.TestCase):
         )
 
         self.assertFalse(any(c.check_id == self.PRECHECK_ID for c in checks))
+
+
+class CommonHealthChecksIbgpPnhTest(unittest.TestCase):
+    PRECHECK_ID = "startup_ibgp_pnh_verification"
+
+    def test_pnh_precheck_uses_bound_openr_route_ranges(self):
+        start_ipv4s = EBB_OPENR_INJECTED_START_IPV4S_IXIA03[:2]
+        start_ipv6s = EBB_OPENR_INJECTED_START_IPV6S_IXIA03[:2]
+
+        checks = create_standard_prechecks(
+            peergroup_ibgp_v6="EB-EB-V6",
+            peergroup_ibgp_v4="EB-EB-V4",
+            check_ibgp_pnh=True,
+            ibgp_pnh_start_ipv4s=start_ipv4s,
+            ibgp_pnh_start_ipv6s=start_ipv6s,
+        )
+
+        params = _json_params(_find_check(checks, self.PRECHECK_ID))
+        self.assertEqual(list(start_ipv4s), params["start_ipv4s"])
+        self.assertEqual(list(start_ipv6s), params["start_ipv6s"])
+
+    def test_pnh_precheck_preserves_legacy_defaults_for_direct_callers(self):
+        checks = create_standard_prechecks(
+            peergroup_ibgp_v6="EB-EB-V6",
+            peergroup_ibgp_v4="EB-EB-V4",
+            check_ibgp_pnh=True,
+        )
+
+        params = _json_params(_find_check(checks, self.PRECHECK_ID))
+        self.assertNotIn("start_ipv4s", params)
+        self.assertNotIn("start_ipv6s", params)
 
 
 if __name__ == "__main__":
