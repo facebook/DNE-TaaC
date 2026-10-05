@@ -10,41 +10,37 @@ from taac.utils.oss_taac_lib_utils import memoize_forever
 from taac.test_as_a_config import types as taac_types
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
+EPHEMERAL_TEST_CONFIG_PATH_ENV = "TAAC_EPHEMERAL_TEST_CONFIG_PATH"
+EPHEMERAL_TEST_CONFIG_SHA256_ENV = "TAAC_EPHEMERAL_TEST_CONFIG_SHA256"
+MAX_EPHEMERAL_TEST_CONFIG_BYTES = 8 * 1024 * 1024
 
-if not TAAC_OSS:
+
+@memoize_forever
+def get_test_configs() -> tuple[taac_types.TestConfig, ...]:
+    """Load every registered TestConfig on first use.
+
+    Keeping the registry imports inside this function lets lightweight TAAC
+    callers import ``test_configs`` without constructing every TestConfig.
+    """
+    if TAAC_OSS:
+        from taac.otg.otg_basic_l3_test_config import (  # pyre-ignore[21]
+            get_test_config as get_otg_l3_config,
+        )
+
+        return (get_otg_l3_config(),)
+
     from taac.testconfigs.internal.all import (
         INTERNAL_TEST_CONFIGS,
     )
 
-    OSS_TEST_CONFIG_FACTORIES = []
-else:
-    from taac.otg.otg_basic_l3_test_config import (  # pyre-ignore[21]
-        get_test_config as _get_otg_l3_config,
-    )
-
-    OSS_TEST_CONFIG_FACTORIES = [
-        _get_otg_l3_config,
-    ]
-    INTERNAL_TEST_CONFIGS = []
-
-TAAC_TEST_CONFIGS = INTERNAL_TEST_CONFIGS
-EPHEMERAL_TEST_CONFIG_PATH_ENV = "TAAC_EPHEMERAL_TEST_CONFIG_PATH"
-EPHEMERAL_TEST_CONFIG_SHA256_ENV = "TAAC_EPHEMERAL_TEST_CONFIG_SHA256"
-MAX_EPHEMERAL_TEST_CONFIG_BYTES = 8 * 1024 * 1024
+    return tuple(INTERNAL_TEST_CONFIGS)
 
 
 def _known_test_config_names() -> list[str]:
     # The runner matches --test-config against TestConfig.name, so the message
     # must list .name values (not the Python constant identifiers, which can
     # differ, e.g. by a trailing "_CONFIG").
-    names = [tc.name for tc in TAAC_TEST_CONFIGS]
-    for factory in OSS_TEST_CONFIG_FACTORIES:
-        try:
-            names.append(factory().name)
-        except Exception:
-            # A broken factory must not mask the real "config not found" error.
-            continue
-    return sorted(set(names))
+    return sorted({config.name for config in get_test_configs()})
 
 
 def _unknown_test_config_message(test_config: str) -> str:
@@ -118,12 +114,7 @@ def _get_ephemeral_test_config(
 
 @memoize_forever
 def _get_registered_test_config(test_config: str) -> taac_types.TestConfig:
-    for test_config_obj in TAAC_TEST_CONFIGS:
-        if test_config_obj.name == test_config:
-            return test_config_obj
-
-    for factory in OSS_TEST_CONFIG_FACTORIES:
-        test_config_obj = factory()
+    for test_config_obj in get_test_configs():
         if test_config_obj.name == test_config:
             return test_config_obj
 

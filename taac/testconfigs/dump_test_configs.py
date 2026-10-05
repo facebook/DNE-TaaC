@@ -1,6 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
-"""Serialize every TAAC TestConfig to JSONL, one config per line.
+"""Serialize TAAC TestConfigs to JSONL, one config per line.
 
 Usage:
     buck2 run fbcode//neteng/test_infra/dne/taac/testconfigs:dump_test_configs -- \
@@ -9,7 +9,7 @@ Usage:
 
 import argparse
 
-from taac.test_configs import TAAC_TEST_CONFIGS
+from neteng.test_infra.dne.taac.test_configs import get_test_config, get_test_configs
 from taac.utils.json_thrift_utils import thrift_to_json
 
 
@@ -25,9 +25,18 @@ def main() -> None:
         required=True,
         help="File to write the JSONL payload to.",
     )
+    parser.add_argument(
+        "--test-config",
+        help="Write only the TestConfig with this name.",
+    )
     args = parser.parse_args()
 
+    configs = (
+        (get_test_config(args.test_config),)
+        if args.test_config is not None
+        else get_test_configs()
+    )
     with open(args.output, "w") as payload_file:
-        for config in TAAC_TEST_CONFIGS:
+        for config in configs:
             payload_file.write(thrift_to_json(config))
             payload_file.write("\n")
