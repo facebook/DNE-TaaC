@@ -12,7 +12,7 @@ in classify_exception().
 import asyncio
 import time
 import traceback
-from typing import List
+from typing import Optional
 
 from taac.runner.oss_exception_classifier import (
     classify_exception,
@@ -29,6 +29,22 @@ from taac.runner.oss_exceptions import (
 from taac.runner.oss_test_result import OSSTestResult
 from taac.runner.oss_test_status import OSSTestStatus
 from taac.test_as_a_config import types as taac_types
+
+
+def _primary_exception(exc: BaseException) -> Optional[Exception]:
+    """The exception that decides a playbook's status.
+
+    ``classify_exception`` matches only direct types, so a group wrapping a
+    ``TestCaseFailure`` would be reported as ERROR. Unwrap it to its first
+    non-cancellation leaf; ``None`` when every leaf is a cancellation.
+    """
+    if not isinstance(exc, BaseExceptionGroup):
+        return exc if isinstance(exc, Exception) else None
+    for inner in exc.exceptions:
+        cause = _primary_exception(inner)
+        if cause is not None:
+            return cause
+    return None
 
 
 class OSSTestExecutor:
@@ -100,12 +116,28 @@ class OSSTestExecutor:
             # smoke (uname against fboss101 + fboss102, 2/2 PASSED).
             await self._taac_runner.run_tests([playbook], [dut])
             self._logger.info(f"Playbook '{playbook.name}' PASSED on {dut}")
-        except Exception as e:
-            status, is_transient = classify_exception(e)
-            exception_type = type(e).__name__
-            exception_message = str(e)
+        # BaseExceptionGroup, not just Exception: TaacRunner.run_test_case
+        # raises BaseExceptionGroup("test case execution and teardown both
+        # failed", ...), and Python only downgrades that to the
+        # Exception-derived ExceptionGroup when EVERY member is an Exception.
+        # A health check that raises inside the postcheck asyncio.gather
+        # cancels its siblings, so one member is asyncio.CancelledError -- a
+        # BaseException. The group therefore stayed a BaseExceptionGroup and
+        # sailed straight through `except Exception`, out of the
+        # `for playbook in playbooks` loop in oss_entry_point. Observed
+        # 2026-08-22: a 5-playbook batch recorded one result and silently
+        # dropped the other four. A bare CancelledError still propagates, so
+        # genuine task cancellation is unaffected.
+        except (Exception, BaseExceptionGroup) as e:
+            cause = _primary_exception(e)
+            if cause is None:
+                # Nothing but cancellations: genuine cancellation, not a result.
+                raise
+            status, is_transient = classify_exception(cause)
+            exception_type = type(cause).__name__
+            exception_message = str(cause)
             stacktrace = traceback.format_exc()
-            message = f"{exception_type}: {e}"
+            message = f"{exception_type}: {cause}"
             log = self._logger.warning if is_transient else self._logger.error
             log(f"Playbook '{playbook.name}' {status.name} on {dut}: {e}")
 

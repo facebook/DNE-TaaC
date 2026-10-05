@@ -341,6 +341,35 @@ def pyjq_compile(script: str):
     return pyjq.compile(script)
 
 
+def _split_jq_path(expr: str) -> t.List[str]:
+    """Split a jq dot-path into key segments, honouring quoted keys.
+
+    A quoted segment is atomic: ``."fboss159.99.ash6".interfaces`` is two keys,
+    not four. Quoting is exactly how jq expresses "this dot belongs to the
+    name", and hostnames used as jq keys are routinely FQDNs, so splitting on
+    every dot silently loses the lookup and yields ``None`` downstream.
+    """
+    parts: t.List[str] = []
+    buf = ""
+    # Only the quote that opened a segment closes it, so `."it's".x` keeps the
+    # apostrophe as part of the key.
+    quote: t.Optional[str] = None
+    for ch in expr:
+        if quote is None and ch in ('"', "'"):
+            quote = ch
+        elif ch == quote:
+            quote = None
+        elif ch == "." and quote is None:
+            if buf:
+                parts.append(buf)
+            buf = ""
+        else:
+            buf += ch
+    if buf:
+        parts.append(buf)
+    return parts
+
+
 def _eval_jq_simple(jq_expr: str, jq_vars: t.Dict[str, t.Any]) -> t.Any:
     """Minimal dot-path jq fallback for when pyjq is unavailable (Python 3.12+)."""
     expr = jq_expr.strip()
@@ -348,9 +377,8 @@ def _eval_jq_simple(jq_expr: str, jq_vars: t.Dict[str, t.Any]) -> t.Any:
         raise ValueError(
             f"Simple jq fallback only supports dot-path expressions, got: {expr}"
         )
-    parts = expr.lstrip(".").split(".")
     result: t.Any = jq_vars
-    for part in parts:
+    for part in _split_jq_path(expr):
         if not part:
             continue
         if isinstance(result, dict):

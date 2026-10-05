@@ -1081,7 +1081,11 @@ class AbstractSwitch(ABC):
         """
         ...
 
-    async def async_create_cold_boot_file(self) -> None: ...
+    async def async_create_cold_boot_file(  # noqa: B027
+        self, service: Optional[Service] = None
+    ) -> None: ...
+
+    async def async_remove_cold_boot_file(self) -> None: ...  # noqa: B027
 
     async def async_get_aggregated_interfaces(
         self,

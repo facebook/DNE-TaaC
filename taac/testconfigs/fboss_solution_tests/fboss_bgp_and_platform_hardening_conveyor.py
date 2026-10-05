@@ -1544,6 +1544,7 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
     bgpd_restart_no_of_interations=1,
     wedge_agent_restart_no_of_interations=1,
     direct_ixia_connections=None,
+    precheck_packet_loss_clear_stats=False,
     basset_pool=None,
     ixia_protocol_verification_timeout=300,
     ecmp_group_overflow_prefix="7000",  # 7000:1:f::/64
@@ -1728,11 +1729,19 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
     ]
     tc_prechecks = [
         create_systemctl_active_state_check(),
+        # PREcheck clears first (when asked): IXIA counters are cumulative for
+        # the session and setup's trial traffic runs every item at once before
+        # routes converge, so an unclear precheck samples ~100% loss and fails
+        # before the playbook starts. tc_postchecks above deliberately does NOT
+        # clear -- it must measure the playbook's own window.
         *(
             []
             if l2_overload_only
             else [
-                get_ixia_healthcheck_stable_state(device_name),
+                get_ixia_healthcheck_stable_state(
+                    device_name,
+                    clear_traffic_stats=precheck_packet_loss_clear_stats,
+                ),
                 create_prefix_limit_check(prefix_limit=prefix_limit),
             ]
         ),

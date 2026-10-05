@@ -650,6 +650,8 @@ def create_npi_device_only_thrift_hardening_test_config(
 NPI_DVT_ICEPACK_GTSW__THRIFT_HARDENING_TEST_CONFIG = create_npi_thrift_hardening_test_config(
     test_config_name="NPI_DVT_ICEPACK_GTSW__THRIFT_HARDENING_TEST_CONFIG",
     device_name="gtsw001.l1001.c085.ash6",
+    # Skip import-time netwhoami platform assert (device not in OSS inventory).
+    skip_platform_assert=True,
     local_mac_address="02:00:00:00:0f:0c",
     ixia_downlink_interface="eth1/13/1",
     ixia_uplink_interface="eth1/13/3",

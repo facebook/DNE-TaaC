@@ -771,3 +771,30 @@ class GetLatestTrafficStatsTest(unittest.TestCase):
         self.assertLessEqual(timeout_seconds, 7)
         mock_get_rate.assert_called_once_with(ixia.traffic_item_view_assistant)
         ixia.logger.warning.assert_called_once()
+
+
+class LogBenchmarkRateReportTest(unittest.TestCase):
+    def setUp(self):
+        self.ixia = _create_taac_ixia()
+        self.ixia.capturing = False
+        self.ixia.traffic_item_view_assistant = MagicMock()
+        self.ixia.get_traffic_rate_statistics = MagicMock(
+            return_value=[{"identifier": "snake", "Tx Rate": 2000.0, "Rx Rate": 1000.0}]
+        )
+
+    def _report(self, frame_size_bytes: int) -> str:
+        self.ixia.log_benchmark_rate_report("snake", frame_size_bytes=frame_size_bytes)
+        self.ixia.logger.warning.assert_called_once()
+        return self.ixia.logger.warning.call_args.args[0]
+
+    def test_zero_frame_size_reports_instead_of_raising(self):
+        """Report-only: a misconfigured frame size must not raise ZeroDivisionError."""
+        report = self._report(frame_size_bytes=0)
+        self.assertIn("forwarded 50.0% of offered", report)
+        self.assertIn("~0 Mpps", report)
+
+    def test_pps_is_derived_from_the_frame_size(self):
+        # 1000 Mbps over 2 directions at 1000B frames = 0.0625 Mpps per direction.
+        report = self._report(frame_size_bytes=1000)
+        self.assertIn("forwarded 0.5 Gbps L2", report)
+        self.assertIn("at 1000B frames", report)

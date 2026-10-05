@@ -264,6 +264,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         os.environ["TAAC_DEVICE_INFO_PATH"] = os.path.abspath(args.device_info_csv)
     if args.circuit_info_csv:
         os.environ["TAAC_CIRCUIT_INFO_PATH"] = os.path.abspath(args.circuit_info_csv)
+    # Env var rather than threading the value down: the validation step that
+    # honours it sits several layers below the runner, and this matches how the
+    # CSV path flags above are plumbed.
+    if getattr(args, "skip_health_checks", None):
+        os.environ["TAAC_SKIP_HEALTH_CHECKS"] = args.skip_health_checks
 
     # Setup logger (stdlib; structured-logger integration is a follow-up)
     log_level = logging.DEBUG if args.debug else getattr(logging, args.log_level)
