@@ -1566,6 +1566,7 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
     playbooks_selected=None,
     include_cgroup_memory_setup=True,
     include_bgp_peer_route_snapshot_check=False,
+    stress_static_routes=True,
 ):
     """Build the conveyor TestConfig for combined BGP++ and FBOSS platform hardening.
 
@@ -1652,6 +1653,9 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
             required by ``test_cgroup_system_slice_oom_kill_policy``.
         include_bgp_peer_route_snapshot_check: Add a per-peer route snapshot check,
             excluding the intentionally flapping rogue peers and prefixes.
+        stress_static_routes: When ``False``, omit the add_stress_static_routes
+            setup task (platforms whose good_ndp_entries_uplink is too small to
+            reach ecmp_member_limit).
 
     Returns:
         TestConfig: The fully-built conveyor TestConfig.
@@ -2036,10 +2040,11 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
                         ),
                     ]
                 ),
+                # generate_prefix_nh_list_map caps each group at
+                # device_group_count // 4 members, so a platform with few uplink
+                # NDP nexthops cannot reach ecmp_member_limit; let it opt out.
                 *(
-                    []
-                    if l2_overload_only
-                    else [
+                    [
                         create_add_stress_static_routes_task(
                             hostname=device_name,
                             max_ecmp_group=ecmp_group_limit,
@@ -2049,6 +2054,8 @@ def test_config_for_bgp_and_fboss_platform_hardening_in_conveyor(
                             device_group_count=good_ndp_entries_uplink,
                         )
                     ]
+                    if stress_static_routes and not l2_overload_only
+                    else []
                 ),
                 create_configure_parallel_bgp_peers_task(
                     hostname=device_name,

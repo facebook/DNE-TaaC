@@ -2320,6 +2320,7 @@ def test_config_qos_scheduling(
     # <dut>". The conveyor already accepts this; only the forward was missing.
     direct_ixia_connections=None,
     precheck_packet_loss_clear_stats=False,
+    stress_static_routes=True,
 ):
     """Build a QoS scheduling + congestion TestConfig for FBOSS BGP++ devices.
 
@@ -2549,6 +2550,7 @@ def test_config_qos_scheduling(
         skip_playbooks=skip_playbooks,
         direct_ixia_connections=direct_ixia_connections,
         precheck_packet_loss_clear_stats=precheck_packet_loss_clear_stats,
+        stress_static_routes=stress_static_routes,
     )
 
     # Append congestion port config and traffic item to the TestConfig
