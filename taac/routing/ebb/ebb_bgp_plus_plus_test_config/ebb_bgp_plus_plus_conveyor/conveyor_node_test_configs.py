@@ -27,6 +27,8 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG,
     BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
+    BAG012_ASH6_EBB20_SC4_QUALIFICATION_TEST_CONFIG_UG,
+    BAG012_ASH6_EBB22_SC6_QUALIFICATION_TEST_CONFIG_UG,
     BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG,
 )
 
@@ -38,9 +40,11 @@ from taac.testconfigs.routing.cicd_ebb_int_tc import (
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
     BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
     NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG,
+    NRQEB006_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_CONFIG_UG,
     NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     NRQEB007_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG,
+    NRQEB007_SC6_CHURN_PROCESSING_TEST_CONFIG_UG,
     NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
     NRQEB008_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG,
@@ -113,6 +117,10 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
     # Second promotion-gating wave; serialized after EBB-17 on NRQEB008.
     NRQEB008_SC5_UPDATE_PACKING_TEST_CONFIG_UG,
+    # Second promotion-gating wave on NRQEB006 and NRQEB007. Each node is
+    # serialized only after the first-wave node on the same physical device.
+    NRQEB006_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_CONFIG_UG,
+    NRQEB007_SC6_CHURN_PROCESSING_TEST_CONFIG_UG,
     # Legacy retained scale-and-characteristic selectors; these are not the
     # first-wave Conveyor bindings above.
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,
@@ -181,14 +189,17 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # conveyor node.
     BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG,
     # bag010.ash6 SC6 churn processing P(N) (char-6) — convergence time vs route
-    # scale. Reuses the EB02 churn P(N) engine (iBGP-injection IPv6-only, 100-route
-    # churn, sweep total route scale 5K→50K) with bag010 device setup (nexthop gflag
-    # + CRF cleared). The per-scale convergence gate is observe-first (generous 700s
-    # budget); a queue-backpressure periodic task monitors egress-queue backlog
-    # (permissive default). Update-group enabled via post-replace config-patch task
-    # (global bgp_setting_config flag; persisted peers are re-grouped on restart).
+    # scale. Reuses the EB02 churn P(N) engine (iBGP-injection IPv6-only, exact
+    # 100-route churn, sweep total route scale 5K→50K) with bag010 device setup
+    # (nexthop gflag + CRF cleared). The targeted ingress and complete egress fan-out
+    # produce one cross-port latency with a 30s per-phase ceiling; queue-backpressure
+    # is monitored separately. Update-group is enabled in the managed base config.
     # Ad-hoc; runnable via --test-config, not yet wired into a conveyor node.
     BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
+    # Temporary BAG012 qualification selectors for the corrected EBB20/SC4
+    # and EBB22/SC6 implementations. They are CLI-resolvable but not scheduled.
+    BAG012_ASH6_EBB20_SC4_QUALIFICATION_TEST_CONFIG_UG,
+    BAG012_ASH6_EBB22_SC6_QUALIFICATION_TEST_CONFIG_UG,
     # BGP++ UG "edge cases" qualification (spec 2.9) on bag013.ash6. Bundles
     # the section-2.9 adversarial scenarios on the shared EBB full-scale
     # topology (2.9.7 empty-group live today; 2.9.1/2.9.2/2.9.3/2.9.4/2.9.6

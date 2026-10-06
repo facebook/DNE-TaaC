@@ -5,6 +5,7 @@ import unittest
 from ixia.ixia import types as ixia_types
 from taac.routing.ebb.arista_bgp_plus_plus_performance_scaling_tests.ixia_configs_for_tests import (
     create_ebb_performance_scale_basic_port_configs,
+    create_ebb_route_churn_test_basic_port_configs,
 )
 
 _COMMON_KWARGS = {
@@ -85,6 +86,38 @@ class EbgpNextHopSelfCompactGeometryTest(unittest.TestCase):
             # The fixed community rides on the compact route directly.
             self.assertEqual(rs.bgp_communities, ["65529:39744"])
 
+    def test_compact_geometry_can_use_disjoint_sender_blocks(self) -> None:
+        configs = create_ebb_performance_scale_basic_port_configs(
+            ebgp_next_hop_self=True,
+            ebgp_fixed_communities=["65529:39744"],
+            ebgp_prefixes_per_sender=3125,
+            ebgp_v6_prefix_block_step="0:0:0:c35::",
+            ebgp_v4_prefix_block_step="0.12.53.0",
+            **_COMMON_KWARGS,
+        )
+
+        scales = _ebgp_route_scales(configs)
+        self.assertEqual(len(scales), 2)
+        by_afi = {scale.ip_address_family: scale for scale in scales}
+        self.assertEqual(by_afi[ixia_types.IpAddressFamily.IPV6].prefix_count, 3125)
+        self.assertEqual(
+            by_afi[ixia_types.IpAddressFamily.IPV6].prefix_step,
+            "0:0:0:c35::",
+        )
+        self.assertEqual(
+            by_afi[ixia_types.IpAddressFamily.IPV4].prefix_step,
+            "0.12.53.0",
+        )
+
+    def test_compact_geometry_rejects_overlapping_sender_blocks(self) -> None:
+        with self.assertRaisesRegex(ValueError, "overlaps"):
+            create_ebb_performance_scale_basic_port_configs(
+                ebgp_next_hop_self=True,
+                ebgp_prefixes_per_sender=3125,
+                ebgp_v6_prefix_block_step="0:0:0:1::",
+                **_COMMON_KWARGS,
+            )
+
 
 class EbgpFlatImportPathTest(unittest.TestCase):
     """Callers that need a CSV-baked next-hop (PRESERVE_FROM_FILE, e.g.
@@ -123,3 +156,64 @@ class EbgpFlatImportPathTest(unittest.TestCase):
             self.assertIsNone(c.value_lists)
             self.assertIsNotNone(c.file_path)
             self.assertIn("same_communities", c.file_path)
+
+
+class RouteChurnGeometryTest(unittest.TestCase):
+    def _route_scales(
+        self,
+        *,
+        churn_count: int = 100,
+        churn_prefix_start_v6: str = "5001:db8:1000::",
+    ):
+        configs = create_ebb_route_churn_test_basic_port_configs(
+            device_name="bag012.ash6",
+            ixia_interface_mimic_ebgp="eth1",
+            ixia_interface_mimic_ibgp="eth2",
+            ebgp_peer_count_v6=100,
+            ibgp_peer_count_v6=100,
+            ebgp_remote_as=65334,
+            ibgp_remote_as=64981,
+            initial_prefix_count=50000,
+            churn_count=churn_count,
+            ixia_ebgp_ic_parent_network_v6="2401:db00:eef0:a00",
+            ixia_ibgp_ic_parent_network_v6="2401:db00:eef0:a01",
+            churn_prefix_start_v6=churn_prefix_start_v6,
+        )
+        return {
+            route_scale.prefix_name: route_scale
+            for port in configs
+            for group in port.device_group_configs or []
+            for bgp_config in (group.v6_bgp_config,)
+            if bgp_config is not None
+            for spec in bgp_config.route_scales or []
+            for route_scale in (spec.v6_route_scale,)
+            if route_scale is not None
+        }
+
+    def test_peer_one_pools_tile_at_parameterized_churn_boundary(self) -> None:
+        scales = self._route_scales()
+        churned = scales["PREFIX_POOL_IPV6_IBGP_PEER_1_CHURNED"]
+        control = scales["PREFIX_POOL_IPV6_IBGP_PEER_1_CONTROL"]
+        remaining_peers = scales["PREFIX_POOL_IPV6_IBGP_PEERS_REST"]
+
+        self.assertEqual(churned.prefix_count, 100)
+        self.assertEqual(control.starting_prefixes, "5001:db8:1000:64::")
+        self.assertEqual(control.prefix_count, 49900)
+        self.assertEqual(remaining_peers.starting_prefixes, "5001:db8:1000::")
+        self.assertEqual(remaining_peers.prefix_count, 50000)
+        self.assertEqual(
+            {
+                churned.prefix_step,
+                control.prefix_step,
+                remaining_peers.prefix_step,
+            },
+            {"0:0:0:1::"},
+        )
+
+    def test_churn_must_be_a_nonempty_proper_slice(self) -> None:
+        with self.assertRaisesRegex(ValueError, "smaller than"):
+            self._route_scales(churn_count=50000)
+
+    def test_churn_prefix_base_must_be_aligned_to_prefix_step(self) -> None:
+        with self.assertRaisesRegex(ValueError, "aligned to a /64 boundary"):
+            self._route_scales(churn_prefix_start_v6="5001:db8:1000::1")

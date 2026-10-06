@@ -1,5 +1,7 @@
 # pyre-unsafe
 
+import ipaddress
+
 from ixia.ixia import types as ixia_types
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import (
@@ -68,6 +70,54 @@ _EBGP_V4_PREFIX_STEP: str = "0.0.0.0"
 _EBGP_V4_PREFIX_LENGTH: int = 24
 
 
+def _validate_compact_prefix_geometry(
+    *,
+    is_v6: bool,
+    prefixes_per_sender: int,
+    peer_prefix_block_step: str,
+) -> None:
+    """Reject compact per-sender pools that overlap or split a prefix block."""
+    if (
+        isinstance(prefixes_per_sender, bool)
+        or not isinstance(prefixes_per_sender, int)
+        or prefixes_per_sender <= 0
+    ):
+        raise ValueError("ebgp_prefixes_per_sender must be positive")
+
+    expected_version = 6 if is_v6 else 4
+    prefix_length = _EBGP_V6_PREFIX_LENGTH if is_v6 else _EBGP_V4_PREFIX_LENGTH
+    try:
+        step = ipaddress.ip_address(peer_prefix_block_step)
+    except ValueError as error:
+        raise ValueError(
+            f"Invalid IPv{expected_version} peer prefix-block step "
+            f"{peer_prefix_block_step!r}"
+        ) from error
+    if step.version != expected_version:
+        raise ValueError(
+            f"Expected an IPv{expected_version} peer prefix-block step, got "
+            f"{peer_prefix_block_step!r}"
+        )
+
+    step_value = int(step)
+    if step_value == 0:
+        # A zero step deliberately replicates the same route set on every sender.
+        return
+
+    prefix_size = 1 << (step.max_prefixlen - prefix_length)
+    minimum_disjoint_step = prefixes_per_sender * prefix_size
+    if step_value % prefix_size:
+        raise ValueError(
+            f"Peer prefix-block step {peer_prefix_block_step!r} is not aligned "
+            f"to an IPv{expected_version} /{prefix_length} prefix"
+        )
+    if step_value < minimum_disjoint_step:
+        raise ValueError(
+            f"Peer prefix-block step {peer_prefix_block_step!r} overlaps the "
+            f"{prefixes_per_sender}-prefix sender block"
+        )
+
+
 def _ebgp_ingress_bgp_config(
     *,
     is_v6: bool,
@@ -76,6 +126,8 @@ def _ebgp_ingress_bgp_config(
     ebgp_fixed_communities: list[str] | None,
     ebgp_next_hop_mod: ixia_types.BgpNextHopModificationType,
     ebgp_set_next_hop: ixia_types.SetNextHopType | None,
+    ebgp_prefixes_per_sender: int,
+    ebgp_peer_prefix_block_step: str,
     flat_end_index: int = 0,
 ) -> BgpConfig:
     """Build the eBGP ingress BgpConfig for one AFI, choosing the IxNetwork geometry.
@@ -98,15 +150,20 @@ def _ebgp_ingress_bgp_config(
         else ixia_types.BgpCapability.IpV4Unicast
     )
     if ebgp_next_hop_self:
+        _validate_compact_prefix_geometry(
+            is_v6=is_v6,
+            prefixes_per_sender=ebgp_prefixes_per_sender,
+            peer_prefix_block_step=ebgp_peer_prefix_block_step,
+        )
         route_scale = RouteScale(
             prefix_name=prefix_pool_name,
             starting_prefixes=(
                 _EBGP_V6_STARTING_PREFIX if is_v6 else _EBGP_V4_STARTING_PREFIX
             ),
-            prefix_step=_EBGP_V6_PREFIX_STEP if is_v6 else _EBGP_V4_PREFIX_STEP,
+            prefix_step=ebgp_peer_prefix_block_step,
             prefix_length=(_EBGP_V6_PREFIX_LENGTH if is_v6 else _EBGP_V4_PREFIX_LENGTH),
             multiplier=1,
-            prefix_count=_EBGP_PREFIX_COUNT_PER_SENDER,
+            prefix_count=ebgp_prefixes_per_sender,
             ip_address_family=(
                 ixia_types.IpAddressFamily.IPV6
                 if is_v6
@@ -196,6 +253,12 @@ def create_ebb_performance_scale_basic_port_configs(
     # (no diverse fillers, no confusing named-community collisions). Default None
     # keeps the CSV distribution, so existing callers are unchanged.
     ebgp_fixed_communities: list[str] | None = None,
+    # Compact (next-hop-self) route geometry. A zero block step preserves the
+    # historical replicated-prefix behavior. A nonzero step gives each sender a
+    # disjoint prefix block and must span at least ``ebgp_prefixes_per_sender``.
+    ebgp_prefixes_per_sender: int = _EBGP_PREFIX_COUNT_PER_SENDER,
+    ebgp_v6_prefix_block_step: str = _EBGP_V6_PREFIX_STEP,
+    ebgp_v4_prefix_block_step: str = _EBGP_V4_PREFIX_STEP,
 ) -> list[BasicPortConfig]:
     """
     Create basic port configurations for EBB scale testing with eBGP, iBGP
@@ -265,6 +328,8 @@ def create_ebb_performance_scale_basic_port_configs(
                         ebgp_fixed_communities=ebgp_fixed_communities,
                         ebgp_next_hop_mod=_ebgp_next_hop_mod,
                         ebgp_set_next_hop=_ebgp_set_next_hop,
+                        ebgp_prefixes_per_sender=ebgp_prefixes_per_sender,
+                        ebgp_peer_prefix_block_step=ebgp_v6_prefix_block_step,
                         flat_end_index=ebgp_peer_count_v6,
                     ),
                 ),
@@ -291,6 +356,8 @@ def create_ebb_performance_scale_basic_port_configs(
                         ebgp_fixed_communities=ebgp_fixed_communities,
                         ebgp_next_hop_mod=_ebgp_next_hop_mod,
                         ebgp_set_next_hop=_ebgp_set_next_hop,
+                        ebgp_prefixes_per_sender=ebgp_prefixes_per_sender,
+                        ebgp_peer_prefix_block_step=ebgp_v4_prefix_block_step,
                     ),
                 ),
             )
@@ -533,6 +600,19 @@ def create_ebb_transient_memory_route_peer_scale_basic_port_configs(
     return basic_configs
 
 
+SC6_CHURN_PREFIX_START_V6 = "5001:db8:1000::"
+
+
+def _ibgp_prefix_at_offset(offset: int, starting_prefix: str) -> str:
+    """Return the /64 prefix ``offset`` entries after the SC6 iBGP base."""
+    if offset < 0:
+        raise ValueError("iBGP prefix offset must be non-negative")
+    starting_address = ipaddress.IPv6Address(starting_prefix)
+    if int(starting_address) & ((1 << 64) - 1):
+        raise ValueError("iBGP starting prefix must be aligned to a /64 boundary")
+    return str(starting_address + (offset << 64))
+
+
 def create_ebb_route_churn_test_basic_port_configs(
     device_name: str,
     ixia_interface_mimic_ebgp: str,
@@ -545,29 +625,43 @@ def create_ebb_route_churn_test_basic_port_configs(
     churn_count: int,
     ixia_ebgp_ic_parent_network_v6: str,
     ixia_ibgp_ic_parent_network_v6: str,
+    churn_prefix_start_v6: str = SC6_CHURN_PREFIX_START_V6,
 ) -> list[BasicPortConfig]:
-    """
-    Create basic port configurations for EBB scale testing with eBGP, iBGP
+    """Create the SC6 iBGP-churn / eBGP-observer IXIA topology.
 
-    This function generates Ixia port configurations for BGP scale testing scenarios including:
-    - eBGP peers (IPv6)
-    - iBGP peers (IPv6)
+    Every iBGP peer deliberately advertises the same
+    ``initial_prefix_count`` prefixes, giving each NLRI one path per peer. Peer
+    1 splits that range into a churned slice and an unchanged control slice;
+    the remaining peers advertise the complete range. Changing LOCAL_PREF on
+    the churned slice therefore moves best path to or from another peer while
+    the route set remains fixed. The split boundary is derived from
+    ``churn_count`` so the two peer-1 pools tile rather than overlap when the
+    churn size changes.
 
     Args:
         device_name: Name of the device under test
         ixia_interface_mimic_ebgp: Ixia interface for eBGP simulation
         ixia_interface_mimic_ibgp: Ixia interface for iBGP simulation
         ebgp_peer_count_v6: Total number of eBGP IPv6 peers
-        ibgp_peer_count_v6: Number of iBGP IPv6 peers
+        ibgp_peer_count_v6: Number of iBGP IPv6 peers, including peer 1
         ebgp_remote_as: eBGP remote AS number
         ibgp_remote_as: iBGP remote AS number
-        bgp_mon_remote_as: BGP monitoring remote AS number
+        initial_prefix_count: Total prefixes advertised by each iBGP peer
+        churn_count: Fixed number of peer-1 prefixes whose LOCAL_PREF changes
         ixia_ebgp_ic_parent_network_v6: IPv6 network prefix for eBGP
         ixia_ibgp_ic_parent_network_v6: IPv6 network prefixes for iBGP DC planes
+        churn_prefix_start_v6: First /64 in the contiguous churn slice
 
     Returns:
         List of BasicPortConfig objects for Ixia configuration
     """
+    if ibgp_peer_count_v6 < 2:
+        raise ValueError("SC6 route churn requires at least two iBGP peers")
+    if churn_count <= 0 or churn_count >= initial_prefix_count:
+        raise ValueError(
+            "churn_count must be positive and smaller than initial_prefix_count"
+        )
+
     basic_configs: list[BasicPortConfig] = [
         BasicPortConfig(
             endpoint=f"{device_name}:{ixia_interface_mimic_ebgp}",
@@ -617,9 +711,9 @@ def create_ebb_route_churn_test_basic_port_configs(
                         route_scales=[
                             RouteScaleSpec(
                                 v6_route_scale=RouteScale(
-                                    prefix_name="PREFIX_POOL_IPV6_IBGP_PEER_1_FIRST_100",
-                                    starting_prefixes="5001:db8:1000::",
-                                    prefix_step="0:0:0:0:0:0:0:0",
+                                    prefix_name="PREFIX_POOL_IPV6_IBGP_PEER_1_CHURNED",
+                                    starting_prefixes=churn_prefix_start_v6,
+                                    prefix_step="0:0:0:1::",
                                     prefix_length=64,
                                     multiplier=1,
                                     prefix_count=churn_count,
@@ -631,9 +725,11 @@ def create_ebb_route_churn_test_basic_port_configs(
                             ),
                             RouteScaleSpec(
                                 v6_route_scale=RouteScale(
-                                    prefix_name="PREFIX_POOL_IPV6_IBGP_PEER_1_AFTER_100",
-                                    starting_prefixes="5001:db8:1000:64::",
-                                    prefix_step="0:0:0:0:0:0:0:0",
+                                    prefix_name="PREFIX_POOL_IPV6_IBGP_PEER_1_CONTROL",
+                                    starting_prefixes=_ibgp_prefix_at_offset(
+                                        churn_count, churn_prefix_start_v6
+                                    ),
+                                    prefix_step="0:0:0:1::",
                                     prefix_length=64,
                                     multiplier=1,
                                     prefix_count=initial_prefix_count - churn_count,
@@ -647,7 +743,7 @@ def create_ebb_route_churn_test_basic_port_configs(
                     ),
                 ),
                 DeviceGroupConfig(
-                    device_group_name="DEVICE_GROUP_IPV6_IBGP_PEER_2_99",
+                    device_group_name="DEVICE_GROUP_IPV6_IBGP_PEERS_REST",
                     device_group_index=1,
                     multiplier=ibgp_peer_count_v6 - 1,
                     v6_addresses_config=IpAddressesConfig(
@@ -658,7 +754,7 @@ def create_ebb_route_churn_test_basic_port_configs(
                         start_index=0,
                     ),
                     v6_bgp_config=BgpConfig(
-                        bgp_peer_name="BGP_PEER_IPV6_IBGP_PEER_2_99",
+                        bgp_peer_name="BGP_PEER_IPV6_IBGP_PEERS_REST",
                         local_as_4_bytes=ibgp_remote_as,
                         enable_4_byte_local_as=True,
                         enable_graceful_restart=False,
@@ -667,9 +763,9 @@ def create_ebb_route_churn_test_basic_port_configs(
                         route_scales=[
                             RouteScaleSpec(
                                 v6_route_scale=RouteScale(
-                                    prefix_name="PREFIX_POOL_IPV6_IBGP_PEER_2_99",
-                                    starting_prefixes="5001:db8:1000::",
-                                    prefix_step="0:0:0:0:0:0:0:0",
+                                    prefix_name="PREFIX_POOL_IPV6_IBGP_PEERS_REST",
+                                    starting_prefixes=churn_prefix_start_v6,
+                                    prefix_step="0:0:0:1::",
                                     prefix_length=64,
                                     multiplier=1,
                                     prefix_count=initial_prefix_count,

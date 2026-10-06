@@ -36,16 +36,43 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_update_packing_test_config,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
+    create_bgp_ebb_scaling_ingress_peer_scale_test_config,
     create_bgp_ebb_scaling_performance_test_config,
 )
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
     build_bgpcpp_peers_patch_shell_cmds,
     get_update_packing_setup_tasks,
 )
-from taac.test_as_a_config.types import Params, Task
+from taac.test_as_a_config.types import Params, Playbook, Task
 
 # The router_id splice fragment written into the in-shell bgpcpp_config merge.
 _ROUTER_ID_ASSIGN = "c['router_id']="
+
+
+class IngressPeerScaleIxiaGeometryTest(unittest.TestCase):
+    def test_disjoint_compact_geometry_is_forwarded_to_ixia_builder(self) -> None:
+        config = create_bgp_ebb_scaling_ingress_peer_scale_test_config(
+            BAG010_ASH6,
+            name="SC4_GEOMETRY_TEST",
+            ingress_peer_counts=[1, 2, 4, 8, 16],
+            ibgp_peer_count=500,
+            address_families=["ipv6"],
+            sweep_playbook=Playbook(name="SC4_GEOMETRY_TEST_PLAYBOOK"),
+            ebgp_prefixes_per_sender=3125,
+            ebgp_v6_prefix_block_step="0:0:0:c35::",
+        )
+        route_scales = [
+            spec.v6_route_scale
+            for port in config.basic_port_configs or []
+            for group in port.device_group_configs or []
+            if group.v6_bgp_config is not None
+            for spec in group.v6_bgp_config.route_scales or []
+            if spec.v6_route_scale is not None
+        ]
+
+        self.assertEqual(len(route_scales), 1)
+        self.assertEqual(route_scales[0].prefix_count, 3125)
+        self.assertEqual(route_scales[0].prefix_step, "0:0:0:c35::")
 
 
 def _task_json_params(task) -> dict:

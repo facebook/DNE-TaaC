@@ -139,6 +139,10 @@ from taac.utils.characterization import (
     PHASE_SOAK,
     PHASE_WORKLOAD,
 )
+from taac.utils.gate_catalog import (
+    SC4_MAX_PEAK_MEMORY_MB,
+    SC4_TRANSIENT_MEMORY_CEILING_MB,
+)
 from taac.utils.hardware_capacity_utils import (
     get_postcheck_thresholds,
     get_precheck_thresholds,
@@ -2738,14 +2742,21 @@ def get_bgp_ebb_transient_memory_peer_scale_playbook(
     device_name: str,
     ixia_interface_mimic_ebgp: str,
     ingress_peer_counts: list[int],
-    prefix_count_per_peer: int,
+    total_prefix_count: int,
+    prefix_pool_regex: str,
+    prefix_start: str,
+    prefix_length: int,
     ibgp_peer_count: int,
     address_families: list[str],
-    soak_seconds: int,
+    stable_sample_window_seconds: int,
     convergence_wait_seconds: int,
     acceptance_gate_mode: str | None = None,
+    rib_out_gate_mode: str | None = None,
+    measurement_gate_mode: str | None = None,
+    memory_ceiling_gate_mode: str | None = None,
     transient_gate_mode: str | None = None,
-    transient_ratio_tolerance: float = 2.0,
+    transient_memory_ceiling_mb: float = SC4_TRANSIENT_MEMORY_CEILING_MB,
+    max_peak_memory_mb: float = SC4_MAX_PEAK_MEMORY_MB,
 ) -> Playbook:
     """Build CICD-EBB-20: Memory Scale eBGP Sweep.
 
@@ -2755,14 +2766,21 @@ def get_bgp_ebb_transient_memory_peer_scale_playbook(
         device_name=device_name,
         ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
         ingress_peer_counts=ingress_peer_counts,
-        prefix_count_per_peer=prefix_count_per_peer,
+        total_prefix_count=total_prefix_count,
+        prefix_pool_regex=prefix_pool_regex,
+        prefix_start=prefix_start,
+        prefix_length=prefix_length,
         ibgp_peer_count=ibgp_peer_count,
         address_families=address_families,
-        soak_seconds=soak_seconds,
+        stable_sample_window_seconds=stable_sample_window_seconds,
         convergence_wait_seconds=convergence_wait_seconds,
         acceptance_gate_mode=acceptance_gate_mode,
+        rib_out_gate_mode=rib_out_gate_mode,
+        measurement_gate_mode=measurement_gate_mode,
+        memory_ceiling_gate_mode=memory_ceiling_gate_mode,
         transient_gate_mode=transient_gate_mode,
-        transient_ratio_tolerance=transient_ratio_tolerance,
+        transient_memory_ceiling_mb=transient_memory_ceiling_mb,
+        max_peak_memory_mb=max_peak_memory_mb,
     )
 
 

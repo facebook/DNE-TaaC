@@ -141,19 +141,17 @@ BAG010_ASH6_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_UPDATE_GROUP_CONFIG = (
 #
 # INGRESS complement to SC1 (which sweeps egress). V6-ONLY (SC2 ingress parity):
 # the eBGP INGRESS sender count is swept while the iBGP egress fan-out and the
-# per-sender prefix set are held fixed. Every sender advertises the SAME 50K v6
-# prefixes, so the unique-prefix table is fixed and only PATH multiplicity grows;
-# the port peaks at 16×50K = 800K imported routes — matching SC2 and well under
-# IxNetwork's 5M-routes/port cap (the retired dual-stack [4,16,32,64] design
-# ×2-doubled to 6.4M and tripped it).
+# total prefix/path set remain fixed. The 50K v6 prefixes are repartitioned into
+# disjoint equal blocks at every point, so scaling peers does not also scale the
+# workload under measurement.
 #
 #   IXIA eBGP ×N (v6) ══▶ bag010 (DUT) ══▶ iBGP egress ×500  (fixed, advertised)
-#     50K prefixes each     peak 16×50K = 800K              [N swept]
+#     50K total paths           50K unique routes             [N swept]
 #
 #   ┌─ FIXED ──────────────────┬─ DYNAMIC (swept) ───────────────┐
 #   │ iBGP egress   = 500      │ eBGP ingress senders (v6):      │
-#   │ prefixes/send = 50K v6   │    [1, 2, 4, 8, 16]             │
-#   │ nexthop       = resolved │    → peak 800K imported         │
+#   │ total routes   = 50K v6  │    [1, 2, 4, 8, 16]             │
+#   │ nexthop       = resolved │    → 50K/N routes per sender    │
 #   └──────────────────────────┴─────────────────────────────────┘
 #   SIGNAL: transient memory ~flat as sender count grows (queue backpressure)
 #   name  : BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP
@@ -212,13 +210,11 @@ BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG = (
 # Reuses the EB02 churn-P(N) engine (IPv6-only iBGP injection, 100-route churn
 # batches) with bag010 device setup (interface-state nexthop gflag + Centralized
 # Route Filter cleared). The total route scale is swept; at each scale the engine
-# oscillates a 100-route churn and measures convergence. Update-group is applied
-# via a post-replace config-patch task (the engine uses
-# create_replace_bgp_peers_task, not topology binding): the patch flips the
-# global bgp_setting_config flag and the persisted peers are re-grouped on the
-# daemon restart.
+# oscillates a 100-route churn and measures cross-port processing latency. The shared managed
+# setup recipe deploys the peer set and validates Update Group state after the
+# final Bgp restart.
 #
-#   IXIA iBGP inject ══▶ bag010 (DUT): churn 100 routes/batch, measure converge
+#   IXIA iBGP inject ══▶ bag010 (DUT): churn 100 routes/batch, measure convergence
 #     route scale swept    (interface-state nexthop · CRF cleared)
 #
 #   ┌─ FIXED ──────────────────┬─ DYNAMIC (swept) ───────────────┐
@@ -226,14 +222,33 @@ BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG = (
 #   │ inject       = iBGP v6   │     5K → 50K                    │
 #   │ nexthop      = iface-st. │                                 │
 #   └──────────────────────────┴─────────────────────────────────┘
-#   GATES : route scale + real measurement BLOCKING; 30s convergence,
-#           scale-independence, and egress-queue backpressure PERMISSIVE until
-#           calibrated. Queue sampling exists, but the named gate is not yet
-#           applied to the workload verdict.
+#   GATES : route scale, real churn timing, and complete queue evidence BLOCKING;
+#           30s convergence, scale-independence, and egress-queue duration
+#           PERMISSIVE until calibrated from qualification evidence.
 #   name  : BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP
 BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG = (
     create_bgp_ebb_characteristic_route_churn_processing_test_config(
         BAG010_ASH6, enable_update_group=True
+    )
+)
+
+# Temporary BAG012 qualification selectors for the corrected SC4 and SC6
+# implementations. These are intentionally ad-hoc: they are not cataloged or
+# scheduled by Conveyor and will be removed after retained E2E evidence is
+# collected, before the permanent NRQEB006/NRQEB007 bindings are submitted.
+BAG012_ASH6_EBB20_SC4_QUALIFICATION_TEST_CONFIG_UG = (
+    create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
+        BAG012_ASH6,
+        enable_update_group=True,
+        name_override="BAG012_ASH6_EBB20_SC4_QUALIFICATION_TEST_CONFIG_UG",
+    )
+)
+
+BAG012_ASH6_EBB22_SC6_QUALIFICATION_TEST_CONFIG_UG = (
+    create_bgp_ebb_characteristic_route_churn_processing_test_config(
+        BAG012_ASH6,
+        enable_update_group=True,
+        name_override="BAG012_ASH6_EBB22_SC6_QUALIFICATION_TEST_CONFIG_UG",
     )
 )
 
@@ -276,5 +291,7 @@ __all__ = [
     "BAG010_ASH6_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC5_UPDATE_PACKING_TEST_UPDATE_GROUP_CONFIG",
     "BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG",
+    "BAG012_ASH6_EBB20_SC4_QUALIFICATION_TEST_CONFIG_UG",
+    "BAG012_ASH6_EBB22_SC6_QUALIFICATION_TEST_CONFIG_UG",
     "BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG",
 ]

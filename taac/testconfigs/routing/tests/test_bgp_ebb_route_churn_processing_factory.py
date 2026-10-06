@@ -1,12 +1,25 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
-# pyre-unsafe
 import json
 import unittest
 
+from taac.abstractions.eos_bgpcpp_setup_tasks import (
+    create_bgpcpp_logging_setup_task,
+)
 from taac.abstractions.physical_inventory import BAG010_ASH6
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
+    _validate_sc6_startup_order,
     create_bgp_ebb_characteristic_route_churn_processing_test_config,
 )
+from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
+    _sc6_ipv6_address,
+    create_bgp_ebb_scaling_route_churn_prefix_test_config,
+)
+from taac.testconfigs.routing.util.bgp_ebb_constants import (
+    EBB_BGPCPP_LOGGING_CONFIG,
+    FIBAGENT_BGP_CONF_CONFIGERATOR_PATH,
+    FIBAGENT_BGP_CONF_DEVICE_PATH,
+)
+from taac.test_as_a_config import types as taac_types
 
 _SC6 = create_bgp_ebb_characteristic_route_churn_processing_test_config(
     BAG010_ASH6,
@@ -42,6 +55,18 @@ def _custom_step_params(config) -> dict:
     return {}
 
 
+def _all_custom_step_params(config) -> list[dict]:
+    params = []
+    for playbook in config.playbooks or []:
+        for stage in getattr(playbook, "stages", None) or []:
+            for step in getattr(stage, "steps", None) or []:
+                step_params = getattr(step, "step_params", None)
+                raw = getattr(step_params, "json_params", None) if step_params else None
+                if raw:
+                    params.append(json.loads(raw))
+    return params
+
+
 def _periodic_task_names(config) -> list:
     """Extract periodic task names from the playbook."""
     for pb in config.playbooks or []:
@@ -50,6 +75,20 @@ def _periodic_task_names(config) -> list:
             for pt in getattr(pb, "periodic_tasks", None) or []
         ]
     return []
+
+
+def _periodic_params(config, periodic_name: str) -> dict:
+    for playbook in config.playbooks or []:
+        for periodic_task in getattr(playbook, "periodic_tasks", None) or []:
+            if getattr(periodic_task, "name", None) != periodic_name:
+                continue
+            params_list = periodic_task.params_list or []
+            if params_list:
+                return json.loads(params_list[0].json_params or "{}")
+            task = getattr(periodic_task, "task", None)
+            params = getattr(task, "params", None)
+            return json.loads(getattr(params, "json_params", None) or "{}")
+    return {}
 
 
 class Sc6TestbedDrivenNameTest(unittest.TestCase):
@@ -82,9 +121,54 @@ class Sc6DeviceSetupTest(unittest.TestCase):
     def test_route_filter_cleared(self) -> None:
         self.assertEqual(len(_params_for(_SC6, "bgp_clear_route_filter")), 1)
 
+    def test_uses_info_logging_instead_of_per_prefix_dbg5(self) -> None:
+        commands = [
+            command
+            for params in _params_for(_SC6, "run_commands_on_shell")
+            for command in params.get("cmds", [])
+        ]
+
+        def logging_command(logging_config: str) -> str:
+            task = create_bgpcpp_logging_setup_task(
+                "dut.example.com",
+                logging_config,
+            )
+            return json.loads(task.params.json_params or "{}")["cmds"][0]
+
+        self.assertIn(
+            logging_command("INFO;default:async=true"),
+            commands,
+        )
+        self.assertNotIn(
+            logging_command(EBB_BGPCPP_LOGGING_CONFIG),
+            commands,
+        )
+
+    def test_raises_fibagent_bgp_queue_timeout_for_50k_sync(self) -> None:
+        matching = [
+            params
+            for params in _params_for(_SC6, "eos_compiler_lifecycle")
+            if params.get("action") == "routing_config_install"
+            and params.get("destination") == FIBAGENT_BGP_CONF_DEVICE_PATH
+        ]
+        self.assertEqual(1, len(matching))
+        self.assertEqual(
+            FIBAGENT_BGP_CONF_CONFIGERATOR_PATH,
+            matching[0].get("source_path"),
+        )
+        self.assertEqual(
+            [
+                {
+                    "path": ["1", "rec", "36", "i32"],
+                    "value": 60_000,
+                }
+            ],
+            matching[0].get("json_i32_overrides"),
+        )
+
 
 class Sc6ChurnSweepTest(unittest.TestCase):
-    """SC6 sweeps the total route scale (5K→50K) at a fixed churn count (100).
+    """SC6 sweeps the total route scale (5K→50K) at fixed measurable churn.
 
     The second element of each pair is only the settle wait before churn is
     applied, not a gate. The per-scale ceiling is the separate 30s
@@ -100,6 +184,29 @@ class Sc6ChurnSweepTest(unittest.TestCase):
         )
         self.assertEqual(params.get("churn_count"), 100)
         self.assertEqual(params.get("max_convergence_time_seconds"), 30)
+        self.assertEqual(params.get("expected_ebgp_peer_count"), 100)
+        self.assertEqual(params.get("expected_ibgp_peer_count"), 100)
+        self.assertEqual(params.get("churn_prefix_start_v6"), "5001:db8:1000::")
+        self.assertEqual(params.get("churn_prefix_length"), 64)
+
+    def test_capture_direction_maps_match_ixia_address_geometry(self) -> None:
+        params = _custom_step_params(_SC6)
+        self.assertEqual(
+            params.get("ibgp_receiver_source_pairs"),
+            {"2401:db00:e50d:11:9::10": "2401:db00:e50d:11:9::11"},
+        )
+        egress_pairs = params.get("ebgp_receiver_source_pairs")
+        self.assertIsInstance(egress_pairs, dict)
+        assert isinstance(egress_pairs, dict)
+        self.assertEqual(len(egress_pairs), 100)
+        self.assertEqual(
+            egress_pairs.get("2401:db00:e50d:11:8::11"),
+            "2401:db00:e50d:11:8::10",
+        )
+        self.assertEqual(
+            egress_pairs.get("2401:db00:e50d:11:8::d7"),
+            "2401:db00:e50d:11:8::d6",
+        )
 
     def test_capture_window_bounded_but_above_fail_ceiling(self) -> None:
         # The soak IS the packet-capture window and is otherwise dead wall
@@ -113,6 +220,23 @@ class Sc6ChurnSweepTest(unittest.TestCase):
         self.assertIsNotNone(soak, "SC6 must pin its own capture window")
         self.assertGreater(soak, ceiling)
         self.assertLessEqual(soak, 120)
+
+    def test_every_sweep_scale_must_leave_an_unchurned_control_slice(self) -> None:
+        with self.assertRaisesRegex(ValueError, "larger than churn_count"):
+            create_bgp_ebb_scaling_route_churn_prefix_test_config(
+                BAG010_ASH6,
+                name="INVALID_SC6_GEOMETRY",
+                ebgp_peer_count=2,
+                ibgp_peer_count=2,
+                prefix_configs=[(100, 1)],
+                churn_count=100,
+            )
+
+    def test_ipv6_parent_fragment_accepts_existing_compression_suffix(self) -> None:
+        self.assertEqual(
+            _sc6_ipv6_address("2401:db00:e50d:11:8", 0x11),
+            _sc6_ipv6_address("2401:db00:e50d:11:8::", 0x11),
+        )
 
 
 class Sc6ManagedProvisioningTest(unittest.TestCase):
@@ -145,33 +269,164 @@ class Sc6ManagedProvisioningTest(unittest.TestCase):
         self.assertNotIn("replace_bgp_peers", _task_names(_SC6))
 
 
-class Sc6AgentThriftTimeoutTest(unittest.TestCase):
-    """SC6 issues the largest full SyncFib of any config here -- 50K prefixes at
-    the top of the sweep -- and was the only one left on bgpd's 45s default
-    FIB-agent receive timeout while every sibling set 160s."""
+class Sc6DeviceStateGuardTest(unittest.TestCase):
+    def test_snapshots_precede_every_sc6_device_mutation(self) -> None:
+        setup = _SC6.setup_tasks or []
+        actions = []
+        for task in setup:
+            if task.task_name != "eos_compiler_lifecycle":
+                break
+            actions.append(json.loads(task.params.json_params or "{}").get("action"))
+        self.assertEqual("routing_component_snapshot", actions[0])
+        self.assertTrue(
+            all(action == "routing_config_snapshot" for action in actions[1:])
+        )
+        first_mutation = setup[len(actions)]
+        self.assertEqual(first_mutation.task_name, "configure_bgpcpp_startup")
 
-    def test_startup_task_sets_the_recv_timeout(self) -> None:
+    def test_teardown_uses_dependency_aware_restore(self) -> None:
+        teardown = _SC6.teardown_tasks or []
+        self.assertEqual(len(teardown), 1)
+        params = json.loads(teardown[0].params.json_params or "{}")
+        self.assertEqual(params.get("action"), "routing_component_restore")
+
+
+class Sc6ThriftTimeoutTest(unittest.TestCase):
+    """SC6 issues the largest full SyncFib of any config here -- 50K prefixes at
+    the top of the sweep. BAG012 measured a 391.5s cold sync and postchecks
+    load-shedding at the default 100ms server queue deadline. The deployed
+    BAG012 package does not support the newer server queue flag, so SC6 keeps
+    the supported client budget and bounds the postcheck route population."""
+
+    def test_startup_task_sets_supported_client_timeout(self) -> None:
         params = _params_for(_SC6, "configure_bgpcpp_startup")
         matching = [
             p
             for p in params
-            if p.get("flags", {}).get("agent_thrift_recv_timeout_ms") == "160000"
+            if p.get("flags", {}).get("agent_thrift_recv_timeout_ms") == "600000"
         ]
         self.assertEqual(1, len(matching), f"startup tasks={params}")
+        self.assertTrue(
+            all("thrift_queue_timeout_ms" not in p.get("flags", {}) for p in params)
+        )
 
-    def test_flag_is_actually_applied_not_just_written(self) -> None:
-        # The task edits run_bgpcpp.sh, which bgpd only re-reads on start, and
-        # extra_setup_tasks land AFTER the managed recipe's final Bgp enable.
-        # Since the step no longer cycles the daemon per scale, without the
-        # restart the flag would sit on disk unread and the run would silently
-        # use the 45s default.
-        params = _params_for(_SC6, "configure_bgpcpp_startup")
-        matching = [
-            p
-            for p in params
-            if p.get("flags", {}).get("agent_thrift_recv_timeout_ms") == "160000"
+    def test_flag_is_applied_before_the_daemon_reads_it(self) -> None:
+        tasks = _SC6.setup_tasks or []
+        params = [json.loads(task.params.json_params or "{}") for task in tasks]
+        flag_indices = [
+            index
+            for index, (task, task_params) in enumerate(zip(tasks, params))
+            if task.task_name == "configure_bgpcpp_startup"
+            and task_params.get("flags", {}).get("agent_thrift_recv_timeout_ms")
+            == "600000"
         ]
-        self.assertTrue(matching[0].get("restart_bgp"), f"task={matching[0]}")
+        bgp_enable_indices = [
+            index
+            for index, (task, task_params) in enumerate(zip(tasks, params))
+            if task.task_name == "arista_daemon_control"
+            and task_params.get("daemon_name") == "Bgp"
+            and task_params.get("action") == "enable"
+        ]
+        self.assertEqual(len(flag_indices), 1)
+        self.assertGreater(len(bgp_enable_indices), 0)
+        self.assertLess(flag_indices[0], bgp_enable_indices[0])
+
+    def test_factory_contract_rejects_timeout_after_bgp_enable(self) -> None:
+        tasks = _SC6.setup_tasks or []
+        timeout_task = next(
+            task
+            for task in tasks
+            if task.task_name == "configure_bgpcpp_startup"
+            and json.loads(task.params.json_params or "{}")
+            .get("flags", {})
+            .get("agent_thrift_recv_timeout_ms")
+            == "600000"
+        )
+        bgp_enable_task = next(
+            task
+            for task in tasks
+            if task.task_name == "arista_daemon_control"
+            and json.loads(task.params.json_params or "{}").get("daemon_name") == "Bgp"
+            and json.loads(task.params.json_params or "{}").get("action") == "enable"
+        )
+        with self.assertRaisesRegex(ValueError, "must precede"):
+            _validate_sc6_startup_order([bgp_enable_task, timeout_task])
+
+    def test_validator_skips_unrelated_nonobject_params(self) -> None:
+        tasks = _SC6.setup_tasks or []
+        timeout_task = next(
+            task
+            for task in tasks
+            if task.task_name == "configure_bgpcpp_startup"
+            and json.loads(task.params.json_params or "{}")
+            .get("flags", {})
+            .get("agent_thrift_recv_timeout_ms")
+            == "600000"
+        )
+        bgp_enable_task = next(
+            task
+            for task in tasks
+            if task.task_name == "arista_daemon_control"
+            and json.loads(task.params.json_params or "{}").get("daemon_name") == "Bgp"
+            and json.loads(task.params.json_params or "{}").get("action") == "enable"
+        )
+        unrelated_tasks = [
+            taac_types.Task(
+                task_name="unrelated_array",
+                params=taac_types.Params(json_params="[]"),
+            ),
+            taac_types.Task(
+                task_name="unrelated_scalar",
+                params=taac_types.Params(json_params="1"),
+            ),
+            taac_types.Task(
+                task_name="configure_bgpcpp_startup",
+                params=taac_types.Params(json_params='{"flags": []}'),
+            ),
+        ]
+
+        _validate_sc6_startup_order([*unrelated_tasks, timeout_task, bgp_enable_task])
+
+    def test_validator_skips_unrelated_malformed_json_params(self) -> None:
+        tasks = _SC6.setup_tasks or []
+        timeout_task = next(
+            task
+            for task in tasks
+            if task.task_name == "configure_bgpcpp_startup"
+            and json.loads(task.params.json_params or "{}")
+            .get("flags", {})
+            .get("agent_thrift_recv_timeout_ms")
+            == "600000"
+        )
+        bgp_enable_task = next(
+            task
+            for task in tasks
+            if task.task_name == "arista_daemon_control"
+            and json.loads(task.params.json_params or "{}").get("daemon_name") == "Bgp"
+            and json.loads(task.params.json_params or "{}").get("action") == "enable"
+        )
+        unrelated_task = taac_types.Task(
+            task_name="unrelated_malformed",
+            params=taac_types.Params(json_params="not JSON"),
+        )
+
+        _validate_sc6_startup_order([unrelated_task, timeout_task, bgp_enable_task])
+
+    def test_validator_rejects_malformed_relevant_json_params(self) -> None:
+        malformed_task = taac_types.Task(
+            task_name="configure_bgpcpp_startup",
+            params=taac_types.Params(json_params="not JSON"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid JSON params"):
+            _validate_sc6_startup_order([malformed_task])
+
+    def test_managed_startup_task_never_requests_unsupported_restart(self) -> None:
+        params = _params_for(_SC6, "configure_bgpcpp_startup")
+        self.assertTrue(params)
+        for task_params in params:
+            if task_params.get("use_managed_shell"):
+                self.assertFalse(task_params.get("restart_bgp", False))
 
     def test_uses_managed_shell(self) -> None:
         # bag010 is a cicd device with no ``admin`` login, so a raw-SSH startup
@@ -213,6 +468,23 @@ class Sc6QueueBackpressureGateTest(unittest.TestCase):
         task_names = _periodic_task_names(_SC6)
         self.assertIn("bgp_queue_backpressure_check", task_names)
 
+    def test_queue_monitor_collects_complete_duration_delta(self) -> None:
+        params = _periodic_params(_SC6, "bgp_queue_backpressure_check")
+        self.assertEqual(params.get("block_duration_threshold_ms"), 0)
+        self.assertTrue(params.get("require_complete_delta"))
+
+    def test_custom_step_owns_sc6_queue_verdict(self) -> None:
+        params = _custom_step_params(_SC6)
+        self.assertEqual(params.get("queue_block_duration_ceiling_ms"), 0)
+        self.assertIn("queue_measurement_gate_mode", params)
+        self.assertIn("queue_backpressure_gate_mode", params)
+
+
+class Sc6OperationalGuardTest(unittest.TestCase):
+    def test_memory_ceiling_allows_observed_50k_readiness_peak(self) -> None:
+        params = _periodic_params(_SC6, "bgpd_mem_util_check")
+        self.assertEqual(params.get("threshold"), 7 * (1024**3))
+
 
 class Sc6DriverBindingTest(unittest.TestCase):
     """SC6 must bind the DUT to the BGP++-aware AristaFbossSwitch driver via
@@ -245,6 +517,17 @@ class Sc6UpdateGroupEnablementTest(unittest.TestCase):
         self.assertGreaterEqual(
             len(bgp_tasks), 2, "Expected disable + enable Bgp daemon tasks"
         )
+
+    def test_postcheck_drain_preserves_sessions_at_bounded_scale(self) -> None:
+        drain_steps = [
+            params
+            for params in _all_custom_step_params(_SC6)
+            if params.get("postcheck_drain_only")
+        ]
+        self.assertEqual(1, len(drain_steps))
+        self.assertEqual(101, drain_steps[0].get("postcheck_prefix_count"))
+        self.assertEqual(100, drain_steps[0].get("expected_ebgp_peer_count"))
+        self.assertEqual(100, drain_steps[0].get("expected_ibgp_peer_count"))
 
     def test_update_group_health_check_in_postchecks(self) -> None:
         for pb in _SC6.playbooks or []:

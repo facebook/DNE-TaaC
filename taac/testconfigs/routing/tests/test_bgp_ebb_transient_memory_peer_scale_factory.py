@@ -1,6 +1,6 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
-# pyre-unsafe
 import base64
+import binascii
 import json
 import re
 import unittest
@@ -8,7 +8,8 @@ import unittest
 from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     _SC4_FIXED_IBGP_PEER_COUNT,
     _SC4_INGRESS_EBGP_PEER_COUNTS,
-    _SC4_PREFIX_COUNT,
+    _SC4_INITIAL_PREFIXES_PER_SENDER,
+    _SC4_TOTAL_PREFIX_COUNT,
     create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config,
 )
 from taac.testconfigs.routing.physical_inventory import (
@@ -25,9 +26,6 @@ _SC4_UG = create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
 
 # IxNetwork rejects any port whose imported-route total exceeds this hard cap.
 _IXIA_MAX_ROUTES_PER_PORT = 5_000_000
-# SC2's ingress path scale (8 peers x 100K = 800K, v6-only). SC4 is bounded to
-# the same parity so its steady/transient memory tracks SC2's ingress load.
-_SC2_INGRESS_PATH_PARITY = 800_000
 
 
 def _task_names(config) -> list:
@@ -38,6 +36,14 @@ def _params_for(config, task_name: str) -> list:
     return [
         json.loads(task.params.json_params or "{}")
         for task in (config.setup_tasks or [])
+        if task.task_name == task_name
+    ]
+
+
+def _teardown_params_for(config, task_name: str) -> list:
+    return [
+        json.loads(task.params.json_params or "{}")
+        for task in (config.teardown_tasks or [])
         if task.task_name == task_name
     ]
 
@@ -119,20 +125,25 @@ class Sc4IngressSweepTest(unittest.TestCase):
         self.assertEqual(
             params.get("ingress_peer_counts"), _SC4_INGRESS_EBGP_PEER_COUNTS
         )
-        self.assertEqual(params.get("prefix_count_per_peer"), _SC4_PREFIX_COUNT)
+        self.assertEqual(params.get("total_prefix_count"), _SC4_TOTAL_PREFIX_COUNT)
+        self.assertNotIn("prefix_count_per_peer", params)
         self.assertEqual(params.get("ibgp_peer_count"), _SC4_FIXED_IBGP_PEER_COUNT)
         self.assertEqual(params.get("address_families"), ["ipv6"])
 
 
 class Sc4GateModeTest(unittest.TestCase):
-    """Anti-vacuousness is hard from the start (a stage that accepts 0 routes must
-    never pass); the flatness claim stays observe-only until we have a calibrated
-    5-point dataset."""
+    """SC4 serializes every point gate as blocking for Conveyor runs."""
 
-    def test_acceptance_blocking_transient_permissive(self) -> None:
+    def test_point_gates_are_explicitly_blocking(self) -> None:
         params = _sweep_step_params(_SC4_UG)
-        self.assertEqual(params.get("acceptance_gate_mode"), "blocking")
-        self.assertEqual(params.get("transient_gate_mode"), "permissive")
+        for key in (
+            "acceptance_gate_mode",
+            "rib_out_gate_mode",
+            "measurement_gate_mode",
+            "memory_ceiling_gate_mode",
+            "transient_gate_mode",
+        ):
+            self.assertEqual("blocking", params.get(key), key)
 
 
 class Sc4InterfaceIpCoverageTest(unittest.TestCase):
@@ -186,18 +197,19 @@ class Sc4FixedEgressTest(unittest.TestCase):
 
 class Sc4V6OnlyBudgetTest(unittest.TestCase):
     """SC4 is v6-only, so the single v6 eBGP IXIA port holds
-    ``max(sweep) * prefix_count`` paths (no dual-stack x2 factor). That peak must
-    stay within IxNetwork's per-port import limit and at SC2's ~800K ingress
-    parity -- the whole point of the v6-only + bounded-sweep redesign."""
+    exactly the fixed total at every point (no dual-stack x2 factor)."""
 
     def _peak_v6_ingress_paths(self) -> int:
-        return max(_SC4_INGRESS_EBGP_PEER_COUNTS) * _SC4_PREFIX_COUNT
+        return _SC4_TOTAL_PREFIX_COUNT
 
     def test_peak_v6_ingress_paths_within_ixia_limit(self) -> None:
         self.assertLessEqual(self._peak_v6_ingress_paths(), _IXIA_MAX_ROUTES_PER_PORT)
 
-    def test_peak_v6_ingress_paths_match_sc2_parity(self) -> None:
-        self.assertLessEqual(self._peak_v6_ingress_paths(), _SC2_INGRESS_PATH_PARITY)
+    def test_initial_ixia_geometry_partitions_fixed_total(self) -> None:
+        self.assertEqual(
+            _SC4_INITIAL_PREFIXES_PER_SENDER * max(_SC4_INGRESS_EBGP_PEER_COUNTS),
+            _SC4_TOTAL_PREFIX_COUNT,
+        )
 
 
 class Sc4UpdateGroupTest(unittest.TestCase):
@@ -206,6 +218,23 @@ class Sc4UpdateGroupTest(unittest.TestCase):
 
     def test_device_setup_is_provisioned(self) -> None:
         self.assertIn("interface_ip_configuration", _task_names(_SC4_UG))
+
+
+class Sc4DeviceStateGuardTest(unittest.TestCase):
+    def test_guard_snapshots_before_mutation_and_restores_on_teardown(self) -> None:
+        setup_actions = _params_for(_SC4_UG, "eos_compiler_lifecycle")
+        self.assertEqual("routing_component_snapshot", setup_actions[0].get("action"))
+        self.assertTrue(
+            all(
+                params.get("action") == "routing_config_snapshot"
+                for params in setup_actions[1:]
+            )
+        )
+        teardown_actions = _teardown_params_for(_SC4_UG, "eos_compiler_lifecycle")
+        self.assertEqual(
+            ["routing_component_restore"],
+            [params.get("action") for params in teardown_actions],
+        )
 
 
 class Sc4DevicePeerSupersetTest(unittest.TestCase):
@@ -229,7 +258,7 @@ class Sc4DevicePeerSupersetTest(unittest.TestCase):
         for token in re.findall(r"[A-Za-z0-9+/=]{40,}", raw):
             try:
                 decoded.append(base64.b64decode(token).decode("utf-8", "ignore"))
-            except Exception:
+            except (binascii.Error, UnicodeDecodeError):
                 continue
         return raw + " " + " ".join(decoded)
 

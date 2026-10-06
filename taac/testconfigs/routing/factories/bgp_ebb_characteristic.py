@@ -1,5 +1,4 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
-# pyre-unsafe
 """BGPCPP-on-EBB characteristic/measurement workflow factories.
 
 EBB-topology measurement tests (update-packing, constant-attribute storage,
@@ -32,7 +31,9 @@ See ``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``.
 """
 
 import ipaddress
+import json
 import os
+from collections.abc import Sequence
 from dataclasses import replace
 
 from ixia.ixia import types as ixia_types
@@ -150,8 +151,13 @@ from taac.testconfigs.routing.util.bgp_ebb_periodic_tasks import (
 )
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
     build_per_iteration_factory_v4_capable,
+    get_ebb_device_state_guard_tasks,
     get_update_packing_setup_tasks,
 )
+from taac.utils.gate_catalog import (
+    SC4_STABLE_SAMPLE_WINDOW_SECONDS,
+)
+from taac.utils.gate_control import GATE_MODE_BLOCKING
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import (
     BasicPortConfig,
@@ -457,8 +463,8 @@ def test_config_constant_attribute_storage_on_eos(
 # How long BGP++ waits for a FibAgentBgp thrift reply. The bgpd default is 45s
 # (``kFbossAgentRecvTimeout``), which is short for a full SyncFib at EBB scale --
 # programming ~95K routes has been measured at ~55s. Every other EBB scaling and
-# characteristic config already runs at this value; SC6 was the lone outlier
-# still on the default.
+# characteristic config runs at this common value. SC6 uses its larger,
+# qualification-measured cold-sync deadline below.
 _AGENT_THRIFT_RECV_TIMEOUT_MS: str = "160000"
 
 _CONSTANT_ATTR_EBGP_PEER_COUNT: int = 2
@@ -1765,25 +1771,82 @@ def create_bgp_ebb_characteristic_queue_memory_monitor_test_config(
 # EBGP. Each Stage rewrites /mnt/flash/bgpcpp_config to the matching number of
 # peer entries so BGP++ EOR completes from 100% of configured peers.
 # SC4 (char-4, Transient Memory ~independent of PEER scale): sweep the eBGP
-# INGRESS sender count while holding the iBGP egress fan-out and the route count
-# fixed. The transient (HM - SSM) must stay ~flat as the sender count grows
-# (bounded by update-queue backpressure). This is the INGRESS complement to SC1,
-# which sweeps the iBGP EGRESS fan-out at a fixed eBGP=1.
+# INGRESS sender count while holding the iBGP egress fan-out, unique routes,
+# active paths, and attributes fixed. The 50K routes are partitioned evenly
+# across the active senders at each point.
 #
-# v6-ONLY design (matches SC2's single-AF ingress): each eBGP sender advertises
-# _SC4_PREFIX_COUNT v6 prefixes, so the single v6 IXIA port holds
-# max(sweep) * _SC4_PREFIX_COUNT paths -- bounded to SC2's 800K parity
-# (16 * 50000 = 800K; well under IxNetwork's 5M/port limit, which the removed 2x
-# dual-stack factor used to threaten). The iBGP egress fan-out is held fixed at
-# SC3's 500 so the transient burst has a realistic, non-trivial egress baseline
-# (both SC3 and SC4 gate the transient HM-SSM). All sessions are v6-only.
+# The initial serialized IXIA shape uses the maximum sender count: 3,125
+# disjoint /64s per sender and a 3,125-prefix outer stride. The custom step
+# rewrites both values atomically at each point before protocols start.
 _SC4_INGRESS_EBGP_PEER_COUNTS: list = [1, 2, 4, 8, 16]
 _SC4_FIXED_IBGP_PEER_COUNT: int = 500
-_SC4_PREFIX_COUNT: int = 50000
-# Per-sweep-point soak (steady-state mean window) and the ceiling on how long a
-# point may take to reach the full accepted+resolved route set.
-_SC4_SOAK_SECONDS: int = 120
+_SC4_TOTAL_PREFIX_COUNT: int = 50000
+_SC4_INITIAL_PREFIXES_PER_SENDER: int = 3125
+_SC4_INITIAL_V6_PEER_PREFIX_STEP: str = "0:0:0:c35::"
+_SC4_STABLE_SAMPLE_WINDOW_SECONDS: int = SC4_STABLE_SAMPLE_WINDOW_SECONDS
 _SC4_CONVERGENCE_WAIT_SECONDS: int = 600
+
+# Temporary compatibility alias for code importing the old constant. Its
+# meaning is now the fixed total, not a per-sender count.
+_SC4_PREFIX_COUNT: int = _SC4_TOTAL_PREFIX_COUNT
+
+_SC6_CHURN_COUNT: int = 100
+# BAG012 qualification measured the first 50K full SyncFib at 391.5s.  Keep
+# the BGP client deadline above that cold-sync path so it does not disconnect
+# and enqueue overlapping retries behind the still-running FibAgent request.
+_SC6_AGENT_THRIFT_RECV_TIMEOUT_MS: str = "600000"
+# Keep sessions established but reduce the advertised population before the
+# generic RIB/FIB postcheck.  The BAG012 image predates the BGP++ server queue
+# timeout flag, and serializing the 50K/5M-path state through its default queue
+# can block the check for tens of minutes.
+_SC6_POSTCHECK_PREFIX_COUNT: int = _SC6_CHURN_COUNT + 1
+
+
+def _validate_sc6_startup_order(setup_tasks: Sequence[taac_types.Task]) -> None:
+    """Fail closed unless the SC6 timeout is installed before Bgp starts."""
+    relevant_task_params: list[tuple[int, taac_types.Task, object]] = []
+    for index, task in enumerate(setup_tasks):
+        if task.task_name not in {
+            "configure_bgpcpp_startup",
+            "arista_daemon_control",
+        }:
+            continue
+        try:
+            params = json.loads(task.params.json_params or "{}")
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"SC6 startup task {task.task_name!r} has invalid JSON params"
+            ) from error
+        relevant_task_params.append((index, task, params))
+
+    timeout_task_indices = [
+        index
+        for index, task, params in relevant_task_params
+        if task.task_name == "configure_bgpcpp_startup"
+        and isinstance(params, dict)
+        and isinstance(params.get("flags"), dict)
+        and params["flags"].get("agent_thrift_recv_timeout_ms")
+        == _SC6_AGENT_THRIFT_RECV_TIMEOUT_MS
+    ]
+    bgp_enable_indices = [
+        index
+        for index, task, params in relevant_task_params
+        if task.task_name == "arista_daemon_control"
+        and isinstance(params, dict)
+        and params.get("daemon_name") == "Bgp"
+        and params.get("action") == "enable"
+    ]
+    if len(timeout_task_indices) != 1:
+        raise ValueError(
+            "SC6 requires exactly one agent_thrift_recv_timeout_ms startup task"
+        )
+    if not bgp_enable_indices:
+        raise ValueError("SC6 managed provisioning requires a Bgp enable task")
+    if timeout_task_indices[0] >= bgp_enable_indices[0]:
+        raise ValueError(
+            "SC6 agent_thrift_recv_timeout_ms startup task must precede the "
+            "first managed Bgp enable"
+        )
 
 
 def _two_port_direct_ixia_connections(
@@ -2267,21 +2330,18 @@ def create_bgp_ebb_characteristic_performance_scaling_test_config(
 def create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
     testbed: PhysicalInventory,
     enable_update_group: bool = False,
+    name_override: str | None = None,
+    parent_networks: dict[str, str] | None = None,
 ) -> taac_types.TestConfig:
     """SC4 transient-memory eBGP-INGRESS-sender-scale test config (testbed-driven).
 
     SC4 = characteristic 4 (Transient Memory (Almost) Independent of PEER scale).
     Sweeps the eBGP INGRESS sender count (``_SC4_INGRESS_EBGP_PEER_COUNTS``,
-    v6-only) while holding the iBGP egress fan-out (``_SC4_FIXED_IBGP_PEER_COUNT``,
-    a fixed v6-only 500) and the route count (``_SC4_PREFIX_COUNT``) fixed. All
-    sessions are v6-only, so the single v6 IXIA port holds
-    ``max(sweep) * _SC4_PREFIX_COUNT`` paths (SC2's ~800K ingress parity). Routes are RESOLVABLE (nexthop
-    gflag ON) and advertised, so each Stage exercises the full ingress-absorb ->
-    best-path -> egress-advertise burst; the PRIMARY signal is the TRANSIENT
-    memory (peak high-watermark during the burst - stable after soak), which the
-    shared perf-scaling step gates to stay ~flat as the sender count grows
-    (bounded by update-queue backpressure). INGRESS complement to SC1 (which
-    sweeps the iBGP EGRESS fan-out at a fixed eBGP=1).
+    v6-only) while holding the iBGP egress fan-out (``_SC4_FIXED_IBGP_PEER_COUNT``)
+    and a disjoint 50K-route/path workload fixed. At each point the custom step
+    partitions the same total route inventory evenly across the active senders.
+    Routes are resolvable and advertised, so each point exercises the full
+    ingress-absorb -> best-path -> egress-advertise burst.
 
     Mirrors the SC1 perf-scaling factory: the DUT is provisioned via
     ``get_update_packing_setup_tasks`` and the name derives from
@@ -2301,48 +2361,61 @@ def create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
     ixia_interface_mimic_ebgp = testbed.ixia_ports[0][0]
     ixia_interface_mimic_ibgp = testbed.ixia_ports[1][0]
 
-    name = (
+    name = name_override or (
         f"{testbed.device_name.upper().replace('.', '_')}"
         "_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST"
     )
-    if enable_update_group:
+    if name_override is None and enable_update_group:
         name += "_UPDATE_GROUP"
+    resolved_parent_networks = _resolve_egress_peer_scale_parent_networks(
+        parent_networks,
+        ixia_chassis_ip=testbed.ixia_chassis_ip,
+    )
 
-    setup_tasks = get_update_packing_setup_tasks(
-        device_name=device_name,
-        bgp_asn=testbed.dut_bgp_as,
-        ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
-        ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
-        # Write the peer list ONCE at the sweep MAX. The sweep resizes the IXIA
-        # eBGP device group rather than rescaling the device, so the configured
-        # peer set must be a superset of every sweep point -- otherwise senders
-        # above the initial count have no configured neighbour and can never
-        # establish (observed: at n=2 the gate saw expected 502 / found 501).
-        # Senders above the current point stay idle, which the exact-count
-        # session gate ignores.
-        ebgp_peer_count=max(_SC4_INGRESS_EBGP_PEER_COUNTS),
-        ibgp_peer_count=_SC4_FIXED_IBGP_PEER_COUNT,
-        ebgp_remote_as=EBGP_REMOTE_AS,
-        ibgp_remote_as=IBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        # v6-only ingress: a v4 parent network here writes a v4 eBGP peer to the
-        # device that the v6-only IXIA never answers, so it sits IDLE for the whole
-        # run (10.163.28.11), inflating the session total and polluting every
-        # non-established list.
-        ixia_ebgp_ic_parent_network_v4=None,
-        # iBGP egress is v6-only (the per-iteration factory + IXIA side write 0 v4
-        # iBGP peers). Passing a v4 network here would make get_update_packing lay
-        # the iBGP interface DUAL-STACK -- 500 v6 + 500 v4 secondaries on one
-        # interface -- overflowing Arista's ~500-secondary-per-interface ceiling,
-        # so v6 iBGP peers past ~250 get no local source IP and stay IDLE
-        # (P2441146392). None keeps only the 500 v6 secondaries the test uses.
-        ixia_ibgp_ic_parent_network_v4=None,
-        router_id=testbed.router_id,
-        bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
-        profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
-        enable_update_group=enable_update_group,
-        v4_peer_start_offset=IXIA_IPV4_START_OFFSET,
+    state_guard_setup_tasks, state_guard_teardown_tasks = (
+        get_ebb_device_state_guard_tasks(
+            device_name=device_name,
+            operation_namespace="ebb_sc4",
+        )
+    )
+    setup_tasks = [*state_guard_setup_tasks]
+    setup_tasks.extend(
+        get_update_packing_setup_tasks(
+            device_name=device_name,
+            bgp_asn=testbed.dut_bgp_as,
+            ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
+            ixia_interface_mimic_ibgp=ixia_interface_mimic_ibgp,
+            # Write the peer list ONCE at the sweep MAX. The sweep resizes the IXIA
+            # eBGP device group rather than rescaling the device, so the configured
+            # peer set must be a superset of every sweep point -- otherwise senders
+            # above the initial count have no configured neighbour and can never
+            # establish (observed: at n=2 the gate saw expected 502 / found 501).
+            # Senders above the current point stay idle, which the exact-count
+            # session gate ignores.
+            ebgp_peer_count=max(_SC4_INGRESS_EBGP_PEER_COUNTS),
+            ibgp_peer_count=_SC4_FIXED_IBGP_PEER_COUNT,
+            ebgp_remote_as=EBGP_REMOTE_AS,
+            ibgp_remote_as=IBGP_REMOTE_AS,
+            ixia_ebgp_ic_parent_network_v6=resolved_parent_networks["ebgp_v6"],
+            ixia_ibgp_ic_parent_network_v6=resolved_parent_networks["ibgp_v6"],
+            # v6-only ingress: a v4 parent network here writes a v4 eBGP peer to the
+            # device that the v6-only IXIA never answers, so it sits IDLE for the whole
+            # run (10.163.28.11), inflating the session total and polluting every
+            # non-established list.
+            ixia_ebgp_ic_parent_network_v4=None,
+            # iBGP egress is v6-only (the per-iteration factory + IXIA side write 0 v4
+            # iBGP peers). Passing a v4 network here would make get_update_packing lay
+            # the iBGP interface DUAL-STACK -- 500 v6 + 500 v4 secondaries on one
+            # interface -- overflowing Arista's ~500-secondary-per-interface ceiling,
+            # so v6 iBGP peers past ~250 get no local source IP and stay IDLE
+            # (P2441146392). None keeps only the 500 v6 secondaries the test uses.
+            ixia_ibgp_ic_parent_network_v4=None,
+            router_id=testbed.router_id,
+            bgpcpp_configerator_path=testbed.bgpcpp_configerator_path,
+            profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+            enable_update_group=enable_update_group,
+            v4_peer_start_offset=IXIA_IPV4_START_OFFSET,
+        )
     )
     # The swept axis is eBGP: re-lay the eBGP interface's secondary IPs once at the
     # full sweep max so every Stage's eBGP senders have a local source address
@@ -2353,8 +2426,8 @@ def create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
         create_interface_ip_configuration_task(
             interface=ixia_interface_mimic_ebgp,
             peer_count=max(_SC4_INGRESS_EBGP_PEER_COUNTS),
-            ipv4_base_network=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-            ipv6_base_network=IXIA_EBGP_IC_PARENT_NETWORK_V6,
+            ipv4_base_network=resolved_parent_networks["ebgp_v4"],
+            ipv6_base_network=resolved_parent_networks["ebgp_v6"],
             # v6-only ingress: lay only the v6 eBGP secondary IPs (no v4 senders).
             address_families=["ipv6"],
             clear_existing=True,
@@ -2383,17 +2456,20 @@ def create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
         direct_ixia_connections=_two_port_direct_ixia_connections(testbed),
         ingress_peer_counts=_SC4_INGRESS_EBGP_PEER_COUNTS,
         ibgp_peer_count=_SC4_FIXED_IBGP_PEER_COUNT,
-        prefix_count=_SC4_PREFIX_COUNT,
+        prefix_count=_SC4_TOTAL_PREFIX_COUNT,
         # v6-only ingress + egress (SC2 single-AF parity, bounded per-port paths).
         address_families=["ipv6"],
         ebgp_remote_as=EBGP_REMOTE_AS,
         ibgp_remote_as=IBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ebgp_ic_parent_network_v4=IXIA_EBGP_IC_PARENT_NETWORK_V4,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
-        ixia_ibgp_ic_parent_network_v4=IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
+        ixia_ebgp_ic_parent_network_v6=resolved_parent_networks["ebgp_v6"],
+        ixia_ebgp_ic_parent_network_v4=resolved_parent_networks["ebgp_v4"],
+        ixia_ibgp_ic_parent_network_v6=resolved_parent_networks["ibgp_v6"],
+        ixia_ibgp_ic_parent_network_v4=resolved_parent_networks["ibgp_v4"],
+        ebgp_prefixes_per_sender=_SC4_INITIAL_PREFIXES_PER_SENDER,
+        ebgp_v6_prefix_block_step=_SC4_INITIAL_V6_PEER_PREFIX_STEP,
         log_collection_timeout=600,
         setup_tasks=setup_tasks,
+        teardown_tasks=state_guard_teardown_tasks,
         # The sweep lives inside the convergence custom step (it resizes the IXIA
         # eBGP device group per point), so there are no per-Stage setup steps and
         # therefore no per-Stage Bgp restart.
@@ -2402,15 +2478,23 @@ def create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
             device_name=device_name,
             ixia_interface_mimic_ebgp=ixia_interface_mimic_ebgp,
             ingress_peer_counts=_SC4_INGRESS_EBGP_PEER_COUNTS,
-            prefix_count_per_peer=_SC4_PREFIX_COUNT,
+            total_prefix_count=_SC4_TOTAL_PREFIX_COUNT,
+            prefix_pool_regex="^PREFIX_POOL_IPV6_EBGP$",
+            prefix_start="2001:db8:1000::",
+            prefix_length=64,
             ibgp_peer_count=_SC4_FIXED_IBGP_PEER_COUNT,
             address_families=["ipv6"],
-            soak_seconds=_SC4_SOAK_SECONDS,
+            stable_sample_window_seconds=_SC4_STABLE_SAMPLE_WINDOW_SECONDS,
             convergence_wait_seconds=_SC4_CONVERGENCE_WAIT_SECONDS,
-            # Anti-vacuousness is hard from the start (mirrors SC2); the flatness
-            # claim stays observe-only until we have a calibrated 5-point dataset.
-            acceptance_gate_mode="blocking",
-            transient_gate_mode="permissive",
+            # Keep the serialized Conveyor config self-contained: the shared
+            # registry also marks these gates blocking, but an explicit mode
+            # prevents a registry-policy drift from weakening this promotion
+            # gate at runtime.
+            acceptance_gate_mode=GATE_MODE_BLOCKING,
+            rib_out_gate_mode=GATE_MODE_BLOCKING,
+            measurement_gate_mode=GATE_MODE_BLOCKING,
+            memory_ceiling_gate_mode=GATE_MODE_BLOCKING,
+            transient_gate_mode=GATE_MODE_BLOCKING,
         ),
     )
 
@@ -2418,11 +2502,13 @@ def create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
 def create_bgp_ebb_characteristic_route_churn_processing_test_config(
     testbed: PhysicalInventory,
     enable_update_group: bool = False,
+    name_override: str | None = None,
+    parent_networks: dict[str, str] | None = None,
 ) -> taac_types.TestConfig:
     """SC6 churn-processing P(N) test config (testbed-driven).
 
-    SC6 = characteristic 6 (Churn Processing time P(N)): hold route churn fixed
-    at ~100 routes, sweep total route scale N, and verify BGP keeps up
+    SC6 = characteristic 6 (Churn Processing time P(N)): hold route churn fixed,
+    sweep total route scale N, and verify BGP keeps up
     (reconverge/processing ~independent of N). Reuses the existing EB02 churn
     P(N) engine (``create_bgp_ebb_scaling_route_churn_prefix_test_config``) with
     bag010 device setup: interface-state nexthop gflag + Centralized Route
@@ -2453,28 +2539,35 @@ def create_bgp_ebb_characteristic_route_churn_processing_test_config(
 
     device_name = testbed.device_name
 
-    name = f"{testbed.device_name.upper().replace('.', '_')}_SC6_CHURN_PROCESSING_TEST"
-    if enable_update_group:
+    name = name_override or (
+        f"{testbed.device_name.upper().replace('.', '_')}_SC6_CHURN_PROCESSING_TEST"
+    )
+    if name_override is None and enable_update_group:
         name += "_UPDATE_GROUP"
+    resolved_parent_networks = _resolve_egress_peer_scale_parent_networks(
+        parent_networks,
+        ixia_chassis_ip=testbed.ixia_chassis_ip,
+    )
 
-    extra_setup_tasks = [
+    pre_setup_tasks = [
         # SC6 drives the largest full SyncFib of any config here (50K prefixes
         # at the top of the sweep), and was the only one still on bgpd's 45s
         # default FIB-agent receive timeout.
         #
-        # ``restart_bgp`` is required, not incidental: the task edits
-        # ``run_bgpcpp.sh``, which bgpd only re-reads on start, and
-        # ``extra_setup_tasks`` are appended AFTER the managed recipe's final
-        # Bgp enable. Without the restart the flag would sit on disk unread --
-        # the step itself no longer cycles the daemon per scale.
+        # The task must precede the managed recipe's Bgp enable so the daemon
+        # reads the new value without a redundant restart.
         create_configure_bgpcpp_startup_task(
             hostname=device_name,
             flags={
-                "agent_thrift_recv_timeout_ms": _AGENT_THRIFT_RECV_TIMEOUT_MS,
+                "agent_thrift_recv_timeout_ms": _SC6_AGENT_THRIFT_RECV_TIMEOUT_MS,
             },
             use_managed_shell=True,
-            restart_bgp=True,
+            restart_bgp=False,
+            set_outer_hostname=True,
+            ixia_needed=True,
         ),
+    ]
+    extra_setup_tasks = [
         create_bgp_clear_route_filter_task(
             hostname=device_name,
             set_outer_hostname=True,
@@ -2485,23 +2578,24 @@ def create_bgp_ebb_characteristic_route_churn_processing_test_config(
     # Queue-backpressure monitoring is a generic bgpd health signal now bundled
     # into create_standard_periodic_tasks (like CPU/memory), so the churn
     # playbook picks it up automatically -- no per-test wiring needed here.
-    return create_bgp_ebb_scaling_route_churn_prefix_test_config(
+    test_config = create_bgp_ebb_scaling_route_churn_prefix_test_config(
         testbed,
         name=name,
+        pre_setup_tasks=pre_setup_tasks,
         extra_setup_tasks=extra_setup_tasks,
         ebgp_peer_count=100,
         ibgp_peer_count=100,
         ebgp_remote_as=EBGP_REMOTE_AS,
         ibgp_remote_as=IBGP_REMOTE_AS,
-        ixia_ebgp_ic_parent_network_v6=IXIA_EBGP_IC_PARENT_NETWORK_V6,
-        ixia_ibgp_ic_parent_network_v6=IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
+        ixia_ebgp_ic_parent_network_v6=resolved_parent_networks["ebgp_v6"],
+        ixia_ibgp_ic_parent_network_v6=resolved_parent_networks["ibgp_v6"],
         peergroup_ebgp_v6=PEERGROUP_EBGP_V6,
         peergroup_ibgp_v6=PEERGROUP_IBGP_V6,
         # (route_scale, settle_seconds). The second element is only the wait
         # for the background load to settle BEFORE churn is applied; it is not a
         # gate. Churn reconvergence itself is gated by sc6_churn_latency.
         prefix_configs=[(5000, 120), (10000, 120), (20000, 180), (50000, 300)],
-        churn_count=100,
+        churn_count=_SC6_CHURN_COUNT,
         # Per-phase ceiling. 700s was unusable as a gate -- it cannot separate
         # "P(N) is flat" from "P(N) grew 100x", only a total hang. A fixed
         # 100-route churn should reconverge in seconds.
@@ -2511,12 +2605,14 @@ def create_bgp_ebb_characteristic_route_churn_processing_test_config(
         # 600s default is 20x the 30s hard-fail ceiling, so it is not just dead
         # wall clock (2x600s per scale, 4 scales): convergence is measured as
         # the SPAN of UPDATE frames in the window, so a long tail of near
-        # silence lets any unrelated late UPDATE inflate the result, and a 600s
-        # capture at 50K x 100 peers risks wrapping the IXIA capture buffer and
-        # losing the start of the burst. 60s = 2x the hard-fail ceiling.
+        # silence needlessly grows the captures and risks wrapping the IXIA
+        # capture buffer at 50K x 100 peers. 60s = 2x the hard-fail ceiling.
         soak_duration_seconds=60,
+        postcheck_prefix_count=_SC6_POSTCHECK_PREFIX_COUNT,
         enable_update_group=enable_update_group,
     )
+    _validate_sc6_startup_order(test_config.setup_tasks or [])
+    return test_config
 
 
 def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(

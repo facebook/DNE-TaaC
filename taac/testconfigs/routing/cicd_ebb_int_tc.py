@@ -39,6 +39,8 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config,
     create_bgp_ebb_characteristic_constant_attribute_storage_ingress_test_config,
     create_bgp_ebb_characteristic_performance_scaling_test_config,
+    create_bgp_ebb_characteristic_route_churn_processing_test_config,
+    create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config,
     create_bgp_ebb_characteristic_transient_memory_route_scale_test_config,
     create_bgp_ebb_queue_memory_monitor_test_config,
     create_bgp_ebb_update_packing_test_config,
@@ -232,6 +234,26 @@ NRQEB008_SC5_UPDATE_PACKING_TEST_CONFIG_UG = create_bgp_ebb_update_packing_test_
     parent_networks=IPV6_UPDATE_PACKING_PARENT_NETWORKS_IXIA03,
 )
 
+# CONVEYOR: dne_routing / nrqeb006_characteristics_wave2_node
+NRQEB006_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_CONFIG_UG = (
+    create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config(
+        NRQEB006_ASH6,
+        enable_update_group=True,
+        name_override="NRQEB006_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_CONFIG_UG",
+        parent_networks=EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
+    )
+)
+
+# CONVEYOR: dne_routing / nrqeb007_characteristics_wave2_node
+NRQEB007_SC6_CHURN_PROCESSING_TEST_CONFIG_UG = (
+    create_bgp_ebb_characteristic_route_churn_processing_test_config(
+        NRQEB007_ASH6,
+        enable_update_group=True,
+        name_override="NRQEB007_SC6_CHURN_PROCESSING_TEST_CONFIG_UG",
+        parent_networks=EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
+    )
+)
+
 
 # Legacy retained scale-and-characteristic selectors. They stay registered for
 # compatibility but are not the first-wave Conveyor bindings above.
@@ -263,6 +285,7 @@ BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG = (
 
 __all__ = [
     "BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG",
+    "NRQEB007_SC6_CHURN_PROCESSING_TEST_CONFIG_UG",
     "NRQEB007_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG",
     "NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     "NRQEB007_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
@@ -276,6 +299,7 @@ __all__ = [
     "NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     "NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
     "NRQEB006_SC2_CONSTANT_ATTRIBUTE_STORAGE_INGRESS_TEST_CONFIG_UG",
+    "NRQEB006_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_CONFIG_UG",
     "NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     "NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
 ]

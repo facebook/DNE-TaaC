@@ -18,6 +18,10 @@ import uuid
 from enum import Enum
 
 from ixia.ixia import types as ixia_types
+from taac.utils.gate_catalog import (
+    SC4_MAX_PEAK_MEMORY_MB,
+    SC4_TRANSIENT_MEMORY_CEILING_MB,
+)
 from taac.utils.json_thrift_utils import json_to_thrift
 from taac.utils.qos_constants import ClassOfService
 from taac.constants import (
@@ -2807,28 +2811,36 @@ def create_transient_memory_ingress_peer_scale_playbook(
     device_name: str,
     ixia_interface_mimic_ebgp: str,
     ingress_peer_counts: list[int],
-    prefix_count_per_peer: int,
+    total_prefix_count: int,
+    prefix_pool_regex: str,
+    prefix_start: str,
+    prefix_length: int,
     ibgp_peer_count: int,
     address_families: list[str],
-    soak_seconds: int,
+    stable_sample_window_seconds: int,
     convergence_wait_seconds: int,
     acceptance_gate_mode: str | None = None,
+    rib_out_gate_mode: str | None = None,
+    measurement_gate_mode: str | None = None,
+    memory_ceiling_gate_mode: str | None = None,
     transient_gate_mode: str | None = None,
-    transient_ratio_tolerance: float = 2.0,
+    transient_memory_ceiling_mb: float = SC4_TRANSIENT_MEMORY_CEILING_MB,
+    max_peak_memory_mb: float = SC4_MAX_PEAK_MEMORY_MB,
 ) -> Playbook:
     """Build SC4: transient memory vs eBGP INGRESS sender scale.
 
     ONE Stage with ONE custom step -- the step owns the whole sweep (resize the
     IXIA eBGP device group, restart protocols, measure, repeat), mirroring SC2's
     shape. Keeping the sweep inside the step is what removes the per-Stage device
-    rescale (and its Bgp restart) entirely: the DUT is configured once with the
-    sweep-max peer set and only the IXIA multiplier changes per point.
+    rescale: the DUT is configured once with the sweep-max peer set, and the
+    step coordinates each IXIA multiplier and disjoint route-block change with
+    its cold bgpd start.
     """
     return Playbook(
         name="Transient_Memory_Ingress_Peer_Scale",
         description=(
-            "SC4: transient (peak-stable) memory must stay ~flat as the eBGP "
-            "ingress sender count grows"
+            "SC4: transient memory stays bounded while ingress peer count grows "
+            "at a fixed total route and path scale"
         ),
         # No snapshot checks: the device deliberately carries sweep-max eBGP peers
         # while only the current point's subset is started, so a snapshot session
@@ -2839,9 +2851,9 @@ def create_transient_memory_ingress_peer_scale_playbook(
             create_steps_stage(
                 stage_id="ingress_peer_scale_sweep",
                 description=(
-                    f"Sweep eBGP ingress senders {ingress_peer_counts} at "
-                    f"{prefix_count_per_peer} prefixes each, {ibgp_peer_count} iBGP "
-                    "egress held constant"
+                    f"Sweep eBGP ingress senders {ingress_peer_counts} over "
+                    f"{total_prefix_count} total prefixes, {ibgp_peer_count} "
+                    "iBGP egress held constant"
                 ),
                 steps=[
                     create_custom_step(
@@ -2852,14 +2864,25 @@ def create_transient_memory_ingress_peer_scale_playbook(
                             "hostname": device_name,
                             "ixia_interface_mimic_ebgp": ixia_interface_mimic_ebgp,
                             "ingress_peer_counts": ingress_peer_counts,
-                            "prefix_count_per_peer": prefix_count_per_peer,
+                            "total_prefix_count": total_prefix_count,
+                            "prefix_pool_regex": prefix_pool_regex,
+                            "prefix_start": prefix_start,
+                            "prefix_length": prefix_length,
                             "ibgp_peer_count": ibgp_peer_count,
                             "address_families": address_families,
-                            "soak_seconds": soak_seconds,
+                            "stable_sample_window_seconds": (
+                                stable_sample_window_seconds
+                            ),
                             "convergence_wait_seconds": convergence_wait_seconds,
                             "acceptance_gate_mode": acceptance_gate_mode,
+                            "rib_out_gate_mode": rib_out_gate_mode,
+                            "measurement_gate_mode": measurement_gate_mode,
+                            "memory_ceiling_gate_mode": memory_ceiling_gate_mode,
                             "transient_gate_mode": transient_gate_mode,
-                            "transient_ratio_tolerance": transient_ratio_tolerance,
+                            "transient_memory_ceiling_mb": (
+                                transient_memory_ceiling_mb
+                            ),
+                            "max_peak_memory_mb": max_peak_memory_mb,
                         },
                         description=(
                             f"Measure transient memory across ingress sender "
