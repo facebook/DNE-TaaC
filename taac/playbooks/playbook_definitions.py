@@ -1578,11 +1578,16 @@ def create_thft_kitchen_sink_playbook(
     requests_per_burst: int = 10000,
     burst_timeout_s: float = 60.0,
 ) -> Playbook:
-    """THFT_001 read-only kitchen-sink thrift stress without port flaps."""
+    """THFT_006 read-only kitchen-sink thrift stress without port flaps.
+
+    Numbered after the five original THFT cases so adding it never renames
+    THFT_001..005 — downstream infra keys test execution and result history
+    on those playbook names.
+    """
     return Playbook(
-        name="npi_thft_001_kitchen_sink",
+        name="npi_thft_006_kitchen_sink",
         description=(
-            f"THFT_001 — read-only FBOSS kitchen-sink thrift stress for "
+            f"THFT_006 — read-only FBOSS kitchen-sink thrift stress for "
             f"{test_duration_s}s on {device_name} "
             f"(requests_per_burst={requests_per_burst})."
         ),
@@ -1808,10 +1813,11 @@ def create_thft_playbooks(
 ) -> list[Playbook]:
     """Return the standard NPI THFT playbook set for any FBOSS DUT.
 
-    By default this preserves the original THFT_001..005 naming. When
-    ``include_kitchen_sink`` is true, a read-only kitchen-sink case becomes
-    THFT_001, the baseline becomes THFT_002, and the four restart cases become
-    THFT_003..006.
+    THFT_001 is the baseline and THFT_002..005 are the restart cases. When
+    ``include_kitchen_sink`` is true, the read-only kitchen-sink case is
+    appended as THFT_006. Playbook numbers are append-only: never renumber an
+    existing case, because downstream infra keys test execution and result
+    correlation on these names.
 
     Per-playbook duration is split so the campaign wall time stays bounded:
     `test_duration_s` drives the baseline (default 4hr prod),
@@ -1820,21 +1826,7 @@ def create_thft_playbooks(
     kitchen-sink duration. Omitting it preserves the existing behavior of
     using `test_duration_s` for the kitchen sink.
     """
-    playbook_number_offset = 1 if include_kitchen_sink else 0
     playbooks: list[Playbook] = []
-    if include_kitchen_sink:
-        playbooks.append(
-            create_thft_kitchen_sink_playbook(
-                device_name=device_name,
-                test_duration_s=(
-                    test_duration_s
-                    if kitchen_sink_test_duration_s is None
-                    else kitchen_sink_test_duration_s
-                ),
-                requests_per_burst=requests_per_burst,
-                burst_timeout_s=burst_timeout_s,
-            )
-        )
     playbooks.append(
         create_thft_baseline_playbook(
             device_name=device_name,
@@ -1842,7 +1834,7 @@ def create_thft_playbooks(
             requests_per_burst=requests_per_burst,
             burst_timeout_s=burst_timeout_s,
             flap_burst_timeout_s=flap_burst_timeout_s,
-            playbook_number=1 + playbook_number_offset,
+            playbook_number=1,
         )
     )
     for (
@@ -1854,7 +1846,7 @@ def create_thft_playbooks(
         playbooks.append(
             create_thft_restart_playbook(
                 device_name=device_name,
-                playbook_number=playbook_number + playbook_number_offset,
+                playbook_number=playbook_number,
                 service=service,
                 service_label=service_label,
                 test_duration_s=restart_test_duration_s,
@@ -1862,6 +1854,19 @@ def create_thft_playbooks(
                 requests_per_burst=requests_per_burst,
                 burst_timeout_s=burst_timeout_s,
                 flap_burst_timeout_s=flap_burst_timeout_s,
+            )
+        )
+    if include_kitchen_sink:
+        playbooks.append(
+            create_thft_kitchen_sink_playbook(
+                device_name=device_name,
+                test_duration_s=(
+                    test_duration_s
+                    if kitchen_sink_test_duration_s is None
+                    else kitchen_sink_test_duration_s
+                ),
+                requests_per_burst=requests_per_burst,
+                burst_timeout_s=burst_timeout_s,
             )
         )
     return playbooks

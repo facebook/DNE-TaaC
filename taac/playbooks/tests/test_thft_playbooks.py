@@ -25,7 +25,9 @@ class ThftPlaybooksTest(unittest.TestCase):
             ],
         )
 
-    def test_kitchen_sink_suite_uses_requested_six_case_numbering(self) -> None:
+    def test_kitchen_sink_is_appended_without_renumbering_existing_cases(
+        self,
+    ) -> None:
         playbooks = create_thft_playbooks(
             "dut",
             include_kitchen_sink=True,
@@ -34,16 +36,16 @@ class ThftPlaybooksTest(unittest.TestCase):
         self.assertEqual(
             [playbook.name for playbook in playbooks],
             [
-                "npi_thft_001_kitchen_sink",
-                "npi_thft_002_baseline_thrift_stress",
-                "npi_thft_003_thrift_stress_with_restart_wedge_agent",
-                "npi_thft_004_thrift_stress_with_restart_bgpd",
-                "npi_thft_005_thrift_stress_with_restart_qsfp_service",
-                "npi_thft_006_thrift_stress_with_restart_fsdb",
+                "npi_thft_001_baseline_thrift_stress",
+                "npi_thft_002_thrift_stress_with_restart_wedge_agent",
+                "npi_thft_003_thrift_stress_with_restart_bgpd",
+                "npi_thft_004_thrift_stress_with_restart_qsfp_service",
+                "npi_thft_005_thrift_stress_with_restart_fsdb",
+                "npi_thft_006_kitchen_sink",
             ],
         )
-        self.assertEqual(len(playbooks[0].periodic_tasks or []), 1)
-        self.assertEqual(len(playbooks[1].periodic_tasks or []), 2)
+        self.assertEqual(len(playbooks[0].periodic_tasks or []), 2)
+        self.assertEqual(len(playbooks[-1].periodic_tasks or []), 1)
 
     def test_device_only_bgp_checks_use_exact_session_count(self) -> None:
         playbooks = add_common_checks_to_thft_playbooks(
