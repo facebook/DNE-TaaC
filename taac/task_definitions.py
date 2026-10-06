@@ -1972,6 +1972,8 @@ def create_standard_periodic_tasks(
     process_filter: t.Optional[t.List[str]] = None,
     process_monitor_interval: int = 5,
     enable_queue_backpressure_monitor: bool = True,
+    queue_block_duration_threshold_ms: int | None = None,
+    queue_require_complete_delta: bool = False,
 ) -> t.List[taac_types.PeriodicTask]:
     """
     Create standard periodic tasks for monitoring during tests.
@@ -1993,6 +1995,10 @@ def create_standard_periodic_tasks(
             backpressure counters (permissive, observe-only). Generic bgpd
             health signal, like CPU/memory; the poll no-ops on daemons that do
             not implement getPeerEgressStats.
+        queue_block_duration_threshold_ms: When set, judge queue backpressure by
+            cumulative blocked duration instead of event count.
+        queue_require_complete_delta: Require at least two valid cumulative
+            samples so the final delta cannot pass vacuously.
 
     Returns:
         List of standard periodic monitoring tasks
@@ -2056,7 +2062,13 @@ def create_standard_periodic_tasks(
         # backpressure (cumulative block-count delta) under load. Permissive
         # (terminate_on_error defaults False); no-ops if getPeerEgressStats is
         # unavailable on the daemon.
-        tasks.append(create_bgp_queue_backpressure_poll_periodic_task(device_name))
+        tasks.append(
+            create_bgp_queue_backpressure_poll_periodic_task(
+                device_name,
+                block_duration_threshold_ms=queue_block_duration_threshold_ms,
+                require_complete_delta=queue_require_complete_delta,
+            )
+        )
 
     return tasks
 
@@ -3783,6 +3795,8 @@ def create_bgp_queue_backpressure_poll_periodic_task(
     threshold: int = 1000,
     interval: int = 10,
     terminate_on_error: bool = False,
+    block_duration_threshold_ms: int | None = None,
+    require_complete_delta: bool = False,
 ) -> PeriodicTask:
     """Periodic task to poll BGP++ egress-queue backpressure against a threshold.
 
@@ -3803,28 +3817,34 @@ def create_bgp_queue_backpressure_poll_periodic_task(
         interval: Polling interval in seconds. Default `10`.
         terminate_on_error: If True, a threshold breach produces a blocking
             final result. Default False records the breach as observation.
+        block_duration_threshold_ms: When set, compare cumulative blocked
+            duration against this threshold instead of comparing event count.
+        require_complete_delta: When True, fewer than two valid samples produce
+            an ERROR instead of a zero delta.
 
     Returns:
         A `PeriodicTask` named `"bgp_queue_backpressure_check"` wrapping
         `task_name="bgp_queue_backpressure_poll"`.
     """
+    json_payload: dict[str, t.Any] = {
+        "hostname": device_name,
+        "threshold": threshold,
+        "fail_on_breach": terminate_on_error,
+    }
+    if block_duration_threshold_ms is not None:
+        if block_duration_threshold_ms < 0:
+            raise ValueError("block_duration_threshold_ms must be non-negative")
+        json_payload["block_duration_threshold_ms"] = block_duration_threshold_ms
+    if require_complete_delta:
+        json_payload["require_complete_delta"] = True
+
     return PeriodicTask(
         name="bgp_queue_backpressure_check",
         interval=interval,
         task=Task(task_name="bgp_queue_backpressure_poll"),
         retryable=False,
         terminate_on_error=terminate_on_error,
-        params_list=[
-            Params(
-                json_params=json.dumps(
-                    {
-                        "hostname": device_name,
-                        "threshold": threshold,
-                        "fail_on_breach": terminate_on_error,
-                    }
-                )
-            )
-        ],
+        params_list=[Params(json_params=json.dumps(json_payload))],
     )
 
 

@@ -88,6 +88,7 @@ from taac.abstractions.compatibility.legacy_ebb_topology import (  # noqa: F401
 from taac.constants import BgpPlusPlusProfile
 
 
+FIBAGENT_BGP_CONF_CONFIGERATOR_PATH = "taac/ebb_ci_cd_configs/fib_agent_bgp.conf"
 EBB_EBGP_ROUTE_COUNT = 1_000_000
 EBB_EBGP_V6_ROUTE_FILE = "ipv6_1M_routes.txt"
 EBB_EBGP_V4_ROUTE_FILE = "ipv4_1M_routes.txt"

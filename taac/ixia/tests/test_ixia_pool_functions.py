@@ -1,5 +1,7 @@
 # pyre-unsafe
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+import contextlib
+import ipaddress
 import json
 import unittest
 from unittest.mock import MagicMock, patch
@@ -97,7 +99,45 @@ def _create_ixia_instance():
     ixia.stop_protocols_and_wait = MagicMock()
     ixia.start_protocols = MagicMock()
     ixia.apply_changes = MagicMock()
+    ixia.mutation_transaction = MagicMock(return_value=contextlib.nullcontext())
     return ixia
+
+
+def _make_partitioned_prefix_target(
+    *,
+    peer_count: int,
+    prefixes_per_peer: int,
+    starts: list[str],
+    lasts: list[str],
+):
+    pool = MagicMock()
+    pool.Name = "PREFIX_POOL_IPV6_EBGP"
+    pool.Count = peer_count
+    pool.NumberOfAddresses = prefixes_per_peer
+    pool.NetworkAddress.Values = starts
+    pool.NetworkAddress.Pattern = "counter"
+    pool.NetworkAddress._properties = {
+        "pattern": "counter",
+        "counter": {
+            "start": starts[0],
+            "step": "::",
+            "count": peer_count,
+        },
+    }
+    pool.LastNetworkAddress = lasts
+    pool.PrefixLength.Values = [64]
+
+    network_group = MagicMock()
+    network_group.Name = "BGP_IPV6_EBGP_NETWORK_GROUP"
+    network_group.Multiplier = 1
+    network_group.Ipv6PrefixPools.find.return_value = [pool]
+    network_group.Ipv4PrefixPools.find.return_value = []
+
+    device_group = MagicMock()
+    device_group.Name = "DEVICE_GROUP_IPV6_EBGP"
+    device_group.Multiplier = peer_count
+    device_group.NetworkGroup.find.return_value = [network_group]
+    return device_group, network_group, pool
 
 
 class TestBuildAsPathPositionValues(unittest.TestCase):
@@ -230,6 +270,229 @@ class TestOfflinePrefixResize(unittest.TestCase):
         ixia.stop_protocols_and_wait.assert_not_called()
         ixia.start_protocols.assert_not_called()
         ixia.apply_changes.assert_called_once()
+
+
+class TestPartitionedPrefixResize(unittest.TestCase):
+    def test_geometry_partitions_exactly_fifty_thousand_prefixes(self) -> None:
+        for peer_count, expected_per_peer in (
+            (1, 50_000),
+            (2, 25_000),
+            (4, 12_500),
+            (8, 6_250),
+            (16, 3_125),
+        ):
+            with self.subTest(peer_count=peer_count):
+                per_peer, _step, starts, lasts = Ixia._partitioned_prefix_geometry(
+                    starting_prefix="2001:db8:1000::",
+                    prefix_length=64,
+                    peer_count=peer_count,
+                    total_prefix_count=50_000,
+                )
+                self.assertEqual(expected_per_peer, per_peer)
+                self.assertEqual(peer_count, len(starts))
+                self.assertEqual(peer_count, len(lasts))
+                for index in range(peer_count):
+                    start = int(ipaddress.ip_address(starts[index]))
+                    last = int(ipaddress.ip_address(lasts[index]))
+                    self.assertEqual(expected_per_peer, (last - start) // 2**64 + 1)
+                    if index:
+                        self.assertLess(
+                            int(ipaddress.ip_address(lasts[index - 1])),
+                            start,
+                        )
+                self.assertEqual(
+                    50_000,
+                    sum(
+                        (
+                            int(ipaddress.ip_address(last))
+                            - int(ipaddress.ip_address(start))
+                        )
+                        // 2**64
+                        + 1
+                        for start, last in zip(starts, lasts)
+                    ),
+                )
+
+    def test_rejects_non_divisible_partition(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be divisible"):
+            Ixia._partitioned_prefix_geometry(
+                starting_prefix="2001:db8:1000::",
+                prefix_length=64,
+                peer_count=3,
+                total_prefix_count=50_000,
+            )
+
+    def test_requires_one_exact_prefix_pool_target(self) -> None:
+        ixia = _create_ixia_instance()
+        near_match = _make_partitioned_prefix_target(
+            peer_count=16,
+            prefixes_per_peer=3_125,
+            starts=["2001:db8:1000::"] * 16,
+            lasts=["2001:db8:1000:c34::"] * 16,
+        )
+        near_match[2].Name = "PREFIX_POOL_IPV6_EBGP_BACKUP"
+        ixia.get_device_groups_by_port_and_interface = MagicMock(
+            return_value=[near_match[0]]
+        )
+
+        with self.assertRaisesRegex(ValueError, "matched 0 pools"):
+            ixia.configure_partitioned_bgp_prefixes_by_port(
+                hostname="bag012.ash6",
+                interface="Ethernet3/36/1",
+                peer_count=4,
+                total_prefix_count=50_000,
+                prefix_pool_regex="PREFIX_POOL_IPV6_EBGP",
+                starting_prefix="2001:db8:1000::",
+                prefix_length=64,
+            )
+
+        ixia.stop_protocols_and_wait.assert_called_once_with()
+        ixia.apply_changes.assert_not_called()
+        ixia.start_protocols.assert_not_called()
+
+    def test_stops_applies_exact_geometry_then_starts(self) -> None:
+        ixia = _create_ixia_instance()
+        initial = _make_partitioned_prefix_target(
+            peer_count=16,
+            prefixes_per_peer=50_000,
+            starts=["2001:db8:1000::"] * 16,
+            lasts=["2001:db8:1000:c34f::"] * 16,
+        )
+        desired = _make_partitioned_prefix_target(
+            peer_count=4,
+            prefixes_per_peer=12_500,
+            starts=[
+                "2001:db8:1000:0:0:0:0:0",
+                "2001:db8:1000:30d4:0:0:0:0",
+                "2001:db8:1000:61a8:0:0:0:0",
+                "2001:db8:1000:927c:0:0:0:0",
+            ],
+            lasts=[
+                "2001:db8:1000:30d3:0:0:0:0",
+                "2001:db8:1000:61a7:0:0:0:0",
+                "2001:db8:1000:927b:0:0:0:0",
+                "2001:db8:1000:c34f:0:0:0:0",
+            ],
+        )
+        ixia.get_device_groups_by_port_and_interface = MagicMock(
+            side_effect=[[initial[0]], [desired[0]]]
+        )
+
+        result = ixia.configure_partitioned_bgp_prefixes_by_port(
+            hostname="bag012.ash6",
+            interface="Ethernet3/36/1",
+            peer_count=4,
+            total_prefix_count=50_000,
+            prefix_pool_regex="PREFIX_POOL_IPV6_EBGP",
+            starting_prefix="2001:db8:1000::",
+            prefix_length=64,
+        )
+
+        ixia.stop_protocols_and_wait.assert_called_once_with()
+        self.assertEqual(4, initial[0].Multiplier)
+        self.assertEqual(12_500, initial[2].NumberOfAddresses)
+        initial[2].NetworkAddress.Increment.assert_called_once_with(
+            start_value="2001:db8:1000::",
+            step_value="0:0:0:30d4::",
+        )
+        ixia.apply_changes.assert_called_once_with()
+        ixia.start_protocols.assert_called_once_with()
+        self.assertEqual(50_000, result["total_prefix_count"])
+        self.assertEqual(12_500, result["prefixes_per_peer"])
+        self.assertEqual("0:0:0:30d4::", result["prefix_step"])
+
+    def test_readback_mismatch_restores_original_geometry(self) -> None:
+        ixia = _create_ixia_instance()
+        initial = _make_partitioned_prefix_target(
+            peer_count=16,
+            prefixes_per_peer=50_000,
+            starts=["2001:db8:1000::"] * 16,
+            lasts=["2001:db8:1000:c34f::"] * 16,
+        )
+        mismatched = _make_partitioned_prefix_target(
+            peer_count=4,
+            prefixes_per_peer=12_500,
+            starts=["2001:db8:1000::"] * 4,
+            lasts=["2001:db8:1000:30d3::"] * 4,
+        )
+        rollback = _make_partitioned_prefix_target(
+            peer_count=4,
+            prefixes_per_peer=12_500,
+            starts=["2001:db8:1000::"] * 4,
+            lasts=["2001:db8:1000:30d3::"] * 4,
+        )
+        restored = _make_partitioned_prefix_target(
+            peer_count=16,
+            prefixes_per_peer=50_000,
+            starts=["2001:db8:1000::"] * 16,
+            lasts=["2001:db8:1000:c34f::"] * 16,
+        )
+        ixia.get_device_groups_by_port_and_interface = MagicMock(
+            side_effect=[
+                [initial[0]],
+                [mismatched[0]],
+                [rollback[0]],
+                [restored[0]],
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "readback mismatch"):
+            ixia.configure_partitioned_bgp_prefixes_by_port(
+                hostname="bag012.ash6",
+                interface="Ethernet3/36/1",
+                peer_count=4,
+                total_prefix_count=50_000,
+                prefix_pool_regex="PREFIX_POOL_IPV6_EBGP",
+                starting_prefix="2001:db8:1000::",
+                prefix_length=64,
+            )
+
+        self.assertEqual(16, rollback[0].Multiplier)
+        self.assertEqual(50_000, rollback[2].NumberOfAddresses)
+        rollback[2].NetworkAddress.Increment.assert_called_once_with(
+            "2001:db8:1000::",
+            "::",
+            16,
+        )
+        self.assertEqual(2, ixia.apply_changes.call_count)
+        ixia.start_protocols.assert_not_called()
+
+    def test_rollback_failure_preserves_primary_geometry_error(self) -> None:
+        ixia = _create_ixia_instance()
+        initial = _make_partitioned_prefix_target(
+            peer_count=16,
+            prefixes_per_peer=50_000,
+            starts=["2001:db8:1000::"] * 16,
+            lasts=["2001:db8:1000:c34f::"] * 16,
+        )
+        mismatched = _make_partitioned_prefix_target(
+            peer_count=4,
+            prefixes_per_peer=12_500,
+            starts=["2001:db8:1000::"] * 4,
+            lasts=["2001:db8:1000:30d3::"] * 4,
+        )
+        rollback_error = RuntimeError("rollback target disappeared")
+        ixia.get_device_groups_by_port_and_interface = MagicMock(
+            side_effect=[[initial[0]], [mismatched[0]], rollback_error]
+        )
+
+        with self.assertRaisesRegex(ValueError, "readback mismatch") as context:
+            ixia.configure_partitioned_bgp_prefixes_by_port(
+                hostname="bag012.ash6",
+                interface="Ethernet3/36/1",
+                peer_count=4,
+                total_prefix_count=50_000,
+                prefix_pool_regex="PREFIX_POOL_IPV6_EBGP",
+                starting_prefix="2001:db8:1000::",
+                prefix_length=64,
+            )
+
+        self.assertIs(context.exception.__cause__, rollback_error)
+        self.assertIn(
+            "partitioned BGP prefix rollback also failed",
+            " ".join(context.exception.__notes__),
+        )
+        ixia.start_protocols.assert_not_called()
 
 
 class TestExtendedCommunityPool(unittest.TestCase):

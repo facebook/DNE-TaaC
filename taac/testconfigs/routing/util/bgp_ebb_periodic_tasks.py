@@ -35,6 +35,9 @@ def create_standard_periodic_tasks(
     enable_process_monitor: bool = True,
     process_filter: t.Optional[t.List[str]] = None,
     process_monitor_interval: int = 5,
+    enable_queue_backpressure_monitor: bool = True,
+    queue_block_duration_threshold_ms: int | None = None,
+    queue_require_complete_delta: bool = False,
 ) -> t.List[taac_types.PeriodicTask]:
     """
     Create standard periodic tasks for BGP tests.
@@ -55,6 +58,9 @@ def create_standard_periodic_tasks(
         enable_process_monitor=enable_process_monitor,
         process_filter=process_filter,
         process_monitor_interval=process_monitor_interval,
+        enable_queue_backpressure_monitor=enable_queue_backpressure_monitor,
+        queue_block_duration_threshold_ms=queue_block_duration_threshold_ms,
+        queue_require_complete_delta=queue_require_complete_delta,
     )
 
 

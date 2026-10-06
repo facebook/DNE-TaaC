@@ -96,6 +96,16 @@ def _mean(values: t.Sequence[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _steady_tail_sample_count(sample_count: int) -> int:
+    """Return the historical final-20%-window size, with a one-sample floor."""
+    if sample_count <= 0:
+        return 0
+    # Preserve the original floor(20% * N) definition for comparability with
+    # historical runs. The one-sample floor only fixes the old empty slice for
+    # N < 5; using ceil(N / 5) would silently widen many historical windows.
+    return max(1, sample_count // 5)
+
+
 def high_cpu_span_seconds(high_cpu_elapsed_times: t.Sequence[float]) -> float:
     """Elapsed span from the first to the last above-threshold CPU sample.
 
@@ -122,14 +132,56 @@ async def _wait_for_next_sample(
         pass
 
 
-async def async_collect_peak_cpu_memory(
+async def _wait_for_initial_processes(
+    driver: t.Any,
+    hostname: str,
+    process_name: str,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> t.Mapping[t.Any, t.Mapping[str, t.Any]]:
+    """Return the first process snapshot containing ``process_name``."""
+    if poll_interval_seconds <= 0:
+        raise ValueError("process poll interval must be positive")
+
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            output = await driver.async_get_processes_top()
+        except Exception as error:
+            LOGGER.warning(
+                f"Failed while waiting for {process_name} on {hostname}: {error}"
+            )
+        else:
+            # Parse outside the transport retry handler so malformed driver
+            # output and programming errors fail immediately instead of being
+            # disguised as a process-start timeout.
+            processes = output.get("processes", {})
+            if any(
+                process_name in str(process_data.get("cmd", ""))
+                for process_data in processes.values()
+            ):
+                return processes
+
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            raise TimeoutError(
+                f"Timed out after {timeout_seconds}s waiting for {process_name} "
+                f"on {hostname}"
+            )
+        await asyncio.sleep(min(poll_interval_seconds, remaining_seconds))
+
+
+async def async_collect_peak_cpu_memory(  # noqa: C901
     hostname: str,
     process_name: str,
     duration_seconds: int,
     interval_seconds: int = 30,
     steady_mem: bool = False,
     high_cpu_threshold_percent: float = 50.0,
+    wait_for_process_timeout_seconds: float = 0.0,
+    process_poll_interval_seconds: float = 1.0,
     stop_event: t.Optional[asyncio.Event] = None,
+    steady_state_event: t.Optional[asyncio.Event] = None,
 ) -> t.Dict[str, float]:
     """
     Collect CPU and memory samples for a process and return peak values.
@@ -142,9 +194,15 @@ async def async_collect_peak_cpu_memory(
         process_name: Process name to monitor (e.g., "bgpd_main")
         duration_seconds: Duration to monitor in seconds
         interval_seconds: Sampling interval in seconds (default: 30s)
+        wait_for_process_timeout_seconds: When positive, wait this long for the
+            process before starting the measurement clock.
+        process_poll_interval_seconds: Process-start polling interval.
         stop_event: Optional signal to finish after the current sample. This lets
             adaptive workflows collect the complete trigger-to-settle window
             without waiting out the worst-case duration after early convergence.
+        steady_state_event: Optional event marking the beginning of an exact
+            steady-state window. When supplied, steady values use only samples
+            collected after this event instead of the final 20% of all samples.
 
     Returns:
         Dict containing:
@@ -153,9 +211,22 @@ async def async_collect_peak_cpu_memory(
         - avg_cpu_percent: Full-window mean CPU% across all samples
         - avg_memory_mb: Full-window mean memory (MB) across all samples --
           the robust steady/stable value (vs a single flaky snapshot)
+        - steady_cpu_percent: Mean CPU over the explicit steady window, or the
+          final 20% of samples when no boundary event is supplied
+        - steady_memory_mb: Mean memory over the explicit steady window, or the
+          final 20% of samples when no boundary event is supplied
         - process_pid: Most recently observed PID for the measured process
-        - sample_count: Number of valid process samples collected
+        - process_pid_change_count: Number of PID changes observed in the window
+        - process_sample_count: Number of samples that matched the process
+        - sample_count: Backward-compatible alias for process_sample_count
         - process_pid_changed: 1.0 if the observed process PID changed
+        - steady_sample_count: Number of samples used for steady-state values
+        - stopped_by_event: 1 when stop_event ended the window, otherwise 0
+
+    Raises:
+        RuntimeError: No process sample was collected during monitoring, or an
+            explicit steady-state boundary was supplied but no process sample
+            was collected after that boundary.
 
     Example:
         >>> peak_stats = await async_collect_peak_cpu_memory(
@@ -168,18 +239,32 @@ async def async_collect_peak_cpu_memory(
         >>> print(f"Peak Memory: {peak_stats['peak_memory_mb']:.2f}MB")
     """
     driver = await async_get_device_driver(hostname)
+    initial_processes: t.Optional[t.Mapping[t.Any, t.Mapping[str, t.Any]]] = None
+    if wait_for_process_timeout_seconds > 0:
+        initial_processes = await _wait_for_initial_processes(
+            driver=driver,
+            hostname=hostname,
+            process_name=process_name,
+            timeout_seconds=wait_for_process_timeout_seconds,
+            poll_interval_seconds=process_poll_interval_seconds,
+        )
 
     max_cpu = 0.0
     max_memory_mb = 0.0
     process_pid = 0.0
-    process_pid_changed = False
+    process_pid_change_count = 0
     sample_count = 0
     # Monotonic clock: all elapsed-duration math below (loop bound, sustained-CPU
     # timestamps, inter-sample sleep) must be immune to wall-clock/NTP steps.
     start_time = time.monotonic()
     memory_record: t.List[float] = []
     cpu_record: t.List[float] = []
+    steady_memory_record: t.List[float] = []
+    steady_cpu_record: t.List[float] = []
     steady_memory = 0.0
+    steady_cpu = 0.0
+    steady_sample_count = 0
+    stopped_by_event = False
     # Peak CPU is a single-sample transient (BGP++ momentarily spikes to ~100%
     # during convergence, then idles). The meaningful signal is how LONG CPU
     # stays elevated -- collect the elapsed timestamp of every above-threshold
@@ -191,15 +276,20 @@ async def async_collect_peak_cpu_memory(
         f"(duration={duration_seconds}s, interval={interval_seconds}s)"
     )
 
-    while (time.monotonic() - start_time) < duration_seconds and not (
-        stop_event is not None and stop_event.is_set()
-    ):
+    while (time.monotonic() - start_time) < duration_seconds:
         sample_count += 1
+        sample_in_steady_window = (
+            steady_state_event is not None and steady_state_event.is_set()
+        )
 
         try:
             # Use existing driver method - same as ProcessMonitorTask
-            output = await driver.async_get_processes_top()
-            processes = output.get("processes", {})
+            if initial_processes is None:
+                output = await driver.async_get_processes_top()
+                processes = output.get("processes", {})
+            else:
+                processes = initial_processes
+                initial_processes = None
 
             # Find the target process and get its metrics
             for pid, process_data in processes.items():
@@ -208,7 +298,7 @@ async def async_collect_peak_cpu_memory(
                     observed_pid = float(pid)
 
                     if process_pid and observed_pid != process_pid:
-                        process_pid_changed = True
+                        process_pid_change_count += 1
 
                         LOGGER.warning(
                             f"{process_name} PID changed from {int(process_pid)} "
@@ -229,6 +319,9 @@ async def async_collect_peak_cpu_memory(
                     # end-of-soak snapshot.
                     cpu_record.append(cpu_pct)
                     memory_record.append(memory_mb)
+                    if sample_in_steady_window:
+                        steady_cpu_record.append(cpu_pct)
+                        steady_memory_record.append(memory_mb)
 
                     # Track peaks
                     max_cpu = max(max_cpu, cpu_pct)
@@ -250,11 +343,21 @@ async def async_collect_peak_cpu_memory(
 
         # Sleep until next sample
         elapsed = time.monotonic() - start_time
-        if elapsed < duration_seconds and not (
-            stop_event is not None and stop_event.is_set()
-        ):
+        if stop_event is not None and stop_event.is_set():
+            stopped_by_event = True
+            break
+        if elapsed < duration_seconds:
             sleep_time = min(interval_seconds, duration_seconds - elapsed)
-            await _wait_for_next_sample(sleep_time, stop_event)
+            if stop_event is None:
+                await _wait_for_next_sample(sleep_time, stop_event)
+            else:
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=sleep_time)
+                except asyncio.TimeoutError:
+                    pass
+                else:
+                    stopped_by_event = True
+                    break
 
     high_cpu_sample_count = len(high_cpu_elapsed_times)
     high_cpu_duration_seconds = high_cpu_span_seconds(high_cpu_elapsed_times)
@@ -272,15 +375,33 @@ async def async_collect_peak_cpu_memory(
     # caller should gate on. Memory is sticky, so its mean over the soak is the
     # true steady state (a single end-of-soak snapshot is flaky). Computed for
     # every call, independent of steady_mem.
+    if steady_state_event is None and not memory_record:
+        raise RuntimeError(
+            f"No {process_name} samples were collected during monitoring"
+        )
     avg_cpu_percent = _mean(cpu_record)
     avg_memory_mb = _mean(memory_record)
 
+    # These fields are part of the stable return schema, so populate them even
+    # for legacy callers that did not opt into the additional steady-state log.
+    # Returning zero after successful sampling is indistinguishable from a real
+    # idle process and can make a resource gate pass on fabricated evidence.
+    if steady_state_event is None:
+        steady_sample_count = _steady_tail_sample_count(len(memory_record))
+        steady_memory = _mean(memory_record[-steady_sample_count:])
+        steady_cpu = _mean(cpu_record[-steady_sample_count:])
+    else:
+        steady_sample_count = len(steady_memory_record)
+        if steady_sample_count == 0:
+            raise RuntimeError(
+                f"No {process_name} samples were collected after the "
+                "steady-state boundary"
+            )
+        steady_memory = _mean(steady_memory_record)
+        steady_cpu = _mean(steady_cpu_record)
     if steady_mem:
-        last_20_percent_mem = len(memory_record) - int(0.2 * len(memory_record))
-        steady_memory = sum(memory_record[last_20_percent_mem:]) / (
-            len(memory_record) - last_20_percent_mem
-        )
         LOGGER.info(f"Steady State Memory: {steady_memory:.2f}MB")
+        LOGGER.info(f"Steady State CPU: {steady_cpu:.2f}%")
 
     LOGGER.info(
         f"Full-window mean over {len(memory_record)} sample(s): "
@@ -292,12 +413,17 @@ async def async_collect_peak_cpu_memory(
         "peak_memory_mb": max_memory_mb,
         "avg_cpu_percent": avg_cpu_percent,
         "avg_memory_mb": avg_memory_mb,
+        "steady_cpu_percent": steady_cpu,
         "steady_memory_mb": steady_memory,
         "high_cpu_sample_count": float(high_cpu_sample_count),
         "high_cpu_duration_seconds": high_cpu_duration_seconds,
         "process_pid": process_pid,
+        "process_pid_change_count": float(process_pid_change_count),
+        "process_sample_count": float(len(memory_record)),
         "sample_count": float(len(memory_record)),
-        "process_pid_changed": float(process_pid_changed),
+        "process_pid_changed": float(process_pid_change_count > 0),
+        "steady_sample_count": float(steady_sample_count),
+        "stopped_by_event": 1.0 if stopped_by_event else 0.0,
     }
 
 

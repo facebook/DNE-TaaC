@@ -76,7 +76,10 @@ from taac.ixia.ixia_tracer import (
 from taac.libs.custom_payload_registry import (
     get_custom_frame_payload,
 )
-from taac.ixia.route_geometry import IxiaValueVector
+from taac.ixia.route_geometry import (
+    IxiaPatternSnapshot,
+    IxiaValueVector,
+)
 from taac.utils.common import timeit
 from taac.utils.oss_taac_constants import (
     IxiaCandidateSetupError,
@@ -8821,6 +8824,331 @@ class Ixia:
         self.logger.info(
             f"Successfully updated multipliers for device groups in topology for {hostname}:{interface}"
         )
+
+    @staticmethod
+    def _partitioned_prefix_geometry(
+        *,
+        starting_prefix: str,
+        prefix_length: int,
+        peer_count: int,
+        total_prefix_count: int,
+    ) -> t.Tuple[int, str, t.Tuple[str, ...], t.Tuple[str, ...]]:
+        """Return per-peer count, IXIA stride, starts, and lasts."""
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in (peer_count, total_prefix_count)
+        ):
+            raise ValueError(
+                "peer_count and total_prefix_count must be positive integers"
+            )
+        if total_prefix_count % peer_count:
+            raise ValueError(
+                f"total_prefix_count={total_prefix_count} must be divisible by "
+                f"peer_count={peer_count}"
+            )
+
+        start = ipaddress.ip_address(starting_prefix)
+        if (
+            isinstance(prefix_length, bool)
+            or not isinstance(prefix_length, int)
+            or not 0 <= prefix_length <= start.max_prefixlen
+        ):
+            raise ValueError(
+                f"prefix_length={prefix_length} is invalid for {starting_prefix}"
+            )
+        network = ipaddress.ip_network(f"{start}/{prefix_length}", strict=False)
+        if start != network.network_address:
+            raise ValueError(
+                f"starting_prefix={starting_prefix} is not /{prefix_length} aligned"
+            )
+
+        prefixes_per_peer = total_prefix_count // peer_count
+        prefix_span = 1 << (start.max_prefixlen - prefix_length)
+        peer_stride = prefixes_per_peer * prefix_span
+        last_address = int(start) + total_prefix_count * prefix_span - 1
+        if last_address > (1 << start.max_prefixlen) - 1:
+            raise ValueError(
+                f"{total_prefix_count} /{prefix_length} prefixes starting at "
+                f"{starting_prefix} exceed the address family"
+            )
+
+        address_type = type(start)
+        starts = tuple(
+            str(address_type(int(start) + peer_index * peer_stride))
+            for peer_index in range(peer_count)
+        )
+        lasts = tuple(
+            str(
+                address_type(
+                    int(start)
+                    + peer_index * peer_stride
+                    + (prefixes_per_peer - 1) * prefix_span
+                )
+            )
+            for peer_index in range(peer_count)
+        )
+        return prefixes_per_peer, str(address_type(peer_stride)), starts, lasts
+
+    def _find_partitioned_bgp_prefix_target(
+        self,
+        *,
+        hostname: str,
+        interface: str,
+        prefix_pool_regex: str,
+        ipv6: bool,
+    ) -> t.Tuple[t.Any, t.Any, t.Any]:
+        """Resolve exactly one prefix pool and its owning groups."""
+        try:
+            pattern = re.compile(prefix_pool_regex)
+        except re.error as error:
+            raise ValueError(
+                f"invalid prefix_pool_regex={prefix_pool_regex!r}: {error}"
+            ) from error
+
+        matches = []
+        for device_group in self.get_device_groups_by_port_and_interface(
+            hostname, interface
+        ):
+            for network_group in device_group.NetworkGroup.find():
+                pools = (
+                    network_group.Ipv6PrefixPools.find()
+                    if ipv6
+                    else network_group.Ipv4PrefixPools.find()
+                )
+                matches.extend(
+                    (device_group, network_group, pool)
+                    for pool in pools
+                    if pattern.fullmatch(str(pool.Name))
+                )
+
+        names = [
+            f"{device_group.Name}/{network_group.Name}/{pool.Name}"
+            for device_group, network_group, pool in matches
+        ]
+        self.logger.info(
+            f"Partitioned BGP prefix target matches for {hostname}:{interface}: "
+            f"{names}"
+        )
+        if len(matches) != 1:
+            raise ValueError(
+                f"prefix_pool_regex={prefix_pool_regex!r} matched {len(matches)} "
+                f"pools on {hostname}:{interface}; expected exactly one: {names}"
+            )
+        return matches[0]
+
+    @staticmethod
+    def _partitioned_bgp_multivalue_values(
+        field: t.Any,
+        *,
+        label: str,
+    ) -> t.Tuple[t.Any, ...]:
+        raw_values = getattr(field, "Values", field)
+        if raw_values is None:
+            raise ValueError(f"{label} returned no values")
+        if isinstance(raw_values, (str, bytes)):
+            return (raw_values,)
+        try:
+            return tuple(raw_values)
+        except TypeError as error:
+            raise ValueError(f"{label} must be an iterable of values") from error
+
+    @staticmethod
+    def _read_partitioned_bgp_prefix_geometry(
+        target: t.Tuple[t.Any, t.Any, t.Any],
+    ) -> t.Dict[str, t.Any]:
+        device_group, network_group, pool = target
+        for obj in (device_group, network_group, pool):
+            refresh = getattr(obj, "refresh", None)
+            if callable(refresh):
+                refresh()
+        return {
+            "device_group_name": str(device_group.Name),
+            "device_group_multiplier": int(device_group.Multiplier),
+            "network_group_name": str(network_group.Name),
+            "network_group_multiplier": int(network_group.Multiplier or 1),
+            "prefix_pool_name": str(pool.Name),
+            "prefix_pool_count": int(pool.Count),
+            "prefixes_per_peer": int(pool.NumberOfAddresses),
+            "starts": tuple(
+                str(ipaddress.ip_address(str(value)))
+                for value in Ixia._partitioned_bgp_multivalue_values(
+                    pool.NetworkAddress,
+                    label=f"{pool.Name} NetworkAddress",
+                )
+            ),
+            "lasts": tuple(
+                str(ipaddress.ip_address(str(value)))
+                for value in Ixia._partitioned_bgp_multivalue_values(
+                    pool.LastNetworkAddress,
+                    label=f"{pool.Name} LastNetworkAddress",
+                )
+            ),
+            "prefix_lengths": tuple(
+                int(value)
+                for value in Ixia._partitioned_bgp_multivalue_values(
+                    pool.PrefixLength,
+                    label=f"{pool.Name} PrefixLength",
+                )
+            ),
+        }
+
+    @staticmethod
+    def _assert_partitioned_bgp_prefix_geometry(
+        observed: t.Mapping[str, t.Any],
+        *,
+        peer_count: int,
+        prefixes_per_peer: int,
+        starts: t.Tuple[str, ...],
+        lasts: t.Tuple[str, ...],
+        prefix_length: int,
+    ) -> None:
+        expected = {
+            "device_group_multiplier": peer_count,
+            "network_group_multiplier": 1,
+            "prefix_pool_count": peer_count,
+            "prefixes_per_peer": prefixes_per_peer,
+            "starts": starts,
+            "lasts": lasts,
+        }
+        mismatches: dict[str, tuple[object, object]] = {
+            key: (value, observed.get(key))
+            for key, value in expected.items()
+            if observed.get(key) != value
+        }
+        prefix_lengths = tuple(observed.get("prefix_lengths", ()))
+        if not prefix_lengths or any(value != prefix_length for value in prefix_lengths):
+            mismatches["prefix_lengths"] = (
+                (prefix_length,),
+                prefix_lengths,
+            )
+        if mismatches:
+            raise ValueError(
+                "partitioned BGP prefix geometry readback mismatch: "
+                f"{mismatches}"
+            )
+
+    @external_api
+    def configure_partitioned_bgp_prefixes_by_port(
+        self,
+        *,
+        hostname: str,
+        interface: str,
+        peer_count: int,
+        total_prefix_count: int,
+        prefix_pool_regex: str,
+        starting_prefix: str,
+        prefix_length: int,
+        restart_protocols: bool = True,
+    ) -> t.Dict[str, t.Any]:
+        """Install one disjoint, equal prefix partition per BGP peer.
+
+        Protocols are stopped before any non-on-the-fly property changes. The
+        device-group multiplier, per-peer prefix count, and per-peer start
+        stride are staged together, applied once, and verified through a fresh
+        lookup before protocols may restart.
+        """
+        (
+            prefixes_per_peer,
+            prefix_step,
+            expected_starts,
+            expected_lasts,
+        ) = self._partitioned_prefix_geometry(
+            starting_prefix=starting_prefix,
+            prefix_length=prefix_length,
+            peer_count=peer_count,
+            total_prefix_count=total_prefix_count,
+        )
+        ipv6 = ipaddress.ip_address(starting_prefix).version == 6
+
+        with self.mutation_transaction():
+            self.stop_protocols_and_wait()
+            target = self._find_partitioned_bgp_prefix_target(
+                hostname=hostname,
+                interface=interface,
+                prefix_pool_regex=prefix_pool_regex,
+                ipv6=ipv6,
+            )
+            device_group, network_group, pool = target
+            baseline = self._read_partitioned_bgp_prefix_geometry(target)
+            network_address_snapshot = IxiaPatternSnapshot.capture(
+                pool.NetworkAddress,
+                f"{pool.Name} NetworkAddress",
+            )
+            if int(network_group.Multiplier or 1) != 1:
+                raise ValueError(
+                    f"{network_group.Name} must use compact multiplier=1; got "
+                    f"{network_group.Multiplier}"
+                )
+
+            try:
+                device_group.Multiplier = peer_count
+                pool.NumberOfAddresses = prefixes_per_peer
+                pool.NetworkAddress.Increment(
+                    start_value=str(ipaddress.ip_address(starting_prefix)),
+                    step_value=prefix_step,
+                )
+                self.apply_changes()
+                fresh_target = self._find_partitioned_bgp_prefix_target(
+                    hostname=hostname,
+                    interface=interface,
+                    prefix_pool_regex=prefix_pool_regex,
+                    ipv6=ipv6,
+                )
+                observed = self._read_partitioned_bgp_prefix_geometry(fresh_target)
+                self._assert_partitioned_bgp_prefix_geometry(
+                    observed,
+                    peer_count=peer_count,
+                    prefixes_per_peer=prefixes_per_peer,
+                    starts=expected_starts,
+                    lasts=expected_lasts,
+                    prefix_length=prefix_length,
+                )
+            except Exception as error:
+                try:
+                    rollback_target = self._find_partitioned_bgp_prefix_target(
+                        hostname=hostname,
+                        interface=interface,
+                        prefix_pool_regex=prefix_pool_regex,
+                        ipv6=ipv6,
+                    )
+                    rollback_device_group, _rollback_network_group, rollback_pool = (
+                        rollback_target
+                    )
+                    rollback_device_group.Multiplier = baseline[
+                        "device_group_multiplier"
+                    ]
+                    rollback_pool.NumberOfAddresses = baseline["prefixes_per_peer"]
+                    network_address_snapshot.restore(rollback_pool.NetworkAddress)
+                    self.apply_changes()
+                    restored = self._read_partitioned_bgp_prefix_geometry(
+                        self._find_partitioned_bgp_prefix_target(
+                            hostname=hostname,
+                            interface=interface,
+                            prefix_pool_regex=prefix_pool_regex,
+                            ipv6=ipv6,
+                        )
+                    )
+                    if restored != baseline:
+                        raise ValueError(
+                            f"rollback readback mismatch: expected={baseline}, "
+                            f"observed={restored}"
+                        )
+                except Exception as rollback_error:
+                    error.add_note(
+                        "partitioned BGP prefix rollback also failed: "
+                        f"{type(rollback_error).__name__}: {rollback_error}"
+                    )
+                    raise error from rollback_error
+                raise
+
+            if restart_protocols:
+                self.start_protocols()
+
+        return {
+            **observed,
+            "total_prefix_count": total_prefix_count,
+            "prefix_step": prefix_step,
+        }
 
     @external_api
     def update_prefix_counts_by_port(

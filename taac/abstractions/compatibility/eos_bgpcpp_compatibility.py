@@ -1,4 +1,3 @@
-# pyre-unsafe
 """EOS/BGP++ spelling and command compatibility data."""
 
 import base64

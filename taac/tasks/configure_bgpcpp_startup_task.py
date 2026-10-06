@@ -1,6 +1,4 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
-# pyre-strict
-
 """
 TAAC Task for configuring bgpcpp startup flags on EOS devices.
 
@@ -25,6 +23,7 @@ Usage in test configs:
 """
 
 import os
+import shlex
 import typing as t
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
@@ -43,26 +42,59 @@ from taac.utils.driver_factory import async_get_device_driver
 
 # Path to bgpcpp startup script on EOS devices
 RUN_BGPCPP_SCRIPT_PATH = "/usr/sbin/run_bgpcpp.sh"
+_FLAG_VERIFIED_SENTINEL = "TAAC_BGPCPP_FLAG_VERIFIED"
 
 
 def _build_flag_sed_commands(flag_name: str, flag_value: str) -> t.List[str]:
     """
     Build the idempotent seds that add/update one bgpcpp gflag in
     run_bgpcpp.sh, in order:
-      1. drop any stale line mentioning the flag (idempotent cleanup),
-      2. ensure the --max_rss_size line ends with a line continuation,
-      3. insert --{flag}={value} right after the --max_rss_size line.
+      1. drop any stale assignment of the exact flag (idempotent cleanup),
+      2. insert --{flag}={value} immediately before --max_rss_size with its
+         own line continuation.
+
+    Keeping ``--max_rss_size`` as the final argument makes repeated calls
+    composable. Inserting after it made the first custom flag the final line;
+    a later call inserted another flag ahead of that line without a trailing
+    continuation, so the earlier flag was present in the script but never
+    passed to bgpd.
 
     Shared by the raw-SSH and managed-shell execution paths so the sed
     logic has a single source of truth.
     """
+    anchor_check = (
+        'test "$(sudo grep -c -E -- '
+        f"'^[[:space:]]*--max_rss_size=' {RUN_BGPCPP_SCRIPT_PATH})\" -eq 1"
+    )
     return [
-        f"bash sudo sed -i '/{flag_name}/d' {RUN_BGPCPP_SCRIPT_PATH}",
-        f"bash sudo sed -i '/--max_rss_size/s/[^\\\\]$/& \\\\/' "
-        f"{RUN_BGPCPP_SCRIPT_PATH}",
-        f"bash sudo sed -i '/--max_rss_size/a\\      "
-        f"--{flag_name}={flag_value}' {RUN_BGPCPP_SCRIPT_PATH}",
+        f"bash {anchor_check} && sudo sed -i "
+        f"'/^[[:space:]]*--{flag_name}=/d' {RUN_BGPCPP_SCRIPT_PATH}",
+        f"bash {anchor_check} && sudo sed -i '/--max_rss_size/i\\      "
+        f"--{flag_name}={flag_value} \\\\' {RUN_BGPCPP_SCRIPT_PATH}",
     ]
+
+
+def _build_flag_verify_command(flag_name: str, flag_value: str) -> str:
+    """Build a shell-safe, exact readback check for an inserted gflag."""
+    expected = f"--{flag_name}={flag_value} \\"
+    return (
+        f"bash grep -F -- {shlex.quote(expected)} "
+        f"{shlex.quote(RUN_BGPCPP_SCRIPT_PATH)} >/dev/null && "
+        f"printf %s {shlex.quote(_FLAG_VERIFIED_SENTINEL)}"
+    )
+
+
+def _assert_flag_verified(
+    flag_name: str,
+    flag_value: str,
+    output: object,
+) -> None:
+    if _FLAG_VERIFIED_SENTINEL not in str(output):
+        raise RuntimeError(
+            f"Failed to verify --{flag_name}={flag_value} in "
+            f"{RUN_BGPCPP_SCRIPT_PATH}; exactly one --max_rss_size insertion "
+            "anchor is required"
+        )
 
 
 class ConfigureBgpcppStartupTask(BaseTask):
@@ -111,20 +143,30 @@ class ConfigureBgpcppStartupTask(BaseTask):
         (async shell), for pipelines that run under a netcastle reservation
         rather than raw SSH (e.g. the perf-scaling sweep).
         """
+        if restart_bgp:
+            raise ValueError(
+                "restart_bgp=True is not supported in managed-shell mode: the "
+                "flags are written to run_bgpcpp.sh but bgpd is never restarted, "
+                "so they take no effect. Order this task before an existing Bgp "
+                "enable or add an explicit daemon-control task after it."
+            )
+
         driver = await async_get_device_driver(hostname)
         for flag_name, flag_value in flags.items():
             self.logger.info(f"  Setting --{flag_name}={flag_value}")
             for cmd in _build_flag_sed_commands(flag_name, flag_value):
                 await driver.async_run_cmd_on_shell(cmd)
-
-        # A BGP restart is needed for the new flags to take effect; over the
-        # managed shell the caller sequences that separately (the perf-scaling
-        # sweep restarts BGP per stage), so we only warn if asked to do it here.
-        if restart_bgp:
-            self.logger.warning(
-                "restart_bgp is not supported in managed-shell mode; the caller "
-                "must restart the BGP daemon separately."
-            )
+            try:
+                output = await driver.async_run_cmd_on_shell(
+                    _build_flag_verify_command(flag_name, flag_value)
+                )
+            except Exception as error:
+                raise RuntimeError(
+                    f"Failed to verify --{flag_name}={flag_value} in "
+                    f"{RUN_BGPCPP_SCRIPT_PATH}; exactly one --max_rss_size "
+                    "insertion anchor is required"
+                ) from error
+            _assert_flag_verified(flag_name, flag_value, output)
 
         self.logger.info("Successfully configured bgpcpp startup flags")
 
@@ -153,35 +195,35 @@ class ConfigureBgpcppStartupTask(BaseTask):
 
         for flag_name, flag_value in flags.items():
             self.logger.info(f"  Setting --{flag_name}={flag_value}")
-            remove_cmd, add_continuation_cmd, insert_cmd = _build_flag_sed_commands(
-                flag_name, flag_value
-            )
+            remove_cmd, insert_cmd = _build_flag_sed_commands(flag_name, flag_value)
 
             # Step 1: Remove any existing line with this flag (idempotent cleanup)
             success, output = ssh_helper.run_command(remove_cmd)
             if not success:
                 self.logger.warning(f"Failed to remove existing {flag_name}: {output}")
 
-            # Step 2: Add line continuation to the max_rss_size line
-            # (only if it doesn't already have one)
-            success, output = ssh_helper.run_command(add_continuation_cmd)
-            if not success:
-                self.logger.warning(f"Failed to add line continuation: {output}")
-
-            # Step 3: Insert the new flag after max_rss_size line
+            # Step 2: Insert the new, continued flag before max_rss_size.
             success, output = ssh_helper.run_command(insert_cmd)
             if not success:
-                raise Exception(f"Failed to add --{flag_name}={flag_value}: {output}")
+                raise RuntimeError(
+                    f"Failed to add --{flag_name}={flag_value}: {output}"
+                )
+
+            # sed exits successfully even when its insertion anchor is absent.
+            # Verify each exact flag immediately so a changed startup-script
+            # layout cannot silently skip the requested configuration.
+            success, output = ssh_helper.run_command(
+                _build_flag_verify_command(flag_name, flag_value)
+            )
+            if not success:
+                raise RuntimeError(
+                    f"Failed to verify --{flag_name}={flag_value} in "
+                    f"{RUN_BGPCPP_SCRIPT_PATH}; exactly one --max_rss_size "
+                    f"insertion anchor is required: {output}"
+                )
+            _assert_flag_verified(flag_name, flag_value, output)
 
         self.logger.info("Successfully configured bgpcpp startup flags")
-
-        # Verify the script
-        verify_cmd = f"bash grep -E '{'|'.join(flags.keys())}' {RUN_BGPCPP_SCRIPT_PATH}"
-        success, output = ssh_helper.run_command(verify_cmd)
-        if success:
-            self.logger.info(f"Verification:\n{output.strip()}")
-        else:
-            self.logger.warning("Could not verify script changes")
 
         if restart_bgp:
             self.logger.info("Restarting BGP daemon to apply new flags...")

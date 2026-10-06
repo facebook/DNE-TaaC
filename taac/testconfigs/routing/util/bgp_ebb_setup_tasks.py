@@ -37,6 +37,7 @@ from taac.task_definitions import (
     create_arista_create_file_from_config_task,
     create_arista_daemon_control_task,
     create_deploy_tls_certs_task,
+    create_eos_compiler_lifecycle_task,
     create_interface_ip_cleanup_task,
     create_interface_ip_configuration_task,
     create_run_commands_on_shell_task,
@@ -51,8 +52,11 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     EBB_BGPCPP_LOGGING_CONFIG,
     EBGP_PEER_COUNT_V4,
     EBGP_PEER_COUNT_V6,
+    FIBAGENT_BGP_CONF_CONFIGERATOR_PATH,
     FIBAGENT_BGP_CONF_DEPLOY_CMD,
+    FIBAGENT_BGP_CONF_DEVICE_PATH,
     FIBAGENT_CONF_DEPLOY_CMD,
+    FIBAGENT_CONF_DEVICE_PATH,
     IBGP_PEER_SCALE_PER_PLANE,
     IXIA_BGP_MON_IC_PARENT_NETWORK,
     IXIA_EBGP_IC_PARENT_NETWORK_V4,
@@ -77,6 +81,7 @@ from taac.testconfigs.routing.util.bgp_ebb_constants import (
     IXIA_IPV6_START_OFFSET,
     POST_ACL_RESTART_DAEMONS,
     REQUIRE_THRIFT_ACL_FILES_CMD,
+    THRIFT_ACL_FILES,
     UPDATE_GROUP_CONFIG,
     VERIFY_THRIFT_ACL_USER_IDS_CMD,
 )
@@ -84,12 +89,57 @@ from pyre_extensions import none_throws
 from taac.test_as_a_config.types import Task
 
 BGPCPP_CONFIG_PATH = "/mnt/flash/bgpcpp_config"
+BGPCPP_STARTUP_PATH = "/usr/sbin/run_bgpcpp.sh"
+# patternlint-disable-next-line no-dev-shm-usage
+BGP_RP_STATE_PATH = "/dev/shm/bgp_rp_state.txt"
+_STATE_GUARD_DAEMONS = (*BGPCPP_DAEMONS, "BgpTcpdump")
+_STATE_GUARD_DIRECTORIES = (
+    "/usr/facebook/thrift_acls",
+    "/mnt/fb/agent_configs",
+    "/mnt/fb/certs",
+)
+_STATE_GUARD_FILES = (
+    ("bgpcpp_config", BGPCPP_CONFIG_PATH),
+    ("bgp_rp_state", BGP_RP_STATE_PATH),
+    ("auth_kill_switch", "/usr/facebook/thrift_acls/auth_kill_switch_file"),
+    ("fib_agent_bgp_config", FIBAGENT_BGP_CONF_DEVICE_PATH),
+    ("fib_agent_config", FIBAGENT_CONF_DEVICE_PATH),
+    *((f"thrift_acl_{index}", path) for index, path in enumerate(THRIFT_ACL_FILES)),
+    ("tls_fib_agent", "/mnt/fb/certs/AristaFibAgent_server.pem"),
+    ("tls_bgpcpp", "/mnt/fb/certs/Bgpcpp_server.pem"),
+    ("tls_openr", "/mnt/fb/certs/fb-openr_server.pem"),
+    ("peer_input_base64", "/tmp/peers.b64"),
+    ("peer_input_json", "/tmp/experiment_peers.json"),
+)
+_STATE_GUARD_FIREWALL_CHAINS = (
+    {"family": "ipv4", "chain": "EOS_BGP"},
+    {"family": "ipv6", "chain": "EOS_BGP"},
+)
 
 
-def create_ebb_bgpcpp_logging_setup_task(device_name: str) -> Task:
+def _validate_fibagent_bgp_thrift_queue_timeout_ms(
+    queue_timeout_ms: int | None,
+) -> int | None:
+    if queue_timeout_ms is None:
+        return None
+    if (
+        isinstance(queue_timeout_ms, bool)
+        or not isinstance(queue_timeout_ms, int)
+        or not 0 < queue_timeout_ms <= 2_147_483_647
+    ):
+        raise ValueError(
+            "FibAgentBgp Thrift queue timeout must be a positive i32 value"
+        )
+    return queue_timeout_ms
+
+
+def create_ebb_bgpcpp_logging_setup_task(
+    device_name: str,
+    logging_config: str = EBB_BGPCPP_LOGGING_CONFIG,
+) -> Task:
     return create_bgpcpp_logging_setup_task(
         hostname=device_name,
-        logging_config=EBB_BGPCPP_LOGGING_CONFIG,
+        logging_config=logging_config,
     )
 
 
@@ -203,6 +253,7 @@ def _get_bgpcpp_deployment_tasks(
     bgp_asn: int,
     bgpcpp_configerator_path: str,
     openr_configerator_path: t.Optional[str] = None,
+    fibagent_bgp_thrift_queue_timeout_ms: int | None = None,
 ) -> t.List[Task]:
     """
     Deploy BGP++ configuration, certificates, and supporting agent configs.
@@ -215,6 +266,8 @@ def _get_bgpcpp_deployment_tasks(
         bgp_asn: BGP AS number to shutdown
         bgpcpp_configerator_path: Configerator path for bgpcpp_config
         openr_configerator_path: Configerator path for OpenR config
+        fibagent_bgp_thrift_queue_timeout_ms: Optional FibAgentBgp server-side
+            Thrift queue timeout override in milliseconds.
 
     Returns:
         List of Task objects for BGP++ deployment
@@ -286,15 +339,37 @@ def _get_bgpcpp_deployment_tasks(
         )
     )
 
-    # Deploy fib_agent_bgp.conf via embedded base64
-    tasks.append(
-        create_run_commands_on_shell_task(
-            hostname=device_name,
-            cmds=[FIBAGENT_BGP_CONF_DEPLOY_CMD],
-            set_outer_hostname=True,
-            ixia_needed=True,
-        )
+    queue_timeout_ms = _validate_fibagent_bgp_thrift_queue_timeout_ms(
+        fibagent_bgp_thrift_queue_timeout_ms
     )
+    if queue_timeout_ms is None:
+        # Preserve the established full-scale path when no characteristic
+        # override is requested. The SC6 override path below intentionally
+        # reads the canary-aware Configerator source at task runtime.
+        tasks.append(
+            create_run_commands_on_shell_task(
+                hostname=device_name,
+                cmds=[FIBAGENT_BGP_CONF_DEPLOY_CMD],
+                set_outer_hostname=True,
+                ixia_needed=True,
+            )
+        )
+    else:
+        tasks.append(
+            create_eos_compiler_lifecycle_task(
+                hostname=device_name,
+                action="routing_config_install",
+                source_path=FIBAGENT_BGP_CONF_CONFIGERATOR_PATH,
+                destination=FIBAGENT_BGP_CONF_DEVICE_PATH,
+                json_i32_overrides=[
+                    {
+                        "path": ["1", "rec", "36", "i32"],
+                        "value": queue_timeout_ms,
+                    }
+                ],
+                ixia_needed=True,
+            )
+        )
 
     # Deploy fib_agent.conf via embedded base64
     tasks.append(
@@ -1490,6 +1565,66 @@ def build_expected_peer_identity(
 
 
 # =============================================================================
+# Public API: exact device-state guard for destructive EBB setups
+# =============================================================================
+def get_ebb_device_state_guard_tasks(
+    *,
+    device_name: str,
+    operation_namespace: str,
+) -> tuple[t.List[Task], t.List[Task]]:
+    """Return setup snapshots and one dependency-aware exact-state restore.
+
+    Callers must prepend the setup tasks before any device mutation and append
+    the teardown task after workload cleanup. In addition to running config,
+    startup script, and daemon state, the guard covers every file, directory,
+    and firewall chain mutated by the no-OpenR update-packing setup recipe.
+    """
+    if not operation_namespace:
+        raise ValueError("operation_namespace must be nonempty")
+
+    component_operation_id = f"{operation_namespace}:routing_component"
+    guarded_files = [
+        (f"{operation_namespace}:{suffix}", destination)
+        for suffix, destination in _STATE_GUARD_FILES
+    ]
+    file_restores = [
+        {"operation_id": operation_id, "destination": destination}
+        for operation_id, destination in guarded_files
+    ]
+    setup_tasks = [
+        create_eos_compiler_lifecycle_task(
+            hostname=device_name,
+            action="routing_component_snapshot",
+            operation_id=component_operation_id,
+            startup_path=BGPCPP_STARTUP_PATH,
+            daemon_names=list(_STATE_GUARD_DAEMONS),
+            directory_paths=list(_STATE_GUARD_DIRECTORIES),
+            firewall_chains=list(_STATE_GUARD_FIREWALL_CHAINS),
+        ),
+        *(
+            create_eos_compiler_lifecycle_task(
+                hostname=device_name,
+                action="routing_config_snapshot",
+                operation_id=operation_id,
+                destination=destination,
+            )
+            for operation_id, destination in guarded_files
+        ),
+    ]
+    teardown_tasks = [
+        create_eos_compiler_lifecycle_task(
+            hostname=device_name,
+            action="routing_component_restore",
+            operation_id=component_operation_id,
+            startup_path=BGPCPP_STARTUP_PATH,
+            file_restores=file_restores,
+            force_restart_daemons=["Bgp"],
+        )
+    ]
+    return setup_tasks, teardown_tasks
+
+
+# =============================================================================
 # Public API: Update packing setup (used by bag012 update packing test)
 # =============================================================================
 def get_update_packing_setup_tasks(  # noqa: C901
@@ -1519,6 +1654,8 @@ def get_update_packing_setup_tasks(  # noqa: C901
     v4_peer_start_offset: int = 16,
     bgpcpp_peers: t.Sequence[t.Mapping[str, t.Any]] | None = None,
     interface_ip_tasks: t.Sequence[Task] | None = None,
+    bgpcpp_logging_config: str = EBB_BGPCPP_LOGGING_CONFIG,
+    fibagent_bgp_thrift_queue_timeout_ms: int | None = None,
 ) -> t.List[Task]:
     """
     Generate setup tasks for the BGP UPDATE packing validation conveyor test.
@@ -1540,6 +1677,10 @@ def get_update_packing_setup_tasks(  # noqa: C901
             that does bring up v4 sessions (e.g. bounded ECMP) must pass
             ``v4_peer_start_offset=IXIA_IPV4_START_OFFSET`` so the generated v4
             peers match the device's v4 secondary IPs and the IXIA-side layout.
+        bgpcpp_logging_config: BGP++ logging configuration applied before the
+            daemon starts. Defaults to the established EBB DBG5 setting.
+        fibagent_bgp_thrift_queue_timeout_ms: Optional server-side queue timeout
+            applied to FibAgentBgp before the daemon starts.
 
     Returns:
         List of setup Task objects.
@@ -1600,12 +1741,18 @@ def get_update_packing_setup_tasks(  # noqa: C901
             bgp_asn=bgp_asn,
             bgpcpp_configerator_path=bgpcpp_configerator_path,
             openr_configerator_path=openr_configerator_path,
+            fibagent_bgp_thrift_queue_timeout_ms=(fibagent_bgp_thrift_queue_timeout_ms),
         )
     )
 
     # Apply the standard TAAC EBB logging level before the control-plane Bgp
     # restart so the newly started process uses it for the full test.
-    setup_tasks.append(create_ebb_bgpcpp_logging_setup_task(device_name))
+    setup_tasks.append(
+        create_ebb_bgpcpp_logging_setup_task(
+            device_name,
+            logging_config=bgpcpp_logging_config,
+        )
+    )
     setup_tasks.extend(
         get_bgpcpp_startup_tasks_for_openr_mode(
             device_name,
