@@ -467,7 +467,7 @@ class FbossSwitch(AbstractSwitch):
                     )
                     dump_transceiver_i2c_log_list.append(dump_transceiver_i2c_log)
                     self.logger.info(f"{dump_transceiver_i2c_log=}")
-                return dump_transceiver_i2c_log
+                return dump_transceiver_i2c_log_list
         except Exception as ex:
             raise QsfpThriftException(
                 f"Error occured during a thrift call for dumpTransceiverI2cLog {ex}"
@@ -509,8 +509,8 @@ class FbossSwitch(AbstractSwitch):
         Reloads the agent config and ensure the wedge_agent is stable and
         converged (CONFIGURED state)
         """
-        with self._get_fboss_agent_client() as agent_client:
-            agent_client.reloadConfig()
+        async with self.async_agent_client as agent_client:
+            await agent_client.reloadConfig()
             self.logger.info(
                 f"Successfully reloaded the agent config on {self.hostname} "
             )
@@ -524,8 +524,8 @@ class FbossSwitch(AbstractSwitch):
         to agent warmboot
         """
         try:
-            with self._get_fboss_agent_client() as agent_client:
-                agent_client.reloadConfig()
+            async with self.async_agent_client as agent_client:
+                await agent_client.reloadConfig()
                 self.logger.info(
                     f"Successfully reloaded the agent config on {self.hostname} "
                 )
@@ -1265,7 +1265,11 @@ class FbossSwitch(AbstractSwitch):
 
         return (v4_addr, v6_addr)
 
-    @async_retryable(retries=3, sleep_time=10, exceptions=(ThriftError,))
+    @async_retryable(
+        retries=3,
+        sleep_time=10,
+        exceptions=(ThriftError, ThriftPythonError),
+    )
     async def get_specific_interface_info(self, interface: str) -> PortInfoThrift:
         """
         Provides portInfo details for a particular interface on the host.
@@ -1278,6 +1282,8 @@ class FbossSwitch(AbstractSwitch):
         try:
             async with self.async_agent_client as client:
                 return await client.getPortInfo(port_id)
+        except (ThriftError, ThriftPythonError):
+            raise
         except Exception as ex:
             raise Exception(
                 f"Thrift error on {self.hostname} calling getPortInfo: {ex}"
@@ -1756,7 +1762,7 @@ class FbossSwitch(AbstractSwitch):
             bgp_sessions = await client.getBgpSessions()
             for session in bgp_sessions:
                 await client.startSession(peer=session.peer_addr)
-            time.sleep(1)
+            await asyncio.sleep(1)
             return (
                 True
                 if await self.async_count_established_bgp_sessions() != 0
@@ -3394,7 +3400,7 @@ class FbossSwitch(AbstractSwitch):
         if create_parent_dir:
             parent = os.path.dirname(remote_path)
             if parent:
-                await self.async_run_cmd_on_shell(f"mkdir -p {parent}")
+                await self.async_run_cmd_on_shell(f"mkdir -p {shlex.quote(parent)}")
 
         self.logger.info(
             f"Writing {len(contents)} bytes to {self.hostname}:{remote_path}"
@@ -3413,7 +3419,7 @@ class FbossSwitch(AbstractSwitch):
         if create_parent_dir:
             parent = os.path.dirname(remote_path)
             if parent:
-                await self.async_run_cmd_on_shell(f"mkdir -p {parent}")
+                await self.async_run_cmd_on_shell(f"mkdir -p {shlex.quote(parent)}")
 
         self.logger.info(
             f"Copying {local_path} to {self.hostname}:{remote_path}"
@@ -4095,7 +4101,7 @@ class FbossSwitch(AbstractSwitch):
         )
         await self.async_create_dir_if_not_exists(file_path)
 
-        cmd = f"""echo '{content}' > {file_location}"""
+        cmd = f"printf %s {shlex.quote(content)} > {shlex.quote(file_location)}"
         await self.async_run_cmd_on_shell(cmd)
 
     @async_retryable(
@@ -4113,7 +4119,7 @@ class FbossSwitch(AbstractSwitch):
             Returns: None if the file exists else raises SshCommandError exceptiion
         """
         try:
-            cmd = f"cat {file_location}"
+            cmd = f"cat -- {shlex.quote(file_location)}"
             output: str = await self.async_run_cmd_on_shell(cmd)
             self.logger.debug(
                 f"Verified if file is present at {file_location} on {self.hostname}"
