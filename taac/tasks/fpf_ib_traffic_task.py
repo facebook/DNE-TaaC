@@ -390,12 +390,14 @@ async def async_ssh_run(
 
     Two modes (mirrors the FbossSwitch driver, but with the correct non-agent
     fallback for GPU/RTP hosts):
-      * ``TAAC_SSH_VIA_LAB_SSH=1`` -> route through the lab-ssh daemon (CoreSSH,
-        runs outside the agent sandbox). Required for AI-agent runs, where the
-        sush2 gate blocks the in-process/CLI ssh below.
-      * unset -> the ``ssh`` CLI (picks up the caller's Meta SSH-CA cert; the
-        asyncssh keyfile path the driver falls back to does NOT carry that cert
-        and fails as root on these GPU hosts — see the SSH_USER note above).
+      * Agent invocation with a live lab-ssh socket, or explicit
+        ``TAAC_SSH_VIA_LAB_SSH=1`` -> route through the lab-ssh daemon
+        (CoreSSH, runs outside the agent sandbox), where the sush2 gate cannot
+        block it.
+      * Otherwise -> the ``ssh`` CLI (picks up the caller's Meta SSH-CA cert;
+        the asyncssh keyfile path the driver falls back to does NOT carry that
+        cert and fails as root on these GPU hosts — see the SSH_USER note
+        above).
 
     ``preserve_lab_ssh_hostname`` is reserved for allowlisted lab-ssh service
     targets whose short hostname must not be rewritten. The CLI fallback keeps
