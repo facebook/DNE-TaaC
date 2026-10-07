@@ -2,7 +2,6 @@
 # pyre-unsafe
 import json
 import logging
-import os
 import typing as t
 
 from taac.constants import OS_TO_DEVICE_OS_TYPE_MAP
@@ -11,11 +10,12 @@ from taac.utils.oss_taac_lib_utils import (
     async_memoize_timed,
     ConsoleFileLogger,
     get_root_logger,
+    TAAC_OSS,
+    TAAC_OSS_META_INTERNAL,
 )
 from taac.test_as_a_config import types as taac_types
 
 LOGGER: ConsoleFileLogger = get_root_logger()
-TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
 # Escape hatch for validating the OSS stack from INSIDE Meta.
 #
@@ -31,12 +31,10 @@ TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 #
 # This mode validates the OSS runner and surrounding stack, not the exported
 # device transport. Validate that transport against non-Meta hardware.
-TAAC_OSS_META_INTERNAL = os.environ.get("TAAC_OSS_META_INTERNAL", "").lower() in (
-    "1",
-    "true",
-    "yes",
-)
-
+#
+# TAAC_OSS and TAAC_OSS_META_INTERNAL are parsed once, in oss_taac_lib_utils,
+# so the driver's agent restart gate (oss_agent_restart_paths_enabled) reads
+# the same values; the driver cannot import them from here without a cycle.
 if TAAC_OSS and TAAC_OSS_META_INTERNAL:
     LOGGER.warning(
         "TAAC_OSS_META_INTERNAL=1: running the OSS stack with the exported "

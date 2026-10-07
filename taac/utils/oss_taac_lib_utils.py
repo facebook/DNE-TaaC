@@ -60,6 +60,25 @@ FB_FQDN_FACEBOOK_SUFFIX = ".facebook.com"
 # has been imported has no effect on the value below.
 TAAC_OSS: bool = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
+# The containerized OSS runner against Meta lab hardware. Also IMPORT time.
+TAAC_OSS_META_INTERNAL: bool = os.environ.get("TAAC_OSS_META_INTERNAL", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+
+def oss_agent_restart_paths_enabled() -> bool:
+    """Whether agent restart and cold/warm boot take the OSS-only paths.
+
+    Those paths (split-agent orchestration, per-agent cold-boot flags, flag
+    clearing) were written against OSS FBOSS images. Meta lab devices,
+    including under ``TAAC_OSS_META_INTERNAL=1``, keep the internal paths: a
+    ``systemctl restart`` of the agent unit and the ``cold_boot_once_0`` flag.
+    """
+    return TAAC_OSS and not TAAC_OSS_META_INTERNAL
+
+
 # =============================================================================
 # none_throws - from libfb.py.pyre
 # =============================================================================

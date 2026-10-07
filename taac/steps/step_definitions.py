@@ -82,6 +82,7 @@ else:
 
 from taac.constants import (
     FAILED_HC_STATUSES,
+    FBOSS_COLD_BOOT_ONCE_FILE,
     OpenRRouteAction,
     TAAC_HEALTH_CHECK_SCUBA_TABLE,
     TestCaseFailure,
@@ -174,6 +175,7 @@ from taac.utils.json_thrift_utils import (
 from taac.utils.oss_taac_lib_utils import (
     async_retryable,
     none_throws,
+    oss_agent_restart_paths_enabled,
 )
 from taac.utils.system_stress_utils import (
     async_get_memory_current_pct,
@@ -11004,14 +11006,19 @@ class ServiceInterruptionStep(StepBase[taac_types.ServiceInterruptionInput]):
         service = self.service_factory(input.name)
         agents = list(input.agents) if input.agents is not None else None
 
-        # Only the agent reads cold_boot_once_<idx>, so interrupting qsfp_service
-        # or fsdb has no business touching it. Clear before starting the agent so
-        # it is only ever as cold as this step asked for -- the flag is one-shot
-        # but the agent does not reliably delete it once honoured.
-        if self.is_fboss and input.name in _COLD_BOOT_FLAG_SERVICES:
-            await self.driver.async_remove_cold_boot_file()
-            if input.create_cold_boot_file:
-                await self.driver.async_create_cold_boot_file(service)
+        if self.is_fboss and oss_agent_restart_paths_enabled():
+            # Only the agent reads its cold-boot flags, so interrupting
+            # qsfp_service or fsdb has no business touching them. Clear before
+            # starting the agent so it is only ever as cold as this step asked
+            # for -- the sw agent never deletes its flag once honoured.
+            if input.name in _COLD_BOOT_FLAG_SERVICES:
+                await self.driver.async_remove_cold_boot_file()
+                if input.create_cold_boot_file:
+                    await self.driver.async_create_cold_boot_file(service)
+        elif self.is_fboss and input.create_cold_boot_file:
+            await self.driver.async_run_cmd_on_shell(
+                f"touch {FBOSS_COLD_BOOT_ONCE_FILE}"
+            )
         match input.trigger:
             case taac_types.ServiceInterruptionTrigger.SYSTEMCTL_STOP:
                 if params.get("intentional_stop", False):

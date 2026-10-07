@@ -217,6 +217,7 @@ from taac.utils.oss_taac_lib_utils import (
     async_retryable,
     await_sync,
     none_throws,
+    oss_agent_restart_paths_enabled,
     retryable,
     to_fb_fqdn,
     to_fb_uqdn,
@@ -2089,17 +2090,25 @@ class FbossSwitch(AbstractSwitch):
     ) -> None:
         """Force the next agent start to cold boot (see the paired remove).
 
-        A split-agent DUT needs a flag per agent: no OSS agent reads the
-        monolithic ``cold_boot_once_<idx>``, so writing only that leaves the
-        "cold" boot warm. See FBOSS_COLD_BOOT_ONCE_FILE in taac/constants.py.
+        Outside pure OSS (see ``oss_agent_restart_paths_enabled``) this only
+        writes ``cold_boot_once_0``, which the Meta-internal agent wrapper
+        honours on monolithic and split-agent DUTs alike.
+
+        In pure OSS a split-agent DUT needs a flag per agent: no OSS agent
+        reads the monolithic ``cold_boot_once_<idx>``, so writing only that
+        leaves the "cold" boot warm. See FBOSS_COLD_BOOT_ONCE_FILE in
+        taac/constants.py.
 
         Args:
-            service: A single split agent (``fboss_sw_agent`` /
+            service: Pure OSS only. A single split agent (``fboss_sw_agent`` /
                 ``fboss_hw_agent@<N>``) gets only its own flag: one written for
                 an agent that is not restarted lingers and cold boots its next,
                 unrelated, warm restart. Anything else -- ``None`` or
                 ``Service.AGENT`` -- gets the flag for every agent.
         """
+        if not oss_agent_restart_paths_enabled():
+            await self.async_run_cmd_on_shell(f"touch {FBOSS_COLD_BOOT_ONCE_FILE}")
+            return
         flag_files = await self._async_cold_boot_flag_files(service)
         await self.async_run_cmd_on_shell(f"touch {' '.join(flag_files)}")
 
@@ -3601,26 +3610,24 @@ class FbossSwitch(AbstractSwitch):
         Restart service and validate restart process by comparing service uptime
         before and after restart
 
-        OSS-compatible: on a multi-switch (split-agent) DUT the monolithic
-        ``wedge_agent`` unit does not exist, so a ``Service.AGENT`` restart is
-        fanned out to the split agents (``fboss_sw_agent`` + ``fboss_hw_agent@0``)
-        in warmboot-safe order -- mirroring the ``Service.AGENT`` handling in
-        ``async_crash_service`` (which maps the same concept to
-        ``pkill -9 -f fboss_``). A plain ``systemctl restart wedge_agent`` would
-        otherwise fail with "unit not found" on such DUTs.
+        Every service, ``wedge_agent`` and the split agent units included, is
+        restarted with ``systemctl restart <unit>``. The one exception is a
+        ``Service.AGENT`` restart in pure OSS (see
+        ``oss_agent_restart_paths_enabled``): OSS images have no monolithic
+        ``wedge_agent`` unit, so it is always fanned out to the split agents
+        (``fboss_sw_agent`` + ``fboss_hw_agent@<N>``) in warmboot-safe order.
 
         Args:
             service: service to restart
         """
-        try:
-            is_multi_switch = await self.async_is_multi_switch()
-        except NotImplementedError:
-            is_multi_switch = False
-
         if (
-            is_multi_switch
+            oss_agent_restart_paths_enabled()
             and service.value == FbossSystemctlServiceName.AGENT.value
         ):
+            # Not gated on async_is_multi_switch(): it returns False whenever
+            # the agent is unreachable, which would fall through to a
+            # `systemctl restart wedge_agent` that cannot succeed here.
+            #
             # Deliberately not wrapped in @async_retryable: a warm boot that
             # loses its state (async_assert_hw_agent_stable raising) must
             # surface as a failure. Retrying would restart from an already

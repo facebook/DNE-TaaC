@@ -8,7 +8,8 @@
 Which files those are depends on the DUT: the monolithic wedge_agent wrapper
 reads ``cold_boot_once_<idx>``, while the split agents each read their own
 flag and ignore that one entirely. See FBOSS_COLD_BOOT_ONCE_FILE in
-``taac/constants.py``.
+``taac/constants.py``. The per-agent flags are pure-OSS only; every other run
+keeps the internal ``cold_boot_once_0`` flag.
 """
 
 import unittest
@@ -25,9 +26,19 @@ from taac.constants import (
 from taac.driver.driver_constants import FbossSystemctlServiceName
 from taac.driver.fboss_switch import FbossSwitch
 
+_FBOSS_SWITCH_MODULE = "neteng.test_infra.dne.taac.driver.fboss_switch"
+
 
 class ColdBootFileTest(unittest.IsolatedAsyncioTestCase):
+    """Pure OSS (``TAAC_OSS=1`` without ``TAAC_OSS_META_INTERNAL``)."""
+
     def setUp(self) -> None:
+        oss_patcher = patch(
+            f"{_FBOSS_SWITCH_MODULE}.oss_agent_restart_paths_enabled",
+            return_value=True,
+        )
+        oss_patcher.start()
+        self.addCleanup(oss_patcher.stop)
         self.switch = FbossSwitch("dut1", logger=MagicMock())
         # Held separately from the attribute, which is typed as a real method:
         # the mock's await assertions are only reachable through this handle.
@@ -148,6 +159,57 @@ class ColdBootFileTest(unittest.IsolatedAsyncioTestCase):
                 f"{FBOSS_WARM_BOOT_DIR}/hw_cold_boot_once_1",
             ],
         )
+
+
+class InternalColdBootFileTest(unittest.IsolatedAsyncioTestCase):
+    """Internal and TAAC_OSS_META_INTERNAL runs keep the pre-split behaviour."""
+
+    def setUp(self) -> None:
+        oss_patcher = patch(
+            f"{_FBOSS_SWITCH_MODULE}.oss_agent_restart_paths_enabled",
+            return_value=False,
+        )
+        oss_patcher.start()
+        self.addCleanup(oss_patcher.stop)
+        self.switch = FbossSwitch("dut1", logger=MagicMock())
+        self.run_cmd = AsyncMock()
+        self.switch.async_run_cmd_on_shell = self.run_cmd
+        # The internal path never asks the agent anything.
+        self.switch.async_is_multi_switch = AsyncMock(
+            side_effect=AssertionError("must not probe multi-switch")
+        )
+        self.switch.async_get_hw_agent_switch_indices = AsyncMock(
+            side_effect=AssertionError("must not enumerate NPUs")
+        )
+
+    async def test_create_touches_only_the_internal_flag(self) -> None:
+        await self.switch.async_create_cold_boot_file()
+        self.run_cmd.assert_awaited_once_with(
+            "touch /dev/shm/fboss/warm_boot/cold_boot_once_0"
+        )
+
+    async def test_create_ignores_the_service_argument(self) -> None:
+        for service in (
+            FbossSystemctlServiceName.AGENT,
+            FbossSystemctlServiceName.FBOSS_SW_AGENT,
+            FbossSystemctlServiceName.FBOSS_HW_AGENT_0,
+            FbossSystemctlServiceName.FBOSS_HW_AGENT_1,
+        ):
+            with self.subTest(service=service):
+                self.run_cmd.reset_mock()
+                await self.switch.async_create_cold_boot_file(service)
+                self.run_cmd.assert_awaited_once_with(
+                    f"touch {FBOSS_COLD_BOOT_ONCE_FILE}"
+                )
+
+    async def test_create_never_writes_a_split_agent_flag(self) -> None:
+        await self.switch.async_create_cold_boot_file(FbossSystemctlServiceName.AGENT)
+        await_args = self.run_cmd.await_args
+        if await_args is None:
+            raise AssertionError("async_run_cmd_on_shell was never awaited")
+        cmd = await_args.args[0]
+        self.assertNotIn("sw_cold_boot_once", cmd)
+        self.assertNotIn("hw_cold_boot_once", cmd)
 
 
 def _async_cm(client: object) -> MagicMock:
