@@ -9,8 +9,9 @@ without eagerly constructing unrelated qualification cases:
         --circuit-info-csv examples/topology/rbb_circuit_info.csv \\
         --dut "$TAAC_RBB_R1_HOST" "$TAAC_RBB_R2_HOST"
 
-Bind the lab (hostnames, IXIA chassis) via TAAC_RBB_* and SSH creds via
-the OSS runner's ``--secrets-file`` JSON input — nothing is hardcoded.
+Bind the lab (hostnames, IXIA chassis) via ``TAAC_RBB_*``. Supply credentials
+through the OSS runner's optional ``--secrets-file`` JSON input or the existing
+``TAAC_SSH_*`` / ``TAAC_IXIA_*`` environment variables — nothing is hardcoded.
 """
 
 from taac.testconfigs.routing.factories.qual_rbb.rbb_srv6_test_config import (

@@ -50,6 +50,7 @@ class TestRbbPreflight(TestCase):
         with_traffic: bool = False,
         setup_duts: bool = False,
         setup_dut_edges: bool = False,
+        environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
         command = [
             sys.executable,
@@ -64,14 +65,26 @@ class TestRbbPreflight(TestCase):
             command.append("--setup-duts")
         if setup_dut_edges:
             command.append("--setup-dut-edges")
+        run_environment = self._clean_environment()
+        run_environment.update(environment or {})
         return subprocess.run(
             command,
             cwd=self.repo_root,
-            env=self._clean_environment(),
+            env=run_environment,
             text=True,
             capture_output=True,
             check=False,
         )
+
+    def _profile_environment(self) -> dict[str, str]:
+        values = {}
+        for line in (self.config_dir / "rbb.env").read_text(
+            encoding="utf-8"
+        ).splitlines():
+            if line and not line.startswith("#"):
+                name, value = line.split("=", 1)
+                values[name] = value
+        return values
 
     def _write_valid_config(
         self, *, ixia_credentials: bool = True, dut_username: str = "dut-user"
@@ -181,6 +194,100 @@ class TestRbbPreflight(TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("live IXIA traffic", result.stdout)
         self.assertNotIn("ixia-secret", result.stdout + result.stderr)
+
+    def test_check_accepts_environment_without_rbb_env(self) -> None:
+        self._write_valid_config()
+        environment = self._profile_environment()
+        (self.config_dir / "rbb.env").unlink()
+
+        result = self._run_check(with_traffic=True, environment=environment)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("live IXIA traffic", result.stdout)
+
+    def test_check_accepts_environment_without_secrets_file(self) -> None:
+        self._write_valid_config()
+        (self.config_dir / "secrets.json").unlink()
+        environment = {
+            "TAAC_SSH_USER": "dut-user",
+            "TAAC_SSH_PASSWORD": "dut-secret",
+            "TAAC_IXIA_USERNAME": "ixia-user",
+            "TAAC_IXIA_PASSWORD": "ixia-secret",
+        }
+
+        result = self._run_check(with_traffic=True, environment=environment)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("dut-secret", result.stdout + result.stderr)
+        self.assertNotIn("ixia-secret", result.stdout + result.stderr)
+
+    def test_check_accepts_environment_without_optional_files(self) -> None:
+        self._write_valid_config()
+        environment = self._profile_environment()
+        environment.update(
+            {
+                "TAAC_SSH_USER": "dut-user",
+                "TAAC_SSH_PASSWORD": "dut-secret",
+                "TAAC_IXIA_USERNAME": "ixia-user",
+                "TAAC_IXIA_PASSWORD": "ixia-secret",
+            }
+        )
+        (self.config_dir / "rbb.env").unlink()
+        (self.config_dir / "secrets.json").unlink()
+
+        result = self._run_check(with_traffic=True, environment=environment)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Configuration check passed", result.stdout)
+
+    def test_wrapper_allows_optional_files_to_be_absent(self) -> None:
+        self._write_valid_config()
+        environment = self._clean_environment()
+        environment.update(self._profile_environment())
+        environment.update(
+            {
+                "TAAC_SSH_USER": "dut-user",
+                "TAAC_SSH_PASSWORD": "dut-secret",
+                "TAAC_IXIA_USERNAME": "ixia-user",
+                "TAAC_IXIA_PASSWORD": "ixia-secret",
+            }
+        )
+        (self.config_dir / "rbb.env").unlink()
+        (self.config_dir / "secrets.json").unlink()
+
+        fake_bin = Path(self.temp_dir.name) / "bin"
+        fake_bin.mkdir()
+        docker_args = Path(self.temp_dir.name) / "docker-args"
+        fake_docker = fake_bin / "docker"
+        fake_docker.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then exit 0; fi\n"
+            "printf '%s\\n' \"$@\" > \"$TAAC_TEST_DOCKER_ARGS\"\n",
+            encoding="utf-8",
+        )
+        fake_docker.chmod(0o755)
+        environment["PATH"] = f"{fake_bin}:{environment.get('PATH', '')}"
+        environment["TAAC_TEST_DOCKER_ARGS"] = str(docker_args)
+
+        result = subprocess.run(
+            [
+                str(self.runner),
+                "--config-dir",
+                str(self.config_dir),
+                "--check",
+                "--with-traffic",
+            ],
+            cwd=self.repo_root,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        forwarded_args = docker_args.read_text(encoding="utf-8").splitlines()
+        self.assertNotIn("--env-file", forwarded_args)
+        self.assertIn(f"{self.config_dir}:/workspace/.taac:ro", forwarded_args)
 
     def test_check_accepts_distinct_per_host_dut_credentials(self) -> None:
         self._write_valid_config()

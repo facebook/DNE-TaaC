@@ -70,10 +70,12 @@ lab details from accidental commits or image builds:
 ```
 
 The command creates `.taac/` as mode `700`, creates `secrets.json` as mode
-`600`, and never replaces an existing file. Edit `device_info.csv`,
-`circuit_info.csv`, and `rbb.env` for the lab. When both DUTs use the same SSH
-credentials, fill `secrets.json` with the shared DUT credentials and the
-IxNetwork API-server credentials:
+`600`, and never replaces an existing file. `device_info.csv` and
+`circuit_info.csv` are required. `rbb.env` and `secrets.json` are optional
+convenience inputs: keep and edit them for local runs, or remove them and export
+the equivalent `TAAC_*` settings from your environment or secret manager.
+When both DUTs use the same SSH credentials, `secrets.json` can contain the
+shared DUT credentials and the IxNetwork API-server credentials:
 
 ```json
 {
@@ -112,12 +114,26 @@ Host entries may override only one field and inherit the other from the shared
 `dut` entry. Explicit `TAAC_SSH_*` environment variables override both shared
 and per-host file values for a deliberate one-run override.
 
-The runner accepts this file through `--secrets-file`, validates its schema and
-`chmod 600` permissions, mounts the local input directory read-only in the
-container, and never logs secret values. Existing `TAAC_SSH_*` or `TAAC_IXIA_*`
-environment variables take precedence as deliberate one-run overrides. The
-committed JSON file is an empty template only; never put a real credential
-under `examples/`.
+When present, the runner accepts this file through `--secrets-file`, validates
+its schema and `chmod 600` permissions, mounts the local input directory
+read-only in the container, and never logs secret values. Existing
+`TAAC_SSH_*` or `TAAC_IXIA_*` environment variables take precedence as
+deliberate one-run overrides. When the file is absent, those environment
+variables provide the credentials directly. The committed JSON file is an
+empty template only; never put a real credential under `examples/`.
+
+For an environment-only run, export the non-secret profile values plus the
+credentials before invoking the same wrapper. The Docker helper automatically
+forwards exported `TAAC_*` variables into the container:
+
+```bash
+export TAAC_RBB_R1_HOST=<r1-host>
+export TAAC_RBB_R2_HOST=<r2-host>
+export TAAC_SSH_USER=<dut-user>
+export TAAC_SSH_PASSWORD=<dut-password>
+# Export the remaining TAAC_RBB_* and TAAC_IXIA_* values required by your mode.
+./scripts/run-rbb-srv6.sh --check --with-traffic
+```
 
 To keep deployment data outside the checkout, initialize and use an explicit
 external directory. The runner resolves it to an absolute path and mounts it
@@ -331,8 +347,9 @@ BGPD-owned route; it simply avoids reserving or configuring IXIA.
 ### With live IXIA traffic
 
 Set `TAAC_RBB_IXIA_CHASSIS` (the physical chassis IP) and
-`TAAC_IXIA_API_SERVER` (the IxNetwork controller) in `.taac/rbb.env`, fill the
-IXIA credentials in `.taac/secrets.json`, and enable traffic explicitly:
+`TAAC_IXIA_API_SERVER` (the IxNetwork controller) in `.taac/rbb.env` or the
+environment. Supply IXIA credentials through `.taac/secrets.json` or exported
+`TAAC_IXIA_USERNAME` / `TAAC_IXIA_PASSWORD`, and enable traffic explicitly:
 
 ```bash
 ./scripts/run-rbb-srv6.sh --check --with-traffic
@@ -428,7 +445,7 @@ ordinary IPv6 forwarding.
 
 | Symptom | Fix |
 | --- | --- |
-| Local configuration files are missing | Run `./scripts/run-rbb-srv6.sh --init`; it will not replace files that already exist. |
+| Required topology files are missing | Run `./scripts/run-rbb-srv6.sh --init`; it will not replace files that already exist. `rbb.env` and `secrets.json` may be omitted when their values are supplied as `TAAC_*` environment variables. |
 | Secrets file permissions are rejected | Run `chmod 600 .taac/secrets.json` (or use the equivalent file under `--config-dir`). |
 | Live mode reports placeholder wiring | Replace the placeholder rows in the selected `circuit_info.csv`; traffic requires adopter-supplied wiring. |
 | More than one IXIA edge is declared | Select one with `TAAC_RBB_R1_IXIA_INTERFACE` / `TAAC_RBB_R2_IXIA_INTERFACE`. |
