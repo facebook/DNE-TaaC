@@ -300,8 +300,10 @@ def _build_archived_log_read_cmd(
             payload += f" | grep -F -- {shlex.quote(matching_literal)} || true"
         return _wrap_in_privileged_shell(payload)
 
-    start_key = shlex.quote(time.strftime("%m%d %H:%M:%S", time.localtime(start_time)))
-    end_key = shlex.quote(time.strftime("%m%d %H:%M:%S", time.localtime(end_time)))
+    # Device logs are stamped in UTC, so the device-side keys must be UTC too;
+    # local-time keys select the wrong window and the Python filter then drops it.
+    start_key = shlex.quote(time.strftime("%m%d %H:%M:%S", time.gmtime(start_time)))
+    end_key = shlex.quote(time.strftime("%m%d %H:%M:%S", time.gmtime(end_time)))
     awk_program = (
         "BEGIN { wraps = start > end } "
         "{ is_timestamp = length($0) >= 15 "

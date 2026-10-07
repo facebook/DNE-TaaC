@@ -73,7 +73,7 @@ def find_resource_accountant_rejections(
     end_time: int | None = None,
 ) -> list[str]:
     """Return canonical ResourceAccountant rejection lines in the time window."""
-    current_year = time.localtime().tm_year
+    current_year = time.gmtime().tm_year
     matching_lines = []
     for line in log_content.splitlines():
         if not _RESOURCE_ACCOUNTANT_REJECTION_RE.search(line):

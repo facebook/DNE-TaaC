@@ -3,8 +3,8 @@
 # pyre-unsafe
 """Unit tests for LogParsingHealthCheck (FBOSS `_run` path)."""
 
+import calendar
 import json
-import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -116,7 +116,7 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("matching criteria", result.message)
 
     async def test_resource_accountant_mode_accepts_canonical_in_window_event(self):
-        start_time = int(time.mktime((2026, 9, 20, 10, 0, 0, 0, 0, -1)))
+        start_time = calendar.timegm((2026, 9, 20, 10, 0, 0, 0, 0, 0))
         content = (
             "E0920 10:01:02.123456 1234 ResourceAccountant.cpp:1026] "
             "Total NDP entries in new switchState: 4101 exceeds the limit: 4100 "
@@ -147,7 +147,7 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         self.health_check.driver.async_read_file.assert_not_awaited()
 
     def test_resource_accountant_accepts_netos_syslog_prefixed_event(self) -> None:
-        start_time = int(time.mktime((2026, 9, 20, 23, 20, 0, 0, 0, -1)))
+        start_time = calendar.timegm((2026, 9, 20, 23, 20, 0, 0, 0, 0))
         content = (
             "Sep 20 23:20:25 fsw003.p003.f01.qzd1.tfbnw.net "
             "fboss_sw_agent[50780]: E0920 23:20:25.062138 51089 "
@@ -165,7 +165,7 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_resource_accountant_mode_rejects_historical_event(self):
-        start_time = int(time.mktime((2026, 9, 20, 10, 0, 0, 0, 0, -1)))
+        start_time = calendar.timegm((2026, 9, 20, 10, 0, 0, 0, 0, 0))
         self.health_check.driver.async_read_file.return_value = (
             "E0920 09:59:59.123456 1234 ResourceAccountant.cpp:1026] "
             "Total NDP entries in new switchState: 4101 exceeds the limit: 4100 "
@@ -190,7 +190,7 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("No ResourceAccountant rejection", result.message)
 
     async def test_resource_accountant_mode_rejects_name_only_false_positive(self):
-        start_time = int(time.mktime((2026, 9, 20, 10, 0, 0, 0, 0, -1)))
+        start_time = calendar.timegm((2026, 9, 20, 10, 0, 0, 0, 0, 0))
         content = (
             "I0920 10:01:02.123456 1234 ResourceAccountant.cpp:70] "
             "ResourceAccountant initialized\n"
