@@ -26,11 +26,13 @@ Those orderings are fixed by the landed static topologies
 ``fboss338826{570,578}_ash6.cconf``.
 
 Each bed gets two configs: a core one scoped to
-``_W800_NPI_CORE_PLAYBOOKS``, and a full-suite one that takes everything
-``gen_snake_playbooks`` emits plus the 10-size throughput benchmark
-(``test_snake_benchmark_*``). IXIA endpoints are discovered over LLDP
-(every bed presents exactly two clean IXIA neighbours), so no config
-needs explicit ``direct_ixia_connections``.
+``_W800_NPI_CORE_PLAYBOOKS``, and a full-suite one that takes every supported
+playbook ``gen_snake_playbooks`` emits plus the 10-size throughput benchmark
+(``test_snake_benchmark_*``). The FSDB disruptions are unsupported because
+``fsdb.service`` is not deployed on these devices, so every config filters them
+out. IXIA endpoints are discovered over LLDP (every bed presents exactly two
+clean IXIA neighbours), so no config needs explicit
+``direct_ixia_connections``.
 
 ``W800_NPI_SNAKE_TEST_CONFIGS`` is collected by
 ``testconfigs/internal/all.py``.
@@ -44,6 +46,11 @@ from taac.testconfigs.snake.test_test_config import (
 )
 from taac.test_as_a_config import types as taac_types
 
+
+_W800_UNSUPPORTED_PLAYBOOKS = [
+    "test_snake_fsdb_restart",
+    "test_snake_fsdb_crash",
+]
 
 # Everything gen_snake_playbooks emits except the FSDB disruptions,
 # test_72hr_longevity (3-day soak, run on its own once the short soaks are clean),
@@ -105,8 +112,9 @@ def _gen_w800_snake_test_config(
 
     Every W800 bed shares the same snake shape, addressing, line rate and
     recovery headroom; only the hostname, the chain's far end, the playbook
-    scope and the frame size vary. Collapsing the rest here keeps each config
-    below stating just what differs.
+    scope and the frame size vary. All configs omit the unsupported FSDB
+    disruptions. Collapsing the rest here keeps each config below stating just
+    what differs.
 
     Args:
         name: Name registered in ``TestConfig.name``.
@@ -139,6 +147,7 @@ def _gen_w800_snake_test_config(
         hostname=hostname,
         line_rate=99,
         playbooks_to_include=playbooks_to_include,
+        playbooks_to_skip=_W800_UNSUPPORTED_PLAYBOOKS,
         frame_size_settings=frame_size_settings,
         postcheck_port_state_retry_count=_W800_RECOVERY_RETRY_COUNT,
         flap_recovery_check_retry_count=_W800_RECOVERY_RETRY_COUNT,
@@ -221,8 +230,9 @@ WEDGE800BACT_NPI_SNAKE_TEST_CONFIG_800G = _gen_w800_snake_test_config(
 
 # ---------------------------------------------------------------------------
 # Full-suite configs -- no playbooks_to_include, so gen_snake_playbooks emits
-# its whole default set: the 15 core playbooks plus test_72hr_longevity and the
-# three system-reboot playbooks, plus the 10 test_snake_benchmark_* playbooks
+# every supported default: the 13 core playbooks plus test_72hr_longevity and
+# the three system-reboot playbooks. The shared helper removes the two
+# unsupported FSDB disruptions and adds the 10 test_snake_benchmark_* playbooks
 # (12 minutes each, about 2 hours in total). The 72-hour soak alone puts a
 # complete run at roughly 3.5 days, and the reboot playbooks need BMC
 # reachability from the test host, which is why these live as separate
