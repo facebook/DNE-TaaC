@@ -160,6 +160,9 @@ class BgpEbbFullScaleFactoryTest(unittest.TestCase):
                 return_value=self._AUTOMATION,
             ),
             mock.patch.object(factory, "_nhg_storm_ixia_items", return_value={}),
+            mock.patch.object(
+                factory, "ebb_ibgp_route_next_hop_starts", return_value={}
+            ),
             mock.patch.object(factory, "build_expected_peer_identity", return_value={}),
             mock.patch.object(factory, "_openr_owner_kv_link", return_value={}),
             mock.patch.object(factory, "_openr_helper_kv_link", return_value={}),
@@ -251,6 +254,9 @@ class BgpEbbFullScaleFactoryTest(unittest.TestCase):
                     ),
                     mock.patch.object(
                         factory, "_nhg_storm_ixia_items", return_value={}
+                    ),
+                    mock.patch.object(
+                        factory, "ebb_ibgp_route_next_hop_starts", return_value={}
                     ),
                     mock.patch.object(
                         factory, "build_expected_peer_identity", return_value={}

@@ -2442,6 +2442,7 @@ def create_bgp_ebb_attribute_churn_stage(
     quiet_window_seconds: int,
     max_lookup_concurrency: int,
     openr_mode: str,
+    ibgp_route_next_hop_starts: Mapping[str, Mapping[str, str]],
     convergence_hard_timeout_seconds: int = 300,
     transient_observation_logging: str = "off",
 ) -> Stage:
@@ -2459,6 +2460,7 @@ def create_bgp_ebb_attribute_churn_stage(
                 quiet_window_seconds=quiet_window_seconds,
                 max_lookup_concurrency=max_lookup_concurrency,
                 openr_mode=openr_mode,
+                ibgp_route_next_hop_starts=ibgp_route_next_hop_starts,
                 transient_observation_logging=transient_observation_logging,
             )
         ],

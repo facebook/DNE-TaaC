@@ -1054,6 +1054,7 @@ def create_bgp_attribute_churn_step(
     quiet_window_seconds: int,
     max_lookup_concurrency: int,
     openr_mode: str,
+    ibgp_route_next_hop_starts: t.Mapping[str, t.Mapping[str, str]],
     convergence_hard_timeout_seconds: int = 300,
     transient_observation_logging: str = "off",
     description: str | None = None,
@@ -1140,6 +1141,9 @@ def create_bgp_attribute_churn_step(
             )
         ),
         "openr_mode": openr_mode,
+        "ibgp_route_next_hop_starts": {
+            afi: dict(planes) for afi, planes in ibgp_route_next_hop_starts.items()
+        },
         **numeric_params,
     }
     if transient_observation_logging == "extended":

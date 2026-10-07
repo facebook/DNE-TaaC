@@ -692,6 +692,7 @@ def get_bgp_ebb_attribute_churn_playbook(
     peergroup_ibgp_v4: str,
     total_session_count: int,
     profile,  # BgpPlusPlusProfile
+    ibgp_route_next_hop_starts: t.Mapping[str, t.Mapping[str, str]],
     precheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
     exclude_bgp_mon: bool = True,
     duration_seconds: int = DEFAULT_ATTRIBUTE_CHURN_DURATION_SECONDS,
@@ -722,6 +723,9 @@ def get_bgp_ebb_attribute_churn_playbook(
             by precheck/postcheck health checks.
         profile: `BgpPlusPlusProfile` enum value; enables the IBGP-PNH
             precheck when the OpenR variant is selected.
+        ibgp_route_next_hop_starts: Per-plane first iBGP route next hop from
+            the bound topology (`ebb_ibgp_route_next_hop_starts`), so exact RIB
+            checks expect the chassis the run is wired to.
         precheck_thresholds: Custom precheck thresholds (uses defaults if None).
         duration_seconds: Active monotonic churn window, divided evenly
             across MED, origin, and local-pref.
@@ -791,6 +795,7 @@ def get_bgp_ebb_attribute_churn_playbook(
                             if profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R
                             else "none"
                         ),
+                        ibgp_route_next_hop_starts=ibgp_route_next_hop_starts,
                     )
                 ],
                 playbook_name=playbook_name,

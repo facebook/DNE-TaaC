@@ -42,6 +42,7 @@ from taac.abstractions.topologies.ebb_full_scale import (
     EBB_AS_NUMBERS,
     EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,
     ebb_full_scale_topology,
+    ebb_ibgp_route_next_hops,
     EBB_NEXT_HOPS,
     EBB_NEXT_HOPS_IXIA03,
     EBB_PARENT_NETWORKS,
@@ -146,6 +147,19 @@ _EBB16_ITEMS_TARGET = (
     "neteng.test_infra.dne.taac.testconfigs.routing.factories."
     "bgp_ebb_full_scale._nhg_storm_ixia_items"
 )
+_ROUTE_NEXT_HOP_STARTS = {
+    afi_key: {
+        str(plane): ebb_ibgp_route_next_hops(
+            afi, plane, 1, OpenRMode.STANDALONE, EBB_NEXT_HOPS
+        )[0]
+        for plane in range(1, 5)
+    }
+    for afi_key, afi in (("ipv4", "v4"), ("ipv6", "v6"))
+}
+_ROUTE_NEXT_HOP_STARTS_TARGET = (
+    "neteng.test_infra.dne.taac.testconfigs.routing.factories."
+    "bgp_ebb_full_scale.ebb_ibgp_route_next_hop_starts"
+)
 _AUTOMATION_CONTRACT_TARGET = (
     "neteng.test_infra.dne.taac.testconfigs.routing.factories."
     "bgp_ebb_full_scale._ebb_automation_contract"
@@ -230,6 +244,20 @@ _FROZEN_CHURN_PAYLOAD: dict = {
     "prefix_pool_names": EXPECTED_POOLS,
     "attribute_matrix": EXPECTED_MATRIX,
     "openr_mode": "standalone",
+    "ibgp_route_next_hop_starts": {
+        "ipv4": {
+            "1": "20.164.28.10",
+            "2": "20.165.28.10",
+            "3": "20.166.28.10",
+            "4": "20.167.28.10",
+        },
+        "ipv6": {
+            "1": "2401:db00:e80d:11:9::10",
+            "2": "2401:db00:e80d:11:10::10",
+            "3": "2401:db00:e80d:11:11::10",
+            "4": "2401:db00:e80d:11:12::10",
+        },
+    },
     "peer_count_per_plane": 62,
     "selected_block_count_per_afi": 7,
     "samples_per_block": 2,
@@ -319,6 +347,7 @@ def _locked_step_kwargs() -> dict:
         "quiet_window_seconds": 120,
         "max_lookup_concurrency": 8,
         "openr_mode": "standalone",
+        "ibgp_route_next_hop_starts": _ROUTE_NEXT_HOP_STARTS,
     }
 
 
@@ -907,6 +936,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             peergroup_ibgp_v4="IBGP_V4",
             total_session_count=1272,
             profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+            ibgp_route_next_hop_starts=_ROUTE_NEXT_HOP_STARTS,
         )
 
         # characterization defaults to DISABLED, so no START/STOP bracket is
@@ -933,6 +963,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 peergroup_ibgp_v4="IBGP_V4",
                 total_session_count=1272,
                 profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+                ibgp_route_next_hop_starts=_ROUTE_NEXT_HOP_STARTS,
             )
 
         attribute_churn = create_stage.call_args.kwargs["attribute_churn"]
@@ -1093,6 +1124,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             peergroup_ibgp_v4="IBGP_V4",
             total_session_count=1272,
             profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+            ibgp_route_next_hop_starts=_ROUTE_NEXT_HOP_STARTS,
         )
         self.assertEqual(1, len(playbook.stages))
         self.assertEqual(1, len(playbook.stages[0].steps))
@@ -1160,6 +1192,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             peergroup_ibgp_v4="IBGP_V4",
             total_session_count=1272,
             profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+            ibgp_route_next_hop_starts=_ROUTE_NEXT_HOP_STARTS,
             duration_seconds=6 * 60 * 60,
         )
 
@@ -1173,6 +1206,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             peergroup_ibgp_v4="IBGP_V4",
             total_session_count=1272,
             profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+            ibgp_route_next_hop_starts=_ROUTE_NEXT_HOP_STARTS,
         )
 
         payload = _step_payload(playbook.stages[0].steps[0])
@@ -1195,6 +1229,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 peergroup_ibgp_v4="IBGP_V4",
                 total_session_count=1272,
                 profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
+                ibgp_route_next_hop_starts=_ROUTE_NEXT_HOP_STARTS,
             )
 
         self.assertTrue(get_checks.call_args.args[1].check_ibgp_pnh)
@@ -1361,6 +1396,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 return_value=_CANONICAL_AUTOMATION_CONTRACT,
             ),
             patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
+            patch(_ROUTE_NEXT_HOP_STARTS_TARGET, return_value=_ROUTE_NEXT_HOP_STARTS),
             patch(_EBB_ROUTE_HISTOGRAM_TARGET, return_value=_EBB_ROUTE_HISTOGRAM),
             patch(_EBB_EXCLUSION_BLOCKS_TARGET, return_value=_EBB_EXCLUSION_BLOCKS),
         ):
@@ -1497,6 +1533,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 return_value=_CANONICAL_AUTOMATION_CONTRACT,
             ),
             patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
+            patch(_ROUTE_NEXT_HOP_STARTS_TARGET, return_value=_ROUTE_NEXT_HOP_STARTS),
             patch(_EBB_ROUTE_HISTOGRAM_TARGET, return_value=_EBB_ROUTE_HISTOGRAM),
             patch(_EBB_EXCLUSION_BLOCKS_TARGET, return_value=_EBB_EXCLUSION_BLOCKS),
         ):
@@ -1588,6 +1625,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             patch(ebb16_target, return_value=MagicMock()),
             patch(_AUTOMATION_CONTRACT_TARGET, return_value=automation),
             patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
+            patch(_ROUTE_NEXT_HOP_STARTS_TARGET, return_value=_ROUTE_NEXT_HOP_STARTS),
             patch(
                 _EBB_ROUTE_HISTOGRAM_TARGET,
                 side_effect=(_EBB_ROUTE_HISTOGRAM, expanded_histogram),
@@ -2298,6 +2336,9 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 ),
                 patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
                 patch(
+                    _ROUTE_NEXT_HOP_STARTS_TARGET, return_value=_ROUTE_NEXT_HOP_STARTS
+                ),
+                patch(
                     _EBB_ROUTE_HISTOGRAM_TARGET,
                     return_value=_EBB_ROUTE_HISTOGRAM,
                 ),
@@ -2351,6 +2392,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
                 return_value=_CANONICAL_AUTOMATION_CONTRACT,
             ),
             patch(_EBB16_ITEMS_TARGET, return_value=_EBB16_IXIA_ITEMS),
+            patch(_ROUTE_NEXT_HOP_STARTS_TARGET, return_value=_ROUTE_NEXT_HOP_STARTS),
             patch(_EBB_ROUTE_HISTOGRAM_TARGET, return_value=_EBB_ROUTE_HISTOGRAM),
             patch(_EBB_EXCLUSION_BLOCKS_TARGET, return_value=_EBB_EXCLUSION_BLOCKS),
         ):

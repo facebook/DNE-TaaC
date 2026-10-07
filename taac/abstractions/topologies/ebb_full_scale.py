@@ -79,6 +79,7 @@ from taac.abstractions.topology import (
     AddressPlan,
     BgpPeerGroup,
     BgpPolicy,
+    BoundTopology,
     DeviceGroupSpec,
     EndpointSpec,
     ExplicitNextHopSource,
@@ -498,7 +499,7 @@ def _ebb_ibgp_next_hop_source(
     afi: str,
     plane: int,
     openr_mode: OpenRMode,
-    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
+    next_hops: EbbNextHopScheme,
 ) -> tuple[str, str, bool]:
     if afi not in {"v4", "v6"}:
         raise ValueError(f"EBB iBGP next-hop AFI must be v4 or v6; got {afi!r}")
@@ -525,7 +526,7 @@ def _ebb_ibgp_next_hop_source(
 
 
 def ebb_openr_injected_next_hops(
-    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
+    next_hops: EbbNextHopScheme,
 ) -> tuple[list[str], list[str]]:
     """Return the (v4, v6) plane next hops Open/R must inject reachability for.
 
@@ -539,7 +540,7 @@ def ebb_openr_injected_next_hops(
     one scheme is what keeps them in step.
 
     Args:
-        next_hops: Chassis scheme; defaults to ixia11.
+        next_hops: Chassis scheme the emulated peers are wired to.
 
     Returns:
         Parallel lists of the four plane start addresses, v4 first.
@@ -579,7 +580,7 @@ def ebb_ibgp_route_next_hops(
     plane: int,
     peer_count: int,
     openr_mode: OpenRMode,
-    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
+    next_hops: EbbNextHopScheme,
 ) -> tuple[str, ...]:
     """Return the route next hop associated with each EBB iBGP peer row.
 
@@ -588,14 +589,31 @@ def ebb_ibgp_route_next_hops(
         plane: iBGP plane, 1-4.
         peer_count: Number of peer rows to generate next hops for.
         openr_mode: Selects the Open/R next-hop space when STANDALONE.
-        next_hops: Chassis scheme; defaults to ixia11.
+        next_hops: Chassis scheme the emulated peers are wired to.
     """
-    if peer_count < 1:
-        raise ValueError(f"EBB iBGP peer count must be positive; got {peer_count}")
-    start, _parent, lexical = _ebb_ibgp_next_hop_source(
+    start, _parent, _lexical = _ebb_ibgp_next_hop_source(
         afi, plane, openr_mode, next_hops
     )
-    if lexical:
+    return ebb_ibgp_route_next_hops_from_start(afi, start, peer_count)
+
+
+def ebb_ibgp_route_next_hops_from_start(
+    afi: str,
+    start: str,
+    peer_count: int,
+) -> tuple[str, ...]:
+    """Expand one plane's first route next hop into its per-peer-row next hops.
+
+    Args:
+        afi: ``"v4"`` or ``"v6"``.
+        start: Route next hop of peer row 0, as bound for the run's chassis.
+        peer_count: Number of peer rows to generate next hops for.
+    """
+    if afi not in {"v4", "v6"}:
+        raise ValueError(f"EBB iBGP next-hop AFI must be v4 or v6; got {afi!r}")
+    if peer_count < 1:
+        raise ValueError(f"EBB iBGP peer count must be positive; got {peer_count}")
+    if afi == "v4":
         return _lexical_ip_range(start, peer_count)
     first = ipaddress.ip_address(start)
     return tuple(
@@ -603,10 +621,74 @@ def ebb_ibgp_route_next_hops(
     )
 
 
+def ebb_ibgp_route_next_hop_starts(
+    bound: BoundTopology,
+) -> dict[str, dict[str, str]]:
+    """Return each iBGP plane's first route next hop from a bound EBB topology.
+
+    Consumers that reconstruct per-row next hops must start from the bound
+    topology rather than a chassis default; every row is checked against the
+    shared expansion so a consumer cannot silently disagree with the IXIA
+    configuration.
+
+    Args:
+        bound: EBB full-scale topology bound to the run's physical inventory.
+
+    Returns:
+        ``{"ipv4": {"1": start, ...}, "ipv6": {...}}`` covering planes 1-4.
+
+    Raises:
+        ValueError: A plane is missing or duplicated, advertises next-hop-self,
+            or its resolved next hops differ from the shared expansion.
+    """
+    starts: dict[str, dict[str, str]] = {"ipv4": {}, "ipv6": {}}
+    for group in bound.device_groups:
+        if not group.role.startswith("ibgp_dc_p"):
+            continue
+        afi_key = "ipv4" if group.spec.afi == "v4" else "ipv6"
+        plane = str(_ebb_plane_number(group.spec))
+        if plane in starts[afi_key]:
+            raise ValueError(f"EBB iBGP {afi_key} plane {plane} is bound twice")
+        if len(group.prefix_advertisements) != 1:
+            raise ValueError(
+                f"{group.name} must bind exactly one route advertisement; "
+                f"got {len(group.prefix_advertisements)}"
+            )
+        (advertisement,) = group.prefix_advertisements
+        if advertisement.spec.next_hop.mode is NextHopMode.SELF:
+            raise ValueError(
+                f"{group.name} advertises next-hop-self; route next hops are "
+                "the session addresses"
+            )
+        resolved = tuple(
+            str(advertisement.path_at(row, 0).next_hop)
+            for row in range(group.peer_count)
+        )
+        # v4 rows sort lexically, so row 0 need not be the start; the start is
+        # always the numeric minimum of the expansion.
+        start = str(min(resolved, key=lambda value: int(ipaddress.ip_address(value))))
+        expected = ebb_ibgp_route_next_hops_from_start(
+            group.spec.afi, start, group.peer_count
+        )
+        if resolved != expected:
+            raise ValueError(
+                f"{group.name} resolved route next hops do not follow the EBB "
+                f"per-row expansion from {start}"
+            )
+        starts[afi_key][plane] = start
+    for afi_key, planes in starts.items():
+        if set(planes) != {"1", "2", "3", "4"}:
+            raise ValueError(
+                f"bound EBB topology must define {afi_key} iBGP planes 1-4; "
+                f"got {sorted(planes)}"
+            )
+    return starts
+
+
 def _ebb_next_hop(
     device_group: DeviceGroupSpec,
     openr_mode: OpenRMode,
-    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
+    next_hops: EbbNextHopScheme,
 ) -> NextHopIntent:
     """Build next hops aligned with legacy route assets and OpenR injection."""
     openr_enabled = openr_mode is OpenRMode.STANDALONE
@@ -726,7 +808,7 @@ def _ebb_advertisement(
     ebgp_static_prefix_count: int,
     next_hop_self: bool = False,
     include_legacy_community_rows: bool = False,
-    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
+    next_hops: EbbNextHopScheme,
 ) -> PrefixAdvertisement | None:
     if device_group.name == "dg_ebgp_v4":
         prefix_set = prefix_sets_by_name[EBB_EBGP_V4_PREFIX_SET.name]
@@ -1279,7 +1361,7 @@ def _with_ebb_route_intent(
     ebgp_static_prefix_count: int | None = None,
     extra_prefix_sets: tuple[PrefixSet, ...] = (),
     extra_advertisements: t.Mapping[str, tuple[PrefixAdvertisement, ...]] | None = None,
-    next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
+    next_hops: EbbNextHopScheme,
     route_storm_shards: bool = False,
 ) -> LogicalTopology:
     if ebgp_prefix_count < 750:
@@ -1369,6 +1451,7 @@ EBB_FULL_SCALE_WITH_BGPMON = replace(
     _with_ebb_route_intent(
         _EBB_FULL_SCALE_WITH_BGPMON_BASE,
         openr_mode=OpenRMode.NONE,
+        next_hops=EBB_NEXT_HOPS,
     ),
     legacy_profile=None,
     task_compatibility_profile=TaskCompatibilityProfile.EBB_FULL_SCALE_WITH_BGPMON,
@@ -1398,6 +1481,7 @@ EBB_FULL_SCALE_NO_BGPMON = replace(
     _with_ebb_route_intent(
         _EBB_FULL_SCALE_NO_BGPMON_BASE,
         openr_mode=OpenRMode.NONE,
+        next_hops=EBB_NEXT_HOPS,
     ),
     legacy_profile=None,
     task_compatibility_profile=TaskCompatibilityProfile.EBB_FULL_SCALE_NO_BGPMON,
@@ -1485,6 +1569,8 @@ __all__ = (
     "IBGP_V4_PEER_GROUP",
     "IBGP_V6_PEER_GROUP",
     "ebb_full_scale_topology",
+    "ebb_ibgp_route_next_hop_starts",
     "ebb_ibgp_route_next_hops",
+    "ebb_ibgp_route_next_hops_from_start",
     "ebb_openr_injected_next_hops",
 )
