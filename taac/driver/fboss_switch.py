@@ -691,12 +691,14 @@ class FbossSwitch(AbstractSwitch):
         on FBOSS devices. An aggregated interface reports only its operational
         state, since FBOSS exposes no admin state for one.
         """
-        # agg_intf_map is a dict that has the mapping between aggregated interfaces
-        # and its member ports
-        aggregated_interfaces = await self.async_get_all_aggregated_interfaces()
         intf_map_result: Dict[
             str, InterfaceInfo
         ] = await self.async_get_all_interfaces_info()
+        aggregated_interfaces = {}
+        if any(name not in intf_map_result for name in interface_names):
+            aggregated_interfaces = (
+                await self.async_get_all_aggregated_interfaces()
+            )
         interface_state_map: Dict[str, InterfaceState] = {}
         ports_status_map = await self.async_get_port_status()
         for interface_name in interface_names:
