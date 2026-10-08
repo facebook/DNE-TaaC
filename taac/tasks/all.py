@@ -1598,6 +1598,9 @@ class AristaDaemonControlTask(BaseTask):
                 - daemon_exists: bool - whether daemon config exists
                 - is_running: bool - whether daemon process is active
                 - process_info: str - daemon process information
+                - daemon_config: tuple[str, ...] - stripped lines of this
+                  daemon's running-config block, header first; empty when
+                  the daemon is not configured
         """
         try:
             # Check if daemon config exists
@@ -1606,9 +1609,8 @@ class AristaDaemonControlTask(BaseTask):
                 config_cmd
             )
 
-            # Use word boundary to match exact daemon name, not substring
-            pattern = rf"^daemon\s+{re.escape(daemon_name)}\s*$"
-            daemon_exists = bool(re.search(pattern, config_output, re.MULTILINE))
+            daemon_config = self._extract_daemon_config(config_output, daemon_name)
+            daemon_exists = bool(daemon_config)
 
             # Check if daemon process is running
             process_cmd = f"show daemon {daemon_name}"
@@ -1635,6 +1637,7 @@ class AristaDaemonControlTask(BaseTask):
                 "daemon_exists": daemon_exists,
                 "is_running": is_running,
                 "process_info": process_info,
+                "daemon_config": daemon_config,
             }
         except Exception as e:
             self.logger.warning(
@@ -1644,7 +1647,38 @@ class AristaDaemonControlTask(BaseTask):
                 "daemon_exists": False,
                 "is_running": False,
                 "process_info": f"Error: {str(e)}",
+                "daemon_config": (),
             }
+
+    @staticmethod
+    def _extract_daemon_config(
+        config_output: str, daemon_name: str
+    ) -> t.Tuple[str, ...]:
+        """Isolate one block so another daemon cannot satisfy idempotence checks."""
+        daemon_header = f"daemon {daemon_name}"
+        lines = config_output.splitlines()
+        for index, line in enumerate(lines):
+            if line.strip() != daemon_header:
+                continue
+            daemon_config = [daemon_header]
+            for child_line in lines[index + 1 :]:
+                stripped = child_line.strip()
+                if not stripped:
+                    continue
+                if child_line == child_line.lstrip():
+                    break
+                daemon_config.append(stripped)
+            return tuple(daemon_config)
+        return ()
+
+    @staticmethod
+    def _daemon_configuration_matches(
+        daemon_config: t.Iterable[str], exec_script: t.Optional[str]
+    ) -> bool:
+        normalized = set(daemon_config)
+        if "no shutdown" not in normalized:
+            return False
+        return exec_script is None or f"exec {exec_script}" in normalized
 
     async def _enable_daemon(
         self, driver, daemon_name: str, exec_script: t.Optional[str] = None
@@ -1652,15 +1686,32 @@ class AristaDaemonControlTask(BaseTask):
         """
         Enable daemon.
 
-        If daemon doesn't exist, creates it with exec script.
-        Then ensures it's not shutdown.
+        Skips all EOS configuration when the daemon is already running with
+        the expected exec script and no shutdown, because re-applying the
+        block to a healthy daemon risks an unnecessary restart. Otherwise
+        creates the daemon with its exec script if missing, then ensures it
+        is not shutdown.
 
         Args:
             driver: Device driver instance
             daemon_name: Name of the daemon
             exec_script: Path to execution script (optional)
         """
-        daemon_exists = await self._check_daemon_exists(driver, daemon_name)
+        pre_enable_status = await self._check_daemon_running_status(driver, daemon_name)
+        daemon_exists = bool(pre_enable_status.get("daemon_exists", False))
+
+        if (
+            daemon_exists
+            and pre_enable_status.get("is_running", False)
+            and self._daemon_configuration_matches(
+                pre_enable_status.get("daemon_config", ()), exec_script
+            )
+        ):
+            self.logger.info(
+                f"Daemon {daemon_name} is already running with the expected "
+                "configuration; skipping the enable command"
+            )
+            return
 
         if not daemon_exists:
             self.logger.info(f"daemon {daemon_name} does not exist, creating it")

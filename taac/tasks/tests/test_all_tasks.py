@@ -11,6 +11,7 @@ import later.unittest
 from taac.task_definitions import create_coop_apply_patchers_task
 from taac.tasks.all import (
     AristaCreateFileFromConfig,
+    AristaDaemonControlTask,
     ConfigureParallelBgpPeers,
     CoopApplyPatchersTask,
     IxiaStopTrafficAndWaitTask,
@@ -22,6 +23,63 @@ from taac.tasks.all import (
 
 ALL_PATH = "neteng.test_infra.dne.taac.tasks.all"
 RETRY_UTILS_PATH = "neteng.test_infra.dne.taac.utils.oss_taac_lib_utils"
+
+
+class AristaDaemonControlTaskTest(later.unittest.TestCase):
+    async def test_enable_is_noop_when_daemon_is_already_healthy(self) -> None:
+        driver = MagicMock()
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock()
+        task = AristaDaemonControlTask(logger=MagicMock())
+        task._check_daemon_running_status = AsyncMock(
+            return_value={
+                "daemon_exists": True,
+                "is_running": True,
+                "daemon_config": (
+                    "daemon Bgp",
+                    "exec /usr/sbin/run_bgpcpp.sh",
+                    "no shutdown",
+                ),
+            }
+        )
+
+        await task._enable_daemon(driver, "Bgp", "/usr/sbin/run_bgpcpp.sh")
+
+        driver.async_execute_show_or_configure_cmd_on_shell.assert_not_awaited()
+
+    async def test_enable_repairs_mismatched_exec_configuration(self) -> None:
+        driver = MagicMock()
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock()
+        task = AristaDaemonControlTask(logger=MagicMock())
+        task._check_daemon_running_status = AsyncMock(
+            side_effect=[
+                {
+                    "daemon_exists": True,
+                    "is_running": True,
+                    "daemon_config": (
+                        "daemon Bgp",
+                        "exec /usr/sbin/old_bgpcpp.sh",
+                        "no shutdown",
+                    ),
+                },
+                {
+                    "daemon_exists": True,
+                    "is_running": True,
+                    "daemon_config": (
+                        "daemon Bgp",
+                        "exec /usr/sbin/run_bgpcpp.sh",
+                        "no shutdown",
+                    ),
+                },
+            ]
+        )
+
+        with patch(f"{ALL_PATH}.asyncio.sleep", new_callable=AsyncMock):
+            await task._enable_daemon(driver, "Bgp", "/usr/sbin/run_bgpcpp.sh")
+
+        driver.async_execute_show_or_configure_cmd_on_shell.assert_awaited_once_with(
+            "daemon Bgp\nexec /usr/sbin/run_bgpcpp.sh\nno shutdown",
+            configure=True,
+        )
 
 
 class ScpFileTest(later.unittest.TestCase):
