@@ -233,7 +233,7 @@ if not TAAC_OSS:
         AdvertisedRouteFilter,
         ReceivedRouteFilter,
     )
-    from openr.thrift.Platform.types import FibClient
+    from openr.thrift.Platform.thrift_types import FibClient
     from openr.thrift.Types.thrift_types import AdjacencyDatabase
 from thrift.py3.exceptions import Error as ThriftError
 from thrift.python.exceptions import Error as ThriftPythonError
