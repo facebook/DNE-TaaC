@@ -544,6 +544,7 @@ class TaacRunner:
             trace_ixia_api=trace_ixia_api,
         )
         self.test_case_uuid = ""
+        self._test_case_investigation_attempted = False
         self.custom_test_handlers = []
         # pyrefly: ignore [bad-assignment]
         self._current_playbook: taac_types.Playbook = ...
@@ -1452,6 +1453,7 @@ class TaacRunner:
         try:
             for _ in range(iteration_count):
                 _npi_iteration_count += 1
+                self._test_case_investigation_attempted = False
                 test_case_results = []
                 test_case_start_time = int(time.time())
                 self._current_playbook_section = self.test_summary.start_section(
@@ -1693,6 +1695,13 @@ class TaacRunner:
                 )
                 recorded_iterations = _npi_iteration_count
         except Exception as e:
+            await self._async_run_failed_test_case_investigation_if_enabled(
+                playbook=playbook,
+                test_device=test_device,
+                test_case_results=test_case_results,
+                test_case_start_time=test_case_start_time,
+                error=e,
+            )
             _run_exc = e
             self._record_npi_iteration_error(
                 test_case_name,
@@ -3311,6 +3320,7 @@ class TaacRunner:
         test_case_start_time: int,
         collected_logs: t.Sequence[HostLog],
         ixia_config_snapshot: t.Optional[str],
+        error: BaseException | None = None,
     ) -> t.Optional[str]:
         """Run the in-process investigation agent on the still-reserved devices.
 
@@ -3319,8 +3329,13 @@ class TaacRunner:
         failing test into an infra error. Returns the everpaste URL of the
         transcript (appended to the ``TestCaseFailure`` message), or ``None``.
         """
-        if not self.call_investigation_agent or TAAC_OSS:
+        if (
+            not getattr(self, "call_investigation_agent", False)
+            or TAAC_OSS
+            or getattr(self, "_test_case_investigation_attempted", False)
+        ):
             return None
+        self._test_case_investigation_attempted = True
         try:
             from taac.libs.investigation_report import (
                 investigation_task,
@@ -3334,6 +3349,7 @@ class TaacRunner:
                     test_case_results,
                     test_case_start_time,
                     collected_logs,
+                    error,
                 ),
                 tools=self._build_investigation_tools(
                     test_case_start_time, ixia_config_snapshot
@@ -3346,6 +3362,54 @@ class TaacRunner:
             )
         except Exception as e:
             self.logger.warning(f"Investigation agent failed (non-fatal): {e}")
+            return None
+
+    async def _async_run_failed_test_case_investigation_if_enabled(
+        self,
+        playbook: taac_types.Playbook,
+        test_device: TestDevice,
+        test_case_results: t.List[trr_types.CheckResult],
+        test_case_start_time: int,
+        error: BaseException,
+    ) -> t.Optional[str]:
+        """Investigate an exception that escaped normal test-case teardown."""
+        if (
+            not getattr(self, "call_investigation_agent", False)
+            or TAAC_OSS
+            or getattr(self, "_test_case_investigation_attempted", False)
+        ):
+            return None
+        try:
+            try:
+                collected_logs = await self.async_fboss_collect_and_print_logs(
+                    test_case_start_time
+                )
+            except Exception as evidence_error:
+                self.logger.warning(
+                    "Failure log collection before investigation failed "
+                    f"(non-fatal): {evidence_error}"
+                )
+                collected_logs = []
+            try:
+                await self._async_publish_ixia_api_trace()
+            except Exception as evidence_error:
+                self.logger.warning(
+                    "IXIA trace publication before investigation failed "
+                    f"(non-fatal): {evidence_error}"
+                )
+            return await self._async_run_investigation_if_enabled(
+                playbook,
+                test_device,
+                test_case_results,
+                test_case_start_time,
+                collected_logs,
+                self._render_ixia_config_for_investigation(playbook),
+                error,
+            )
+        except Exception as investigation_error:
+            self.logger.warning(
+                f"Investigation agent failed (non-fatal): {investigation_error}"
+            )
             return None
 
     async def _async_run_lifecycle_investigation_if_enabled(
@@ -3444,6 +3508,7 @@ class TaacRunner:
         test_case_results: t.List[trr_types.CheckResult],
         test_case_start_time: int,
         collected_logs: t.Sequence[HostLog],
+        error: BaseException | None = None,
     ) -> str:
         """Compose the prompt out of what the runtime already recorded."""
         sections = [
@@ -3473,6 +3538,14 @@ class TaacRunner:
                 self.test_summary.get_all_logs(),
             ),
         ]
+        if error is not None:
+            sections.insert(
+                1,
+                (
+                    "Exception chain",
+                    "".join(traceback.format_exception(error)).rstrip(),
+                ),
+            )
         return "\n\n".join(f"## {title}\n{body}" for title, body in sections if body)
 
     def _build_lifecycle_investigation_prompt(
@@ -3825,7 +3898,14 @@ class TaacRunner:
             and not TAAC_OSS
             and self.check_failure(test_case_results)
         )
-        if not will_investigate or self.ixia is None:
+        if not will_investigate:
+            return None
+        return self._render_ixia_config_for_investigation(playbook)
+
+    def _render_ixia_config_for_investigation(
+        self, playbook: taac_types.Playbook
+    ) -> t.Optional[str]:
+        if self.ixia is None:
             return None
         try:
             return render_ixia_config(
