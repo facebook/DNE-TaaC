@@ -58,8 +58,8 @@ which link a test's ``<DIface-N>`` resolves to.
     IXIA11_ASH6 (knc_chassis 192.168.124.1)          eb03.lab.ash6
     ───────────────────────────────────────          ─────────────
       card 6 port 5  ●────────────────────────────●  Ethernet3/1/2    DIface-0
-      card 3 port 2  ●────────────────────────────●  Ethernet3/36/3   DIface-1
-      card 2 port 8  ●────────────────────────────●  Ethernet3/36/1   DIface-2
+      card 11 port 2 ●────────────────────────────●  Ethernet3/36/3   DIface-1
+      card 11 port 1 ●────────────────────────────●  Ethernet3/36/1   DIface-2
 
 eb01, eb02 and eb04 sit on the same chassis on different ports and are not
 part of the conformance rig; see ``routing_ebb_testbed.py``.
