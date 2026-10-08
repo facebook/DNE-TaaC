@@ -1442,9 +1442,19 @@ def _get_bgp_ebb_full_scale_playbooks(
             expected_peer_identity=expected_peer_identity,
             bgp_mon_parent_network=bound_bgp_mon_network,
             start_ipv4s=(
-                list(ibgp_pnh_start_ipv4s) if ibgp_pnh_start_ipv4s is not None else None
+                list(ibgp_pnh_start_ipv4s[:1])
+                if ibgp_pnh_start_ipv4s is not None
+                else None
             ),
             start_ipv6s=(
+                list(ibgp_pnh_start_ipv6s[:1])
+                if ibgp_pnh_start_ipv6s is not None
+                else None
+            ),
+            restore_start_ipv4s=(
+                list(ibgp_pnh_start_ipv4s) if ibgp_pnh_start_ipv4s is not None else None
+            ),
+            restore_start_ipv6s=(
                 list(ibgp_pnh_start_ipv6s) if ibgp_pnh_start_ipv6s is not None else None
             ),
             characterization=OBSERVE_ONLY_ON_DEVICE,

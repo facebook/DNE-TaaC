@@ -2108,6 +2108,8 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
     memory_terminate_on_error: bool = False,
     start_ipv4s: t.Optional[t.List[str]] = None,
     start_ipv6s: t.Optional[t.List[str]] = None,
+    restore_start_ipv4s: t.Optional[t.Sequence[str]] = None,
+    restore_start_ipv6s: t.Optional[t.Sequence[str]] = None,
     count: int = 63,
     step_size: int = 2,
     precheck_thresholds: t.Optional[HardwareCapacityThresholds] = None,
@@ -2133,6 +2135,10 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
 
     ``tcp_dump_capture_interface`` is retained as an ignored compatibility
     parameter while callers migrate to the counter-based validation.
+
+    ``start_ipv4s`` and ``start_ipv6s`` scope the destructive stimulus, while
+    the corresponding ``restore_start_*`` values carry the complete bound PNH
+    inventory needed by readiness checks and cleanup.
     """
     if start_ipv4s is None:
         start_ipv4s = [DEFAULT_OPENR_START_IPV4S[0]]
@@ -2140,12 +2146,18 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
     if start_ipv6s is None:
         start_ipv6s = [DEFAULT_OPENR_START_IPV6S[0]]
 
-    cleanup_start_ipv4s = list(
-        dict.fromkeys([*DEFAULT_OPENR_START_IPV4S, *start_ipv4s])
-    )
-    cleanup_start_ipv6s = list(
-        dict.fromkeys([*DEFAULT_OPENR_START_IPV6S, *start_ipv6s])
-    )
+    if restore_start_ipv4s is None:
+        restore_start_ipv4s = list(
+            dict.fromkeys([*DEFAULT_OPENR_START_IPV4S, *start_ipv4s])
+        )
+    else:
+        restore_start_ipv4s = list(restore_start_ipv4s)
+    if restore_start_ipv6s is None:
+        restore_start_ipv6s = list(
+            dict.fromkeys([*DEFAULT_OPENR_START_IPV6S, *start_ipv6s])
+        )
+    else:
+        restore_start_ipv6s = list(restore_start_ipv6s)
 
     if precheck_thresholds is None:
         precheck_thresholds = get_precheck_thresholds()
@@ -2173,8 +2185,8 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
             expected_established_sessions=expected_in_scope_sessions,
             cpu_baseline=cpu_baseline,
             check_ibgp_pnh=(profile == BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R),
-            ibgp_pnh_start_ipv4s=tuple(start_ipv4s),
-            ibgp_pnh_start_ipv6s=tuple(start_ipv6s),
+            ibgp_pnh_start_ipv4s=tuple(restore_start_ipv4s),
+            ibgp_pnh_start_ipv6s=tuple(restore_start_ipv6s),
             expected_peer_identity=expected_peer_identity,
             bgp_mon=bgp_mon_scope,
             cpu_characterization=cpu_characterization,
@@ -2202,8 +2214,8 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
                         device_name=device_name,
                         start_ipv4s=start_ipv4s,
                         start_ipv6s=start_ipv6s,
-                        restore_start_ipv4s=cleanup_start_ipv4s,
-                        restore_start_ipv6s=cleanup_start_ipv6s,
+                        restore_start_ipv4s=restore_start_ipv4s,
+                        restore_start_ipv6s=restore_start_ipv6s,
                         local_link=local_link,
                         other_link=other_link,
                         count=count,
@@ -2222,8 +2234,8 @@ def get_bgp_ebb_igp_unresolvable_pnh_playbook(
             cleanup_steps=[
                 create_openr_route_action_step(
                     device_name=device_name,
-                    start_ipv4s=cleanup_start_ipv4s,
-                    start_ipv6s=cleanup_start_ipv6s,
+                    start_ipv4s=restore_start_ipv4s,
+                    start_ipv6s=restore_start_ipv6s,
                     local_link=local_link,
                     other_link=other_link,
                     action=OpenRRouteAction.INJECT.value,

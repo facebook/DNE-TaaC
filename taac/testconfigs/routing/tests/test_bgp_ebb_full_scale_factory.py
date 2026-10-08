@@ -58,10 +58,7 @@ _PNH_RANGE_BUILDERS = (
     "get_bgp_ebb_ibgp_plane_session_oscillation_playbook",
     "get_bgp_ebb_ibgp_route_oscillation_playbook",
 )
-_PNH_START_LIST_BUILDERS = (
-    "get_bgp_ebb_igp_pnh_metric_oscillation_playbook",
-    "get_bgp_ebb_igp_unresolvable_pnh_playbook",
-)
+_PNH_START_LIST_BUILDERS = ("get_bgp_ebb_igp_pnh_metric_oscillation_playbook",)
 
 
 def _inventory() -> mock.MagicMock:
@@ -293,6 +290,20 @@ class BgpEbbFullScaleFactoryTest(unittest.TestCase):
                         kwargs = builders[builder_name].call_args.kwargs
                         self.assertEqual(list(start_ipv4s), kwargs["start_ipv4s"])
                         self.assertEqual(list(start_ipv6s), kwargs["start_ipv6s"])
+
+                unresolvable_kwargs = builders[
+                    "get_bgp_ebb_igp_unresolvable_pnh_playbook"
+                ].call_args.kwargs
+                self.assertEqual([start_ipv4s[0]], unresolvable_kwargs["start_ipv4s"])
+                self.assertEqual([start_ipv6s[0]], unresolvable_kwargs["start_ipv6s"])
+                self.assertEqual(
+                    list(start_ipv4s),
+                    unresolvable_kwargs["restore_start_ipv4s"],
+                )
+                self.assertEqual(
+                    list(start_ipv6s),
+                    unresolvable_kwargs["restore_start_ipv6s"],
+                )
 
     def test_full_scale_rejects_missing_bgp_mon_network(self) -> None:
         inventory = _inventory()
