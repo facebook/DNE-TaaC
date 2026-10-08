@@ -106,7 +106,7 @@ class BeginTestCaseTest(unittest.TestCase):
         self.ixia.enable_traffic.assert_called_once_with(
             ["^traffic$"], apply_changes=False
         )
-        self.ixia.regenerate_traffic_items.assert_called_once_with()
+        self.assertEqual(2, self.ixia.regenerate_traffic_items.call_count)
         self.ixia.finalize_deferred_traffic_item_replacements.assert_called_once_with()
         base_start.assert_called_once_with(regenerate_traffic_items=False)
         self.ixia.wait_for_view_assistants_ready.assert_called_once_with()
@@ -135,7 +135,7 @@ class BeginTestCaseTest(unittest.TestCase):
         self.ixia.enable_traffic.assert_called_once_with(
             ["^traffic$"], apply_changes=False
         )
-        self.ixia.regenerate_traffic_items.assert_called_once_with()
+        self.assertEqual(2, self.ixia.regenerate_traffic_items.call_count)
         self.ixia.finalize_deferred_traffic_item_replacements.assert_called_once_with()
         base_start.assert_called_once_with(regenerate_traffic_items=False)
         self.assertFalse(self.ixia._traffic_preparation_pending)
@@ -175,14 +175,10 @@ class BeginTestCaseTest(unittest.TestCase):
             ],
             base_start.call_args_list,
         )
-        self.ixia.regenerate_traffic_items.assert_called_once_with()
+        self.assertEqual(2, self.ixia.regenerate_traffic_items.call_count)
         self.ixia.finalize_deferred_traffic_item_replacements.assert_called_once_with()
-        self.assertEqual(
-            [
-                call(["^traffic$"], apply_changes=False),
-                call(["^traffic$"], apply_changes=False),
-            ],
-            self.ixia.enable_traffic.call_args_list,
+        self.ixia.enable_traffic.assert_called_once_with(
+            ["^traffic$"], apply_changes=False
         )
         self.ixia.wait_for_view_assistants_ready.assert_called_once_with()
         self.assertFalse(self.ixia._traffic_preparation_pending)
@@ -214,7 +210,7 @@ class BeginTestCaseTest(unittest.TestCase):
 
             self.ixia.start_traffic()
 
-        self.ixia.regenerate_traffic_items.assert_called_once_with()
+        self.assertEqual(2, self.ixia.regenerate_traffic_items.call_count)
         self.assertEqual(
             2,
             self.ixia.finalize_deferred_traffic_item_replacements.call_count,

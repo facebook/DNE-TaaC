@@ -2209,12 +2209,14 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 self.regenerate_traffic_items()
                 self._deferred_traffic_generation_complete = True
             self.finalize_deferred_traffic_item_replacements()
-            self._traffic_start_pending = True
-        if self._traffic_start_pending:
             self.enable_traffic(
                 self._pending_traffic_regexes,
                 apply_changes=False,
             )
+            # Enabling deferred items modifies their compiled traffic state.
+            # Regenerate after selection so Apply uses the selected flow groups.
+            self.regenerate_traffic_items()
+            self._traffic_start_pending = True
         super().start_traffic(
             regenerate_traffic_items=(
                 regenerate_traffic_items

@@ -149,6 +149,10 @@ TRAFFIC_ITEM_CONFIGS: list[taac_types.BasicTrafficItemConfig] = [
         line_rate_type=ixia_types.RateType.FRAMES_PER_SECOND,
         line_rate=2000,
         traffic_type=ixia_types.TrafficType.RAW,
+        frame_size_settings=ixia_types.FrameSize(
+            type=ixia_types.FrameSizeType.FIXED,
+            fixed_size=400,
+        ),
         bidirectional=False,
         packet_headers=BGP_CP_V6_GLOBAL_DSCP48_TRAFFIC_PACKET_HEADERS,
     ),
