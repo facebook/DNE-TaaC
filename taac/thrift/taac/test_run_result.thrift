@@ -98,6 +98,14 @@ struct InvestigationArtifact {
   7: list<string> open_leads;
 }
 
+// A durable output produced by the run. `location` is normally a URL, but may
+// be a local path when the producer has no artifact store (for example OSS).
+struct RunArtifact {
+  1: string name;
+  2: string location;
+  3: optional string description;
+}
+
 struct RunResult {
   // The tictaac CLI ships as an fbpkg independently of whatever deserializes
   // this, so producer and consumer can be arbitrarily far apart in version.
@@ -119,4 +127,5 @@ struct RunResult {
   10: optional string error_message;
   11: optional string log_file;
   12: list<InvestigationArtifact> investigation_artifacts;
+  13: list<RunArtifact> artifacts;
 }

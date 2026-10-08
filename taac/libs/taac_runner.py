@@ -512,6 +512,7 @@ class TaacRunner:
         # upload, so a second publish call does not re-upload them.
         self._ixia_trace_slices_seen = 0
         self._published_ixia_trace_slices: t.List[PublishedIxiaTraceSlice] = []
+        self.run_artifacts: t.List[trr_types.RunArtifact] = []
         self._logged_missing_ixia_trace = False
         self.ixia_candidates = normalize_ixia_candidates(
             self.test_config,
@@ -4255,6 +4256,17 @@ class TaacRunner:
         if not published_now:
             return
         self._published_ixia_trace_slices.extend(published_now)
+        self.run_artifacts.extend(
+            trr_types.RunArtifact(
+                name=f"IXIA REST trace ({published.phase})",
+                location=published.location,
+                description=(
+                    f"{published.record_count} REST calls, "
+                    f"{published.failure_count} failed"
+                ),
+            )
+            for published in published_now
+        )
         self._log_ixia_trace_table()
 
     async def _async_publish_ixia_trace_slice(

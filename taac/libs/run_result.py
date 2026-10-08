@@ -5,7 +5,7 @@ import typing as t
 from taac.health_check.health_check import types as hc_types
 from taac.test_run_result import types as trr_types
 
-RUN_RESULT_SCHEMA_VERSION: int = 2
+RUN_RESULT_SCHEMA_VERSION: int = 3
 
 _STATUS_PRECEDENCE: t.Tuple[hc_types.HealthCheckStatus, ...] = (
     hc_types.HealthCheckStatus.ERROR,
@@ -47,6 +47,7 @@ def build_run_result(
     playbooks: t.Sequence[trr_types.PlaybookResult],
     sections: t.Sequence[trr_types.SectionResult],
     investigation_artifacts: t.Sequence[trr_types.InvestigationArtifact] = (),
+    artifacts: t.Sequence[trr_types.RunArtifact] = (),
     error_message: t.Optional[str] = None,
     log_file: t.Optional[str] = None,
 ) -> trr_types.RunResult:
@@ -61,6 +62,7 @@ def build_run_result(
         playbooks=list(playbooks),
         sections=list(sections),
         investigation_artifacts=list(investigation_artifacts),
+        artifacts=list(artifacts),
         error_message=error_message,
         log_file=log_file,
     )

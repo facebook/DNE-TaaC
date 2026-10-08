@@ -319,6 +319,17 @@ def investigation_artifacts_section(
     )
 
 
+def run_artifact_lines(
+    artifacts: t.Sequence[trr_types.RunArtifact],
+) -> t.List[str]:
+    """Render durable run outputs with their locations."""
+    lines: t.List[str] = []
+    for artifact in artifacts:
+        description = f" ({artifact.description})" if artifact.description else ""
+        lines.append(f"  {artifact.name}{description}: {artifact.location}")
+    return lines
+
+
 def format_infra_error_message(run_result: trr_types.RunResult) -> str:
     """Render the concise gate error; detailed investigations live in its report."""
     message = f"Infra error for tictaac run: {run_result.error_message}"
@@ -376,6 +387,8 @@ def format_run_report(run_result: trr_types.RunResult) -> str:
     )
     if investigation_summary:
         lines.extend(["", investigation_summary])
+    if run_result.artifacts:
+        lines.extend(["", "ARTIFACTS", *run_artifact_lines(run_result.artifacts)])
     if run_result.playbooks:
         lines.extend(["", "PLAYBOOKS", playbook_table(run_result.playbooks)])
     for playbook in run_result.playbooks:
