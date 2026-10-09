@@ -32,7 +32,6 @@ See ``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``.
 
 import ipaddress
 import json
-import os
 from collections.abc import Sequence
 from dataclasses import replace
 
@@ -158,6 +157,9 @@ from taac.utils.gate_catalog import (
     SC4_STABLE_SAMPLE_WINDOW_SECONDS,
 )
 from taac.utils.gate_control import GATE_MODE_BLOCKING
+from taac.utils.lab_device_credentials import (
+    get_lab_device_password,
+)
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import (
     BasicPortConfig,
@@ -1636,11 +1638,7 @@ def create_bgp_ebb_characteristic_constant_attribute_storage_varying_combination
     lab_password_env = (
         physical_inventory.lab_device_password_env_var or "TAAC_EBB_LAB_DEVICE_PASSWORD"
     )
-    lab_admin_password_default = physical_inventory.extras.get(
-        "lab_admin_password_default",
-        "dnepit",  # pragma: allowlist secret
-    )
-    ssh_password = os.environ.get(lab_password_env, lab_admin_password_default)
+    ssh_password = get_lab_device_password(lab_password_env)
 
     return test_config_constant_attribute_storage_varying_combinations_on_eos(
         test_config_name=name,
@@ -1726,11 +1724,7 @@ def create_bgp_ebb_characteristic_queue_memory_monitor_test_config(
             physical_inventory.lab_device_password_env_var
             or "TAAC_EBB_LAB_DEVICE_PASSWORD"
         )
-        lab_admin_password_default = physical_inventory.extras.get(
-            "lab_admin_password_default",
-            "dnepit",  # pragma: allowlist secret
-        )
-        ssh_password = os.environ.get(lab_password_env, lab_admin_password_default)
+        ssh_password = get_lab_device_password(lab_password_env)
 
     return test_config_bgp_queue_memory_monitoring_with_route_scale(
         test_config_name=name,
@@ -4070,11 +4064,7 @@ def create_bgp_ebb_characteristic_separable_policy_test_config(
             physical_inventory.lab_device_password_env_var
             or "TAAC_EBB_LAB_DEVICE_PASSWORD"
         )
-        lab_admin_password_default = physical_inventory.extras.get(
-            "lab_admin_password_default",
-            "dnepit",  # pragma: allowlist secret
-        )
-        ssh_password = os.environ.get(lab_password_env, lab_admin_password_default)
+        ssh_password = get_lab_device_password(lab_password_env)
 
     return test_config_for_bgp_plus_plus_on_ebb_arista_separable_policy(
         test_config_name=name,

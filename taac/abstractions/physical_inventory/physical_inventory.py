@@ -72,7 +72,7 @@ class PhysicalInventory:
     # Precomputed ``TestConfig.host_driver_args`` payload for lab boxes.
     # Populated at PhysicalInventory construction time from the shared lab
     # password env var (``TAAC_EBB_LAB_DEVICE_PASSWORD``, falling back to
-    # ``"dnepit"``). None for production / conveyor inventories where
+    # the internal lab default). None for production / conveyor inventories where
     # ``netwhoami`` returns a valid record.
     host_driver_args: dict[str, str] | None = None
     # Precomputed ``TestConfig.oss_mock_device_data`` payload for lab

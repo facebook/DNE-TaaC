@@ -19,7 +19,6 @@ See ../README.md §3.
 """
 
 import ipaddress
-import os
 from dataclasses import replace
 
 from taac.abstractions.physical_inventory import PhysicalInventory
@@ -94,6 +93,9 @@ from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
 )
 from taac.testconfigs.routing.util.bgpcpp_peers_modification import (
     _generate_bgpcpp_peers_modification_tasks,
+)
+from taac.utils.lab_device_credentials import (
+    get_lab_device_password,
 )
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import (
@@ -487,7 +489,7 @@ def create_bgp_ebb_scaling_transient_memory_route_scale_test_config(
     if prefixes is None:
         prefixes = [10000, 20000, 30000, 40000, 50000]
     if ssh_password is None:
-        ssh_password = os.environ.get("TAAC_EBB_LAB_DEVICE_PASSWORD", "dnepit")
+        ssh_password = get_lab_device_password()
     if constant_acceptance_communities is None:
         constant_acceptance_communities = ["65529:39744"]
 
@@ -649,7 +651,7 @@ def create_bgp_ebb_scaling_transient_memory_peer_scale_test_config(
     if peers_combination is None:
         peers_combination = [(40, 100), (120, 200), (200, 300), (280, 400)]
     if ssh_password is None:
-        ssh_password = os.environ.get("TAAC_EBB_LAB_DEVICE_PASSWORD", "dnepit")
+        ssh_password = get_lab_device_password()
     if constant_acceptance_communities is None:
         constant_acceptance_communities = ["65529:39744"]
 
@@ -1134,7 +1136,7 @@ def create_bgp_ebb_scaling_route_churn_prefix_test_config(
 
     Provisioning goes through ``get_update_packing_setup_tasks``, the same shared
     recipe SC2/SC3/SC4 use. There is deliberately no raw-SSH alternative: the
-    previous one defaulted to the ``admin``/``dnepit`` credential, which exists
+    previous one defaulted to the ``admin`` lab-default credential, which exists
     only on the ``ebXX.lab.ash6`` lab boxes, so it silently failed on any
     ``cicd``/``qual`` device with ``Permission denied (publickey,password)``.
     """
@@ -1364,7 +1366,7 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
     fallback below, matching the legacy ``setup_tasks is None`` gate.
     """
     if ssh_password is None:
-        ssh_password = os.environ.get("TAAC_EBB_LAB_DEVICE_PASSWORD", "dnepit")
+        ssh_password = get_lab_device_password()
 
     device_name = physical_inventory.device_name
     ixia_interface_mimic_ebgp = physical_inventory.ixia_ports[0][0]

@@ -27,8 +27,6 @@ manifest ``__module__`` filter still picks them up.
 See ../README.md §3.
 """
 
-import os
-
 from taac.abstractions.physical_inventory import PhysicalInventory
 from taac.health_checks.healthcheck_definitions import (
     create_bgp_rib_fib_consistency_check,
@@ -79,6 +77,9 @@ from taac.task_definitions import (
     create_run_commands_on_shell_task,
     create_set_peer_group_enforce_first_as_task,
 )
+from taac.utils.lab_device_credentials import (
+    get_lab_device_password,
+)
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import DirectIxiaConnection, Endpoint, TestConfig
 
@@ -97,14 +98,13 @@ def _feature_ssh_password(physical_inventory: PhysicalInventory) -> str:
 
     Uses the physical_inventory's declared password env-var (matches the
     ``physical_inventory.host_driver_args`` payload built at PhysicalInventory construction);
-    falls back to ``"dnepit"`` when the env var is unset -- byte-identical
-    with the legacy wrappers whose ``_LAB_DEVICE_PASSWORD`` also fell back
-    to ``"dnepit"``.
+    falls back to the internal lab default when the env var is unset (no
+    default in OSS).
     """
     env_var = (
         physical_inventory.lab_device_password_env_var or "TAAC_EBB_LAB_DEVICE_PASSWORD"
     )
-    return os.environ.get(env_var, "dnepit")  # pragma: allowlist secret
+    return get_lab_device_password(env_var)
 
 
 # =============================================================================

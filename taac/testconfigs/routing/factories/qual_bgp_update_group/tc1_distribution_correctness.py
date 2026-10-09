@@ -18,7 +18,6 @@ helper.
 """
 
 import json
-import os
 import typing as t
 
 from taac.abstractions.physical_inventory import PhysicalInventory
@@ -91,6 +90,9 @@ from taac.testconfigs.routing.util.bgp_ebb_health_checks import (
 )
 from taac.testconfigs.routing.util.bgp_ebb_ixia_config import (
     create_ebb_scale_basic_port_configs,
+)
+from taac.utils.lab_device_credentials import (
+    get_lab_device_password,
 )
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import TestConfig
@@ -425,11 +427,7 @@ def _create_eb03_distribution_correctness_test_config(
         physical_inventory.lab_device_password_env_var or "TAAC_EBB_LAB_DEVICE_PASSWORD"
     )
     lab_admin_username = physical_inventory.extras.get("lab_admin_username", "admin")
-    lab_admin_password_default = physical_inventory.extras.get(
-        "lab_admin_password_default",
-        "dnepit",  # pragma: allowlist secret
-    )
-    lab_password = os.environ.get(lab_password_env, lab_admin_password_default)
+    lab_password = get_lab_device_password(lab_password_env)
     compiled = (
         ebb_full_scale_topology(
             openr_mode=OpenRMode.NONE,

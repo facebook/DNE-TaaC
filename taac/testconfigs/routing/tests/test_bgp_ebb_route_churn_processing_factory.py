@@ -243,7 +243,7 @@ class Sc6ManagedProvisioningTest(unittest.TestCase):
     """No SC6 setup task may reach the device over raw SSH.
 
     The churn engine SC6 reuses was written for the ebXX lab boxes and defaults
-    to ``ssh_user="admin"`` / ``ssh_password="dnepit"`` -- a credential that only
+    to ``ssh_user="admin"`` / ``ssh_password=<lab default>`` -- a credential that only
     exists there. bag010 is a cicd/qual device with no ``admin`` account, so any
     task carrying SSH credentials fails setup outright with
     ``admin@bag010.ash6: Permission denied (publickey,password)``.

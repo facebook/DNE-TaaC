@@ -133,7 +133,6 @@ or NRQEB hostname:
 from __future__ import annotations
 
 import json
-import os
 import typing as t
 
 from taac.abstractions.physical_interface_semantics import (
@@ -147,6 +146,9 @@ from taac.abstractions.routing_semantics import NetworkRole
 from taac.abstractions.topology import (
     OpenRStandaloneEndpoint,
     OpenRStandaloneLink,
+)
+from taac.utils.lab_device_credentials import (
+    get_lab_device_password,
 )
 from taac.test_as_a_config.types import MockDeviceInfo
 
@@ -174,7 +176,7 @@ IXIA11_ASH6 = "2401:db00:2066:303b::3001"
 # These produce the ``host_driver_args`` / ``oss_mock_device_data`` payloads that
 # the retired ``util/bgp_ebb_lab_wiring._lab_device_wiring`` helper used to
 # synthesize at factory-call time. Byte-identical outputs preserved: password
-# read via ``os.environ.get(env_var, "dnepit")`` (env-var lookup runs at
+# read via ``get_lab_device_password(env_var)`` (env-var lookup runs at
 # PhysicalInventory construction/module-import time; TAAC test processes do
 # not mutate the password env var after import).
 
@@ -183,12 +185,11 @@ def _lab_host_driver_args(
     device_name: str,
     *,
     password_env: str = "TAAC_EBB_LAB_DEVICE_PASSWORD",
-    password_default: str = "dnepit",  # pragma: allowlist secret
     extra_kwargs: dict[str, t.Any] | None = None,
 ) -> dict[str, str]:
     driver_kwargs: dict[str, t.Any] = {
         "username": "admin",
-        "password": os.environ.get(password_env, password_default),
+        "password": get_lab_device_password(password_env),
     }
     if extra_kwargs:
         driver_kwargs.update(extra_kwargs)
@@ -642,7 +643,6 @@ EB01_LAB_ASH6 = PhysicalInventory(
         # these keys inline (Wave 2 candidate: fold into the promoted
         # ``host_driver_args`` / ``oss_mock_device_data`` fields).
         "lab_admin_username": "admin",
-        "lab_admin_password_default": "dnepit",  # pragma: allowlist secret
         "mock_device_hardware": "ARISTA_7516",
         "mock_device_role": "EB",
         "mock_device_asic": "JERICHO",
@@ -676,7 +676,6 @@ EB02_LAB_ASH6 = PhysicalInventory(
         # these keys inline (Wave 2 candidate: fold into the promoted
         # ``host_driver_args`` / ``oss_mock_device_data`` fields).
         "lab_admin_username": "admin",
-        "lab_admin_password_default": "dnepit",  # pragma: allowlist secret
         "mock_device_hardware": "ARISTA_7516",
         "mock_device_role": "EB",
         "mock_device_asic": "JERICHO",
@@ -711,7 +710,6 @@ EB03_LAB_ASH6 = PhysicalInventory(
         # these keys inline (Wave 2 candidate: fold into the promoted
         # ``host_driver_args`` / ``oss_mock_device_data`` fields).
         "lab_admin_username": "admin",
-        "lab_admin_password_default": "dnepit",  # pragma: allowlist secret
         "mock_device_hardware": "ARISTA_7516",
         "mock_device_role": "EB",
         "mock_device_asic": "JERICHO",
@@ -747,7 +745,6 @@ EB04_LAB_ASH6 = PhysicalInventory(
         # these keys inline (Wave 2 candidate: fold into the promoted
         # ``host_driver_args`` / ``oss_mock_device_data`` fields).
         "lab_admin_username": "admin",
-        "lab_admin_password_default": "dnepit",  # pragma: allowlist secret
         "mock_device_hardware": "ARISTA_7516",
         "mock_device_role": "EB",
         "mock_device_asic": "JERICHO",
@@ -796,7 +793,6 @@ EB_TEST_DEVICE = PhysicalInventory(
         # these keys inline (Wave 2 candidate: fold into the promoted
         # ``host_driver_args`` / ``oss_mock_device_data`` fields).
         "lab_admin_username": "admin",
-        "lab_admin_password_default": "dnepit",  # pragma: allowlist secret
         "host_driver_extra_kwargs": {
             "bgp_ip": "2401:db00:2066:304a::1001",
         },

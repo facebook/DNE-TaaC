@@ -12,7 +12,6 @@ External consumers import via ``testconfigs.routing`` root; see README.md §7.
 """
 
 import json
-import os
 
 from taac.abstractions.physical_inventory import (
     EB02_LAB_ASH6,
@@ -26,6 +25,9 @@ from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_performance_test_config,
     create_bgp_ebb_scaling_transient_memory_peer_scale_test_config,
     create_bgp_ebb_scaling_transient_memory_route_scale_test_config,
+)
+from taac.utils.lab_device_credentials import (
+    get_lab_device_password,
 )
 from taac.test_as_a_config import types as taac_types
 
@@ -104,10 +106,7 @@ EB02_ARISTA_PERFORMANCE_SCALING_TEST_9_BOUNDED_ECMP_SETS_TEST_CONFIG = (
 # preserves every arg passed by the legacy
 # ``eb03_arista_performance_scaling_test_2_test_config.py`` wrapper so the
 # golden manifest hash is byte-wise identical.
-_EB03_LAB_DEVICE_PASSWORD = os.environ.get(
-    "TAAC_EBB_LAB_DEVICE_PASSWORD",
-    "dnepit",  # pragma: allowlist secret
-)
+_EB03_LAB_DEVICE_PASSWORD = get_lab_device_password()
 
 EB03_ARISTA_PERFORMANCE_SCALING_TEST_2_TEST_CONFIG = (
     test_config_constant_attribute_storage_on_eos(
