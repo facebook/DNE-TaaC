@@ -12,6 +12,8 @@ from taac.health_checks.device_health_checks.prefix_limit_health_check import (
 )
 from taac.health_check.health_check import types as hc_types
 
+IMPORTED_IN_TAAC_OSS_MODE = _module.TAAC_OSS
+
 
 class _PrefixLimitTestBase(unittest.IsolatedAsyncioTestCase):
     TAAC_OSS: bool = False
@@ -32,6 +34,26 @@ class _PrefixLimitTestBase(unittest.IsolatedAsyncioTestCase):
 
 class InternalPrefixLimitTest(_PrefixLimitTestBase):
     """FIB entries learned via BGP must not exceed the prefix limit."""
+
+    async def test_fib_count_uses_modern_bgp_client(self) -> None:
+        if IMPORTED_IN_TAAC_OSS_MODE:
+            self.assertFalse(hasattr(_module, "FibClient"))
+            return
+
+        self.assertTrue(hasattr(_module, "FibClient"))
+        self.health_check.driver.async_get_bgp_originated_routes.return_value = [
+            object()
+        ]
+        self.health_check.driver.async_get_route_table_by_client.return_value = [
+            object(),
+            object(),
+            object(),
+        ]
+
+        self.assertEqual(2, await self.health_check.async_get_fib_table_entries_count())
+        self.health_check.driver.async_get_route_table_by_client.assert_awaited_once_with(
+            _module.FibClient.BGP.value
+        )
 
     async def test_fib_within_limit_returns_pass(self) -> None:
         self.health_check.async_get_fib_table_entries_count = AsyncMock(

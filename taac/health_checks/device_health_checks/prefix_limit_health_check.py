@@ -27,7 +27,7 @@ from taac.health_check.health_check import types as hc_types
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
 if t.TYPE_CHECKING or not TAAC_OSS:
-    from openr.thrift.Platform.types import FibClient
+    from openr.thrift.Platform.thrift_types import FibClient
 
 
 class PrefixLimitHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckIn]):
