@@ -627,6 +627,22 @@ class IxiaStopTrafficAndWaitTask(BaseTask):
         await asyncio.sleep(wait_seconds)
 
 
+class IxiaSyncRawSourceMacsTask(BaseTask):
+    """Point RAW traffic items' source MAC at their tx port's device-group MAC."""
+
+    NAME = "ixia_sync_raw_source_macs"
+
+    async def run(self, params: t.Dict[str, t.Any]) -> None:
+        traffic_item_regex = params.get("traffic_item_regex", ".*")
+        synced = self.ixia.sync_raw_traffic_source_macs(traffic_item_regex)
+        if not synced:
+            raise ValueError(
+                f"No RAW traffic item matching {traffic_item_regex!r} had its "
+                "source MAC synced"
+            )
+        self.logger.info(f"Synced RAW traffic source MACs: {synced}")
+
+
 class CoopUnregisterPatchersTask(BaseTask):
     NAME = "coop_unregister_patchers"
 

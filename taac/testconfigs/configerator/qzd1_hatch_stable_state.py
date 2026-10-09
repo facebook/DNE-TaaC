@@ -53,7 +53,10 @@ from taac.steps.step_definitions import (
     create_verify_port_operational_state_step,
     create_verify_port_speed_step_v2,
 )
-from taac.task_definitions import create_run_task
+from taac.task_definitions import (
+    create_ixia_sync_raw_source_macs_task,
+    create_run_task,
+)
 from taac.utils.test_config_utils import (
     create_raw_arp_request_traffic_item,
 )
@@ -77,9 +80,20 @@ W400_CHAOS_PLAYBOOK_NAME = "test_w400_hatch_chaos_soak"
 W400_DUT = "rsw002.p005.f01.qzd1"
 W400_DUT_MAC = "c2:18:50:b8:b8:c4"
 
+W100S_TEST_CONFIG_NAME = "QZD1_W100S_HATCH_STABLE_STATE"
+W100S_PLAYBOOK_NAME = "test_w100s_stable_state_acl_traffic_matrix"
+
+W100S_DUT = "rsw004.p003.f01.qzd1"
+# rsw004's system MAC as advertised in LLDP to fsw001.p003.f01.qzd1 (chassis
+# ID on eth6/5/1 and eth4/5/1); the DUT reports the same MAC on every interface.
+W100S_DUT_MAC = "02:90:fb:76:83:a7"
+# ixia01.netcastle.snc1 -- shared with other users; never clear its sessions.
+W100S_IXIA_CHASSIS_IP = "2401:db00:116:3006:21a:c5ff:fe01:314c"
+
 FBOSS10_IPV6_BY_DUT: dict[str, str] = {
     DUT: "2401:db00:e501:f105::",
     W400_DUT: "2401:db00:e501:f104:1::",
+    W100S_DUT: "2401:db00:e501:f102:3::",
 }
 
 # QZD1 (rsw001) port roles: A restricted, B blocked, C unconstrained.
@@ -96,6 +110,12 @@ SPEED_FLIP_200G_PROFILE = "PROFILE_200G_4_PAM4_RS544X2N_COPPER"
 W400_PORT_A = "eth1/20/1"
 W400_PORT_B = "eth1/25/1"
 W400_PORT_C = "eth1/10/1"
+
+# QZD1 Wedge100S (rsw004) port roles. A and C are VLAN 2000 downlinks; B is the
+# uplink_7 (VLAN 4007) port, repurposed for IXIA.
+W100S_PORT_A = "eth1/1/1"  # Restricted, IXIA 6/3
+W100S_PORT_B = "eth1/31/1"  # Blocked, IXIA 10/1
+W100S_PORT_C = "eth1/2/1"  # Unconstrained, IXIA 6/6
 
 # --------------------------------------------------------------------------
 # Chaos-soak wiring (overnight warmboot x policy-transition overlap campaign)
@@ -397,6 +417,9 @@ SPLIT_AGENT_CRITICAL_SERVICES = [
     "qsfp_service",
     "openr",
 ]
+# DUTs running fboss_sw_agent + fboss_hw_agent@0 (rsw004 also keeps a
+# wedge_agent wrapper unit, but the agents themselves are split).
+SPLIT_AGENT_DUTS = frozenset({W400C_DUT, W100S_DUT})
 MONOLITHIC_AGENT_CRITICAL_SERVICES = [
     "wedge_agent",
     "bgpd",
@@ -811,7 +834,7 @@ def _unclean_exit_check(dut=W400C_DUT, exclude_services=None):
     excluded = set(exclude_services or [])
     critical_services = (
         SPLIT_AGENT_CRITICAL_SERVICES
-        if dut == W400C_DUT
+        if dut in SPLIT_AGENT_DUTS
         else MONOLITHIC_AGENT_CRITICAL_SERVICES
     )
     services = [service for service in critical_services if service not in excluded]
@@ -3328,6 +3351,7 @@ def _build_test_config(
     platform=None,
     chaos_ports=None,
     chaos_playbook_name=None,
+    is_derive_ixia_src_mac_address_dynamic=False,
 ):
     """Assemble one stable-state access-policy TestConfig.
 
@@ -3335,6 +3359,11 @@ def _build_test_config(
         ports: (port_a, port_b, port_c) -- restricted, blocked, unconstrained.
         ixia_ports: chassis-side port for each of `ports`, in the same order.
         addressing: (starting_ip, gateway, mask) for each of `ports`, same order.
+        is_derive_ixia_src_mac_address_dynamic: Opt in to rewriting every RAW
+            traffic item's source MAC to its tx port's live IXIA device-group
+            MAC after IXIA setup. Needed where the DUT drops RAW frames whose
+            source MAC was not learned on the ingress port. Off by default so
+            other configs keep their packet-header source MACs.
     """
     port_a, port_b, port_c = ports
     fboss10_ipv6 = FBOSS10_IPV6_BY_DUT[dut]
@@ -3400,7 +3429,12 @@ def _build_test_config(
                     },
                 },
                 ixia_needed=False,
-            )
+            ),
+            *(
+                [create_ixia_sync_raw_source_macs_task()]
+                if is_derive_ixia_src_mac_address_dynamic
+                else []
+            ),
         ],
         basic_port_configs=[
             _port_config(port, starting_ip, gateway, mask, dut)
@@ -3626,6 +3660,7 @@ test_config = _build_test_config(
     platform="W400C",
     chaos_ports=W400C_CHAOS_PORTS,
     chaos_playbook_name=CHAOS_PLAYBOOK_NAME,
+    is_derive_ixia_src_mac_address_dynamic=True,
 )
 
 w400_test_config = _build_test_config(
@@ -3646,4 +3681,23 @@ w400_test_config = _build_test_config(
     platform="W400",
     chaos_ports=W400_CHAOS_PORTS,
     chaos_playbook_name=W400_CHAOS_PLAYBOOK_NAME,
+)
+
+w100s_test_config = _build_test_config(
+    name=W100S_TEST_CONFIG_NAME,
+    dut=W100S_DUT,
+    dut_mac=W100S_DUT_MAC,
+    chassis_ip=W100S_IXIA_CHASSIS_IP,
+    ports=(W100S_PORT_A, W100S_PORT_B, W100S_PORT_C),
+    ixia_ports=("6/3", "10/1", "6/6"),
+    addressing=(
+        ("2401:db00:501c:203::2", "2401:db00:501c:203::a", 64),
+        ("2401:db00:e50e:1202::6", "2401:db00:e50e:1202::7", 127),
+        ("2401:db00:501c:203::1", "2401:db00:501c:203::a", 64),
+    ),
+    playbook_name=W100S_PLAYBOOK_NAME,
+    platform="W100S",
+    # The DUT drops RAW frames whose source MAC was not learned on the ingress
+    # port, and IXIA assigns device-group MACs per session.
+    is_derive_ixia_src_mac_address_dynamic=True,
 )

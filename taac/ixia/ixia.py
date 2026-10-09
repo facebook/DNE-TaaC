@@ -5470,6 +5470,89 @@ class Ixia:
         self.regenerate_traffic_items()
         self.start_traffic()
 
+    def _vport_href_to_device_group_mac(self) -> t.Dict[str, str]:
+        """Map each vport href to the Ethernet MAC of its first device group."""
+        vport_macs: t.Dict[str, str] = {}
+        for topology in self.ixnetwork.Topology.find():
+            mac = None
+            for device_group in topology.DeviceGroup.find():
+                ethernet = device_group.Ethernet.find()
+                values = list(ethernet.Mac.Values) if ethernet else []
+                if values:
+                    mac = values[0]
+                    break
+            vports = list(topology.Vports or [])
+            if mac is None or len(vports) != 1:
+                # One MAC can't be attributed to several ports; leave them out
+                # so their RAW items are skipped rather than mislabelled.
+                continue
+            vport_macs[vports[0]] = mac
+        return vport_macs
+
+    @external_api
+    def sync_raw_traffic_source_macs(
+        self, traffic_item_regex: str = ".*"
+    ) -> t.Dict[str, str]:
+        """Rewrite each RAW traffic item's source MAC to its tx port's device-group MAC.
+
+        RAW packet headers are built before IXIA assigns device-group MACs, so
+        they carry a placeholder source MAC. A DUT that validates source MACs
+        on L3 VLAN interfaces drops those frames at ingress. IXIA assigns
+        device-group MACs per session in no stable order, so the MAC has to be
+        read from the live session rather than hardcoded in the config.
+
+        Args:
+            traffic_item_regex: Only RAW traffic items whose name matches are
+                rewritten.
+
+        Returns:
+            Map of rewritten traffic item name to the source MAC it now uses.
+        """
+        vport_macs = self._vport_href_to_device_group_mac()
+        pattern = re.compile(traffic_item_regex)
+        synced: t.Dict[str, str] = {}
+        for traffic_item in self.ixnetwork.Traffic.TrafficItem.find():
+            if traffic_item.TrafficType != "raw" or not pattern.search(
+                traffic_item.Name
+            ):
+                continue
+            tx_vports = {
+                source.rsplit("/protocols", 1)[0]
+                for endpoint_set in traffic_item.EndpointSet.find()
+                for source in endpoint_set.Sources or []
+            }
+            macs = {vport_macs[vport] for vport in tx_vports if vport in vport_macs}
+            if len(macs) != 1:
+                self.logger.warning(
+                    f"[{traffic_item.Name}] Skipping source MAC sync: expected one "
+                    f"device-group MAC for tx vports {sorted(tx_vports)}, found "
+                    f"{sorted(macs)}"
+                )
+                continue
+            mac = macs.pop()
+            updated = False
+            for config_element in traffic_item.ConfigElement.find():
+                stack = config_element.Stack.find(StackTypeId="^ethernet$")
+                field_obj = stack.Field.find(DisplayName="^Source MAC Address$") if stack else None
+                if not field_obj:
+                    self.logger.warning(
+                        f"[{traffic_item.Name}] Config element has no Ethernet "
+                        "source MAC field; leaving it unchanged"
+                    )
+                    continue
+                field_obj.update(ValueType="singleValue", SingleValue=mac)
+                updated = True
+            if not updated:
+                continue
+            synced[traffic_item.Name] = mac
+            self.logger.info(f"[{traffic_item.Name}] Source MAC set to {mac}")
+        if synced:
+            traffic_running = self.is_traffic_running()
+            self.regenerate_traffic_items()
+            if not traffic_running:
+                self.apply_traffic()
+        return synced
+
     @external_api
     def configure_bgp_peers_flap(
         self,

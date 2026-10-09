@@ -283,6 +283,21 @@ def create_ixia_stop_traffic_and_wait_task(wait_seconds: int = 0) -> Task:
     )
 
 
+def create_ixia_sync_raw_source_macs_task(traffic_item_regex: str = ".*") -> Task:
+    """Create a post-IXIA task that gives RAW traffic items a valid source MAC.
+
+    RAW items carry a placeholder source MAC; this rewrites each one to the
+    MAC of its tx port's IXIA device group so the DUT accepts the frames.
+    """
+    return Task(
+        task_name="ixia_sync_raw_source_macs",
+        ixia_needed=True,
+        params=Params(
+            json_params=json.dumps({"traffic_item_regex": traffic_item_regex})
+        ),
+    )
+
+
 def create_coop_unregister_patchers_task(
     hostnames: t.List[str] | str,
     config_names: t.Optional[t.List[str]] = None,

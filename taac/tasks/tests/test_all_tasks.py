@@ -15,6 +15,7 @@ from taac.tasks.all import (
     ConfigureParallelBgpPeers,
     CoopApplyPatchersTask,
     IxiaStopTrafficAndWaitTask,
+    IxiaSyncRawSourceMacsTask,
     RunCommandsOnShell,
     ScpFile,
     ValidateBgpcppUpdateGroupState,
@@ -435,6 +436,27 @@ class IxiaStopTrafficAndWaitTaskTest(later.unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "must be non-negative"):
             await task.run({"wait_seconds": -1})
+
+
+class IxiaSyncRawSourceMacsTaskTest(later.unittest.TestCase):
+    async def test_syncs_matching_raw_items(self) -> None:
+        ixia = MagicMock()
+        ixia.sync_raw_traffic_source_macs.return_value = {
+            "CPU_RAW": "00:11:01:00:00:01"
+        }
+        task = IxiaSyncRawSourceMacsTask(ixia=ixia, logger=MagicMock())
+
+        await task.run({"traffic_item_regex": "^CPU_RAW$"})
+
+        ixia.sync_raw_traffic_source_macs.assert_called_once_with("^CPU_RAW$")
+
+    async def test_fails_when_nothing_was_synced(self) -> None:
+        ixia = MagicMock()
+        ixia.sync_raw_traffic_source_macs.return_value = {}
+        task = IxiaSyncRawSourceMacsTask(ixia=ixia, logger=MagicMock())
+
+        with self.assertRaisesRegex(ValueError, "had its source MAC synced"):
+            await task.run({"traffic_item_regex": "^MISSING$"})
 
 
 def _count_chunk_commands(call_args_list) -> int:
