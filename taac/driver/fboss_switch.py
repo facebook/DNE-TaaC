@@ -1312,11 +1312,10 @@ class FbossSwitch(AbstractSwitch):
         if is_multi_switch:
             match service_name:
                 case FbossSystemctlServiceName.AGENT.value:
-                    command = (
-                        "systemctl kill --kill-who=main --signal=SIGKILL "
-                        "fboss_sw_agent.service fboss_hw_agent@0.service "
-                        "fboss_hw_agent@1.service"
-                    )
+                    # The units run with KillMode=process and their main
+                    # process is agent_executor_runner, so --kill-who=main
+                    # orphans the agent binaries; kill the binaries instead.
+                    command = "pkill -9 -x fboss_sw_agent; pkill -9 -x fboss_hw_agent"
                 case FbossSystemctlServiceName.FBOSS_HW_AGENT_0.value:
                     command = 'pkill -9 -f "fboss_hw_agent .* --switchIndex 0"'
                 case FbossSystemctlServiceName.FBOSS_HW_AGENT_1.value:

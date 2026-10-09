@@ -90,7 +90,5 @@ class FbossSwitchTest(TestCase):
             await switch.async_crash_service(FbossSystemctlServiceName.AGENT)
 
         run_cmd_mock.assert_awaited_once_with(
-            "systemctl kill --kill-who=main --signal=SIGKILL "
-            "fboss_sw_agent.service fboss_hw_agent@0.service "
-            "fboss_hw_agent@1.service"
+            "pkill -9 -x fboss_sw_agent; pkill -9 -x fboss_hw_agent"
         )

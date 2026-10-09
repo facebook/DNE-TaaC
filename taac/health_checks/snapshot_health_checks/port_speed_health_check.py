@@ -80,7 +80,7 @@ class PortSpeedHealtchCheck(
                 issues.append(f"Port {port} not found in post snapshot")
             elif pre_speed != post_speed:
                 issues.append(
-                    f"Port {port} speed has changed. Speed Before Test: {pre_speed // 1000}G and Speed After Test: {post_speed // 1000}G"
+                    f"Port {port} speed has changed. Speed Before Test: {pre_speed}G and Speed After Test: {post_speed}G"
                 )
 
         if issues:
