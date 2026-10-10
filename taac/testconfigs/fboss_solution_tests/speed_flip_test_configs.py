@@ -13,7 +13,16 @@ from dataclasses import dataclass
 
 from ixia.ixia import types as ixia_types
 from taac.health_checks.healthcheck_definitions import (
+    create_bgp_peer_route_snapshot_check,
+    create_bgp_session_establish_check,
+    create_core_dumps_snapshot_check,
+    create_drain_state_check,
+    create_ixia_packet_loss_check,
+    create_ixia_port_stats_check,
+    create_lldp_check,
     create_port_speed_snapshot_check,
+    create_port_state_check,
+    create_systemctl_active_state_check,
 )
 from taac.playbooks.playbook_definitions import (
     create_bidirectional_speed_flip_playbook,
@@ -38,6 +47,7 @@ from taac.task_definitions import (
     create_wait_for_agent_convergence_task,
     create_wait_for_bgp_convergence_task,
 )
+from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Endpoint, Playbook, Stage, TestConfig
 
@@ -883,6 +893,32 @@ def _create_speed_flip_bgp_peer_setup_task(
     )
 
 
+def _speed_flip_prechecks() -> t.List[taac_types.PointInTimeHealthCheck]:
+    return [
+        create_drain_state_check(),
+        create_systemctl_active_state_check(),
+        create_bgp_session_establish_check(),
+        create_lldp_check(),
+        create_port_state_check(),
+        create_ixia_packet_loss_check(
+            thresholds=[hc_types.PacketLossThreshold(str_value="0.1")],
+        ),
+        create_ixia_port_stats_check(snapshot_baseline=True),
+    ]
+
+
+def _speed_flip_postchecks() -> t.List[taac_types.PointInTimeHealthCheck]:
+    return [
+        create_bgp_session_establish_check(),
+        create_lldp_check(),
+        create_port_state_check(),
+        create_ixia_packet_loss_check(
+            thresholds=[hc_types.PacketLossThreshold(str_value="2")],
+        ),
+        create_ixia_port_stats_check(),
+    ]
+
+
 def _single_cage_health_check_params(speed_in_gbps: int) -> t.Dict[str, t.Any]:
     return {
         hostname: {
@@ -906,7 +942,9 @@ def _build_51t_single_cage_two_port_test_config() -> TestConfig:
             json_params={"endpoints": _SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS},
             pre_snapshot_checkpoint_id="test_case_start",
             post_snapshot_checkpoint_id="test_case_end",
-        )
+        ),
+        create_core_dumps_snapshot_check(),
+        create_bgp_peer_route_snapshot_check(),
     ]
     case_specs = [
         (
@@ -937,6 +975,8 @@ def _build_51t_single_cage_two_port_test_config() -> TestConfig:
                 target_port_cage_count=1,
                 target_trigger_stages=target_trigger_stages,
                 baseline_trigger_stages=baseline_trigger_stages,
+                prechecks=_speed_flip_prechecks(),
+                postchecks=_speed_flip_postchecks(),
                 traffic_items_to_start=[_SPEED_FLIP_51T_TRAFFIC_ITEM],
                 iteration=1,
             ),
