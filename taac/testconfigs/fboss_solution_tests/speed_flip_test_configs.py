@@ -10,6 +10,7 @@ convergence on multi-DUT topologies.
 import typing as t
 from dataclasses import dataclass
 
+from ixia.ixia import types as ixia_types
 from taac.health_checks.healthcheck_definitions import (
     create_port_speed_snapshot_check,
 )
@@ -779,10 +780,64 @@ def build_two_device_speed_flip_test_config(
     ).build_test_config()
 
 
-_SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS = {
-    "ssw003.s001.m001.qzr1": ["eth1/10/1", "eth1/10/5"],
-    "fsw003.p002.m001.qzr1": ["eth1/3/1", "eth1/3/5"],
+_SPEED_FLIP_51T_DUT: str = "ssw003.s001.m001.qzr1"
+_SPEED_FLIP_51T_PEER: str = "fsw003.p002.m001.qzr1"
+_SPEED_FLIP_51T_DUT_IXIA_PORT: str = "eth1/62/1"
+_SPEED_FLIP_51T_PEER_IXIA_PORT: str = "eth1/63/1"
+_SPEED_FLIP_51T_TRAFFIC_ITEM: str = "SPEED_FLIP_51T_IPV6_TRAFFIC"
+_SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS: t.Dict[str, t.List[str]] = {
+    _SPEED_FLIP_51T_DUT: ["eth1/10/1", "eth1/10/5"],
+    _SPEED_FLIP_51T_PEER: ["eth1/3/1", "eth1/3/5"],
 }
+
+
+def _create_speed_flip_ixia_port_config(
+    hostname: str,
+    interface: str,
+    interconnect_parent: str,
+    remote_as: int,
+    is_confed: bool,
+    route_prefix: str,
+    communities: t.List[str],
+) -> taac_types.BasicPortConfig:
+    return taac_types.BasicPortConfig(
+        endpoint=f"{hostname}:{interface}",
+        device_group_configs=[
+            taac_types.DeviceGroupConfig(
+                device_group_index=0,
+                multiplier=1,
+                v6_addresses_config=taac_types.IpAddressesConfig(
+                    starting_ip=f"{interconnect_parent}::11",
+                    increment_ip="0:0:0:0::2",
+                    gateway_starting_ip=f"{interconnect_parent}::10",
+                    gateway_increment_ip="0:0:0:0::2",
+                    mask=127,
+                ),
+                v6_bgp_config=taac_types.BgpConfig(
+                    local_as_4_bytes=remote_as,
+                    enable_4_byte_local_as=True,
+                    is_confed=is_confed,
+                    bgp_capabilities=[ixia_types.BgpCapability.IpV6Unicast],
+                    hold_timer=30,
+                    keepalive_timer=10,
+                    route_scales=[
+                        taac_types.RouteScaleSpec(
+                            network_group_index=0,
+                            v6_route_scale=taac_types.RouteScale(
+                                multiplier=1,
+                                prefix_count=100,
+                                prefix_length=64,
+                                starting_prefixes=route_prefix,
+                                prefix_step="0:0:0:1::",
+                                bgp_communities=communities,
+                                ip_address_family=ixia_types.IpAddressFamily.IPV6,
+                            ),
+                        )
+                    ],
+                ),
+            )
+        ],
+    )
 
 
 def _single_cage_health_check_params(speed_in_gbps: int) -> t.Dict[str, t.Any]:
@@ -839,6 +894,7 @@ def _build_51t_single_cage_two_port_test_config() -> TestConfig:
                 target_port_cage_count=1,
                 target_trigger_stages=target_trigger_stages,
                 baseline_trigger_stages=baseline_trigger_stages,
+                traffic_items_to_start=[_SPEED_FLIP_51T_TRAFFIC_ITEM],
                 iteration=1,
             ),
             snapshot_checks=snapshot_checks,
@@ -849,8 +905,76 @@ def _build_51t_single_cage_two_port_test_config() -> TestConfig:
         name="SPEED_FLIP_51T_SINGLE_CAGE_TWO_PORT_TEST_CONFIG",
         basset_pool="dne.test",
         endpoints=[
-            Endpoint(name=hostname, dut=(index == 0))
+            Endpoint(
+                name=hostname,
+                dut=(index == 0),
+                ixia_ports=[
+                    (
+                        _SPEED_FLIP_51T_DUT_IXIA_PORT
+                        if hostname == _SPEED_FLIP_51T_DUT
+                        else _SPEED_FLIP_51T_PEER_IXIA_PORT
+                    )
+                ],
+            )
             for index, hostname in enumerate(_SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS)
+        ],
+        basic_port_configs=[
+            _create_speed_flip_ixia_port_config(
+                hostname=_SPEED_FLIP_51T_DUT,
+                interface=_SPEED_FLIP_51T_DUT_IXIA_PORT,
+                interconnect_parent="2401:db00:e50d:11:9",
+                remote_as=7001,
+                is_confed=True,
+                route_prefix="8000:51::",
+                communities=["65529:34814", "65441:131", "65446:201"],
+            ),
+            _create_speed_flip_ixia_port_config(
+                hostname=_SPEED_FLIP_51T_PEER,
+                interface=_SPEED_FLIP_51T_PEER_IXIA_PORT,
+                interconnect_parent="2401:db00:e50d:11:8",
+                remote_as=7001,
+                is_confed=True,
+                route_prefix="9000:51::",
+                communities=[
+                    "65441:194",
+                    "65441:9001",
+                    "65441:9002",
+                    "65441:9003",
+                    "65441:9004",
+                    "65441:9005",
+                ],
+            ),
+        ],
+        basic_traffic_item_configs=[
+            taac_types.BasicTrafficItemConfig(
+                name=_SPEED_FLIP_51T_TRAFFIC_ITEM,
+                bidirectional=True,
+                merge_destinations=True,
+                line_rate_type=ixia_types.RateType.PERCENT_LINE_RATE,
+                line_rate=50,
+                src_dest_mesh=ixia_types.SrcDestMeshType.ONE_TO_ONE,
+                src_endpoints=[
+                    taac_types.TrafficEndpoint(
+                        name=(f"{_SPEED_FLIP_51T_DUT}:{_SPEED_FLIP_51T_DUT_IXIA_PORT}"),
+                        network_group_index=0,
+                        device_group_index=0,
+                    )
+                ],
+                dest_endpoints=[
+                    taac_types.TrafficEndpoint(
+                        name=(
+                            f"{_SPEED_FLIP_51T_PEER}:{_SPEED_FLIP_51T_PEER_IXIA_PORT}"
+                        ),
+                        network_group_index=0,
+                        device_group_index=0,
+                    )
+                ],
+                traffic_type=ixia_types.TrafficType.IPV6,
+                frame_size_settings=ixia_types.FrameSize(
+                    type=ixia_types.FrameSizeType.CUSTOM_IMIX,
+                ),
+                tracking_types=[ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM],
+            )
         ],
         playbooks=playbooks,
     )
