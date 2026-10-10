@@ -14,6 +14,7 @@ from taac.health_checks.healthcheck_definitions import (
     create_port_speed_snapshot_check,
 )
 from taac.playbooks.playbook_definitions import (
+    create_bidirectional_speed_flip_playbook,
     create_speed_flip_playbook,
     create_speed_flip_test_config_playbook,
 )
@@ -101,6 +102,55 @@ def service_event_stages(health_check_params: t.Dict[str, t.Any]) -> t.List[Stag
                 get_validation_step(health_check_params),
             ]
         ),
+    ]
+
+
+def agent_crash_stages(
+    health_check_params: t.Dict[str, t.Any],
+) -> t.List[Stage]:
+    """Build the agent-crash trigger and target-speed validation stage."""
+    return [
+        create_steps_stage(
+            steps=[
+                create_service_interruption_step(
+                    service=taac_types.Service.AGENT,
+                    trigger=taac_types.ServiceInterruptionTrigger.CRASH,
+                ),
+                create_service_convergence_step(
+                    services=[taac_types.Service.AGENT],
+                ),
+                create_longevity_step(duration=180),
+                get_validation_step(health_check_params),
+            ]
+        )
+    ]
+
+
+def coop_crash_warmboot_stages(
+    health_check_params: t.Dict[str, t.Any],
+) -> t.List[Stage]:
+    """Build the Coop-crash, agent-warmboot, and speed-validation stage."""
+    return [
+        create_steps_stage(
+            steps=[
+                create_service_interruption_step(
+                    service=taac_types.Service.COOP,
+                    trigger=taac_types.ServiceInterruptionTrigger.CRASH,
+                ),
+                create_service_convergence_step(
+                    services=[taac_types.Service.AGENT],
+                ),
+                create_longevity_step(duration=180),
+                create_service_interruption_step(
+                    service=taac_types.Service.AGENT,
+                    trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                ),
+                create_service_convergence_step(
+                    services=[taac_types.Service.AGENT],
+                ),
+                get_validation_step(health_check_params),
+            ]
+        )
     ]
 
 
@@ -727,6 +777,88 @@ def build_two_device_speed_flip_test_config(
         },
         playbooks=playbooks,
     ).build_test_config()
+
+
+_SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS = {
+    "ssw003.s001.m001.qzr1": ["eth1/10/1", "eth1/10/5"],
+    "fsw003.p002.m001.qzr1": ["eth1/3/1", "eth1/3/5"],
+}
+
+
+def _single_cage_health_check_params(speed_in_gbps: int) -> t.Dict[str, t.Any]:
+    return {
+        hostname: {
+            "interfaces": [
+                {
+                    "interface_name": interface,
+                    "expected_speed": speed_in_gbps,
+                }
+                for interface in interfaces
+            ]
+        }
+        for hostname, interfaces in _SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS.items()
+    }
+
+
+def _build_51t_single_cage_two_port_test_config() -> TestConfig:
+    target_health_check_params = _single_cage_health_check_params(100)
+    baseline_health_check_params = _single_cage_health_check_params(200)
+    snapshot_checks = [
+        create_port_speed_snapshot_check(
+            json_params={"endpoints": _SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS},
+            pre_snapshot_checkpoint_id="test_case_start",
+            post_snapshot_checkpoint_id="test_case_end",
+        )
+    ]
+    case_specs = [
+        (
+            "SPEED_FLIP_51T_SPD_001_100G_TO_200G_WARMBOOT",
+            [],
+            [],
+        ),
+        (
+            "SPEED_FLIP_51T_SPD_004_100G_TO_200G_AGENT_CRASH",
+            agent_crash_stages(target_health_check_params),
+            agent_crash_stages(baseline_health_check_params),
+        ),
+        (
+            "SPEED_FLIP_51T_SPD_007_100G_TO_200G_COOP_CRASH_WARMBOOT",
+            coop_crash_warmboot_stages(target_health_check_params),
+            coop_crash_warmboot_stages(baseline_health_check_params),
+        ),
+    ]
+    playbooks = [
+        create_speed_flip_test_config_playbook(
+            built_playbook=create_bidirectional_speed_flip_playbook(
+                name=name,
+                endpoints=_SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS,
+                target_speed_in_gbps=100,
+                baseline_health_check_params=baseline_health_check_params,
+                target_health_check_params=target_health_check_params,
+                patcher_name=f"change_speed_test_100_{name.lower()}",
+                target_port_cage_count=1,
+                target_trigger_stages=target_trigger_stages,
+                baseline_trigger_stages=baseline_trigger_stages,
+                iteration=1,
+            ),
+            snapshot_checks=snapshot_checks,
+        )
+        for name, target_trigger_stages, baseline_trigger_stages in case_specs
+    ]
+    return TestConfig(
+        name="SPEED_FLIP_51T_SINGLE_CAGE_TWO_PORT_TEST_CONFIG",
+        basset_pool="dne.test",
+        endpoints=[
+            Endpoint(name=hostname, dut=(index == 0))
+            for index, hostname in enumerate(_SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS)
+        ],
+        playbooks=playbooks,
+    )
+
+
+SPEED_FLIP_51T_SINGLE_CAGE_TWO_PORT_TEST_CONFIG = (
+    _build_51t_single_cage_two_port_test_config()
+)
 
 
 SPEED_FLIP_TEST_CONFIGS = [
@@ -2403,48 +2535,5 @@ SPEED_FLIP_TEST_CONFIGS = [
         ],
         churn_iterations=10,
     ),
-    # 51T Kodiak3 (MORGAN800CC): ssw003.s001 (DUT) <-> fsw003.p002 share a
-    # single dual cage that runs natively at 2x200G, hence
-    # target_port_cage_count=1. Registering the 100G patcher flips 200G -> 100G;
-    # unregistering it restores the native 200G.
-    SpeedFlipTestConfig(
-        endpoints=["ssw003.s001.m001.qzr1", "fsw003.p002.m001.qzr1"],
-        test_config_name="SPEED_FLIP_51T_KO3_SSW_FSW_TEST_PORTS_UP",
-        snapshot_health_check_params={
-            "ssw003.s001.m001.qzr1": ["eth1/10/1", "eth1/10/5"],
-            "fsw003.p002.m001.qzr1": ["eth1/3/1", "eth1/3/5"],
-        },
-        playbooks=[
-            SpeedFlipPlaybook(
-                stages=[
-                    SpeedTransitionStage(
-                        endpoints={
-                            "ssw003.s001.m001.qzr1": ["eth1/10/1", "eth1/10/5"],
-                            "fsw003.p002.m001.qzr1": ["eth1/3/1", "eth1/3/5"],
-                        },
-                        speed_in_gbps=100,
-                        patcher_name="change_speed_test_100",
-                        port_state_change=False,
-                        target_port_cage_count=1,
-                    ),
-                ],
-                health_check_params={
-                    "ssw003.s001.m001.qzr1": {
-                        "interfaces": [
-                            {"interface_name": "eth1/10/1", "expected_speed": 100},
-                            {"interface_name": "eth1/10/5", "expected_speed": 100},
-                        ]
-                    },
-                    "fsw003.p002.m001.qzr1": {
-                        "interfaces": [
-                            {"interface_name": "eth1/3/1", "expected_speed": 100},
-                            {"interface_name": "eth1/3/5", "expected_speed": 100},
-                        ]
-                    },
-                },
-                playbook_name="SPEED_FLIP_51T_KO3_SSW_FSW_TEST_PORTS_UP_200G_TO_100G_PLAYBOOK",
-                number_of_iterations=1,
-            ),
-        ],
-    ).build_test_config(),
+    SPEED_FLIP_51T_SINGLE_CAGE_TWO_PORT_TEST_CONFIG,
 ]
