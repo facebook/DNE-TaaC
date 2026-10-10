@@ -4408,6 +4408,7 @@ def create_speed_flip_test_config_playbook(
         traffic_items_to_start=built_playbook.traffic_items_to_start,
         snapshot_checks=list(built_playbook.snapshot_checks or [])
         + list(snapshot_checks),
+        cleanup_steps=built_playbook.cleanup_steps,
         enabled=built_playbook.enabled,
     )
 
