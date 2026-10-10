@@ -3,6 +3,7 @@
 import json
 import unittest
 
+from ixia.ixia import types as ixia_types
 from taac.playbooks import playbook_definitions
 from taac.testconfigs.fboss_solution_tests import (
     speed_flip_test_configs,
@@ -12,6 +13,9 @@ from taac.test_as_a_config import types as taac_types
 
 _DUT = "ssw003.s001.m001.qzr1"
 _PEER = "fsw003.p002.m001.qzr1"
+_DUT_IXIA_PORT = "eth1/62/1"
+_PEER_IXIA_PORT = "eth1/63/1"
+_TRAFFIC_ITEM = "SPEED_FLIP_51T_IPV6_TRAFFIC"
 _ENDPOINTS = {
     _DUT: ["eth1/10/1", "eth1/10/5"],
     _PEER: ["eth1/3/1", "eth1/3/5"],
@@ -124,6 +128,11 @@ class ReusableSpeedFlipPlaybookTest(unittest.TestCase):
 
 
 class SpeedFlip51TTestConfigTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.test_config = (
+            speed_flip_test_configs.SPEED_FLIP_51T_SINGLE_CAGE_TWO_PORT_TEST_CONFIG
+        )
+
     def test_exposes_independent_supported_cases_for_the_ko3_pair(self) -> None:
         test_config = getattr(
             speed_flip_test_configs,
@@ -165,3 +174,56 @@ class SpeedFlip51TTestConfigTest(unittest.TestCase):
 
         self.assertIn("SPEED_FLIP_51T_SINGLE_CAGE_TWO_PORT_TEST_CONFIG", names)
         self.assertNotIn("SPEED_FLIP_51T_KO3_SSW_FSW_TEST_PORTS_UP", names)
+
+    def test_configures_two_ixia_endpoints_and_custom_imix_traffic(self) -> None:
+        endpoint_ixia_ports = {
+            endpoint.name: list(endpoint.ixia_ports or [])
+            for endpoint in self.test_config.endpoints
+        }
+        self.assertEqual(
+            endpoint_ixia_ports,
+            {
+                _DUT: [_DUT_IXIA_PORT],
+                _PEER: [_PEER_IXIA_PORT],
+            },
+        )
+
+        port_configs = list(self.test_config.basic_port_configs or [])
+        self.assertEqual(
+            [port_config.endpoint for port_config in port_configs],
+            [f"{_DUT}:{_DUT_IXIA_PORT}", f"{_PEER}:{_PEER_IXIA_PORT}"],
+        )
+        for port_config in port_configs:
+            device_groups = list(port_config.device_group_configs or [])
+            self.assertEqual(len(device_groups), 1)
+            self.assertEqual(device_groups[0].multiplier, 1)
+            self.assertIsNotNone(device_groups[0].v6_bgp_config)
+
+        traffic_items = list(self.test_config.basic_traffic_item_configs or [])
+        self.assertEqual(len(traffic_items), 1)
+        traffic_item = traffic_items[0]
+        self.assertEqual(traffic_item.name, _TRAFFIC_ITEM)
+        self.assertEqual(
+            traffic_item.line_rate_type,
+            ixia_types.RateType.PERCENT_LINE_RATE,
+        )
+        self.assertEqual(traffic_item.line_rate, 50)
+        self.assertTrue(traffic_item.bidirectional)
+        self.assertEqual(traffic_item.traffic_type, ixia_types.TrafficType.IPV6)
+        self.assertEqual(
+            traffic_item.src_dest_mesh,
+            ixia_types.SrcDestMeshType.ONE_TO_ONE,
+        )
+        self.assertIsNotNone(traffic_item.frame_size_settings)
+        self.assertEqual(
+            traffic_item.frame_size_settings.type,
+            ixia_types.FrameSizeType.CUSTOM_IMIX,
+        )
+        self.assertEqual(
+            [endpoint.name for endpoint in traffic_item.src_endpoints],
+            [f"{_DUT}:{_DUT_IXIA_PORT}"],
+        )
+        self.assertEqual(
+            [endpoint.name for endpoint in traffic_item.dest_endpoints],
+            [f"{_PEER}:{_PEER_IXIA_PORT}"],
+        )
