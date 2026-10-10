@@ -7,6 +7,7 @@ qualify port-speed transitions (e.g., 100G <-> 400G) under service interruption 
 convergence on multi-DUT topologies.
 """
 
+import json
 import typing as t
 from dataclasses import dataclass
 
@@ -29,6 +30,13 @@ from taac.steps.step_definitions import (
     create_service_convergence_step,
     create_service_interruption_step,
     create_system_reboot_step,
+)
+from taac.task_definitions import (
+    create_configure_parallel_bgp_peers_task,
+    create_coop_apply_patchers_task,
+    create_coop_unregister_patchers_task,
+    create_wait_for_agent_convergence_task,
+    create_wait_for_bgp_convergence_task,
 )
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Endpoint, Playbook, Stage, TestConfig
@@ -840,6 +848,41 @@ def _create_speed_flip_ixia_port_config(
     )
 
 
+def _create_speed_flip_bgp_peer_setup_task(
+    hostname: str,
+    interface: str,
+    interconnect_parent: str,
+    peer_group_name: str,
+    remote_as: int,
+    patcher_suffix: str,
+) -> taac_types.Task:
+    return create_configure_parallel_bgp_peers_task(
+        hostname=hostname,
+        configure_vlans_patcher_name=(
+            f"speed_flip_51t_configure_vlan_{patcher_suffix}"
+        ),
+        add_bgp_peers_patcher_name=(f"speed_flip_51t_add_bgp_peer_{patcher_suffix}"),
+        config_json=json.dumps(
+            {
+                interface: [
+                    {
+                        "starting_ip": f"{interconnect_parent}::10",
+                        "increment_ip": "0:0:0:0::2",
+                        "prefix_length": 127,
+                        "description": "51T speed-flip IXIA IPv6 peer",
+                        "peer_group_name": peer_group_name,
+                        "num_sessions": 1,
+                        "remote_as_4_byte": remote_as,
+                        "remote_as_4_byte_step": 0,
+                        "gateway_starting_ip": f"{interconnect_parent}::11",
+                        "gateway_increment_ip": "0:0:0:0::2",
+                    }
+                ]
+            }
+        ),
+    )
+
+
 def _single_cage_health_check_params(speed_in_gbps: int) -> t.Dict[str, t.Any]:
     return {
         hostname: {
@@ -917,6 +960,40 @@ def _build_51t_single_cage_two_port_test_config() -> TestConfig:
                 ],
             )
             for index, hostname in enumerate(_SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS)
+        ],
+        setup_tasks=[
+            _create_speed_flip_bgp_peer_setup_task(
+                hostname=_SPEED_FLIP_51T_DUT,
+                interface=_SPEED_FLIP_51T_DUT_IXIA_PORT,
+                interconnect_parent="2401:db00:e50d:11:9",
+                peer_group_name="PEERGROUP_SSW_FSW_V6",
+                remote_as=7001,
+                patcher_suffix="ssw_downlink",
+            ),
+            _create_speed_flip_bgp_peer_setup_task(
+                hostname=_SPEED_FLIP_51T_PEER,
+                interface=_SPEED_FLIP_51T_PEER_IXIA_PORT,
+                interconnect_parent="2401:db00:e50d:11:8",
+                peer_group_name="PEERGROUP_FSW_RSW_V6",
+                remote_as=7001,
+                patcher_suffix="fsw_downlink",
+            ),
+            create_coop_apply_patchers_task(
+                hostnames=[_SPEED_FLIP_51T_DUT, _SPEED_FLIP_51T_PEER],
+            ),
+            create_wait_for_agent_convergence_task(
+                hostnames=[_SPEED_FLIP_51T_DUT, _SPEED_FLIP_51T_PEER],
+            ),
+            create_wait_for_bgp_convergence_task(
+                hostnames=[_SPEED_FLIP_51T_DUT, _SPEED_FLIP_51T_PEER],
+            ),
+        ],
+        teardown_tasks=[
+            create_coop_unregister_patchers_task(
+                hostnames=[_SPEED_FLIP_51T_DUT, _SPEED_FLIP_51T_PEER],
+                config_names=["agent", "bgpcpp", "bgpcpp_softdrain"],
+                regex="^speed_flip_51t_",
+            )
         ],
         basic_port_configs=[
             _create_speed_flip_ixia_port_config(
