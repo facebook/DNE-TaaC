@@ -9,6 +9,7 @@ from taac.playbooks import playbook_definitions
 from taac.testconfigs.fboss_solution_tests import (
     speed_flip_test_configs,
 )
+from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 
 
@@ -235,6 +236,55 @@ class SpeedFlip51TTestConfigTest(unittest.TestCase):
             [endpoint.name for endpoint in traffic_item.dest_endpoints],
             [f"{_PEER}:{_PEER_IXIA_PORT}"],
         )
+
+    def test_every_playbook_runs_traffic_and_recovery_checks(self) -> None:
+        expected_prechecks = {
+            hc_types.CheckName.DRAIN_STATE_CHECK,
+            hc_types.CheckName.SYSTEMCTL_ACTIVE_STATE_CHECK,
+            hc_types.CheckName.BGP_SESSION_ESTABLISH_CHECK,
+            hc_types.CheckName.LLDP_CHECK,
+            hc_types.CheckName.PORT_STATE_CHECK,
+            hc_types.CheckName.IXIA_PACKET_LOSS_CHECK,
+            hc_types.CheckName.IXIA_PORT_STATS_CHECK,
+        }
+        expected_postchecks = {
+            hc_types.CheckName.BGP_SESSION_ESTABLISH_CHECK,
+            hc_types.CheckName.LLDP_CHECK,
+            hc_types.CheckName.PORT_STATE_CHECK,
+            hc_types.CheckName.IXIA_PACKET_LOSS_CHECK,
+            hc_types.CheckName.IXIA_PORT_STATS_CHECK,
+        }
+        expected_snapshots = {
+            hc_types.CheckName.PORT_SPEED_SNAPSHOT_CHECK,
+            hc_types.CheckName.CORE_DUMPS_CHECK,
+            hc_types.CheckName.BGP_PEER_ROUTE_CHECK,
+        }
+
+        for playbook in self.test_config.playbooks:
+            self.assertEqual(playbook.traffic_items_to_start, [_TRAFFIC_ITEM])
+            self.assertNotIn(
+                hc_types.CheckName.IXIA_TRAFFIC_RATE_CHECK,
+                {check.name for check in playbook.prechecks or []},
+            )
+            self.assertNotIn(
+                hc_types.CheckName.IXIA_TRAFFIC_RATE_CHECK,
+                {check.name for check in playbook.postchecks or []},
+            )
+            self.assertTrue(
+                expected_prechecks.issubset(
+                    {check.name for check in playbook.prechecks or []}
+                )
+            )
+            self.assertTrue(
+                expected_postchecks.issubset(
+                    {check.name for check in playbook.postchecks or []}
+                )
+            )
+            self.assertTrue(
+                expected_snapshots.issubset(
+                    {check.name for check in playbook.snapshot_checks or []}
+                )
+            )
 
     def test_configures_and_cleans_device_side_bgp_peers(self) -> None:
         setup_tasks = list(self.test_config.setup_tasks or [])
