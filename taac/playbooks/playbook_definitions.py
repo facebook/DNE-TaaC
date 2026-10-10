@@ -152,7 +152,9 @@ from taac.steps.step_definitions import (
     create_performance_scaling_egress_sweep_aggregator_step,
     create_openr_scale_performance_cleanup_step,
     create_openr_scale_performance_step,
+    create_port_speed_validation_step,
     create_register_patcher_step,
+    create_register_speed_flip_patcher_step,
     create_run_ssh_command_step,
     create_run_task_step,
     create_randomize_prefix_local_preference_step,
@@ -4387,6 +4389,76 @@ def create_speed_flip_playbook(
         name=name,
         stages=stages,
         iteration=iteration,
+    )
+
+
+def create_bidirectional_speed_flip_playbook(
+    name: str,
+    endpoints: t.Dict[str, t.List[str]],
+    target_speed_in_gbps: int,
+    baseline_health_check_params: t.Dict[str, t.Any],
+    target_health_check_params: t.Dict[str, t.Any],
+    patcher_name: str,
+    target_port_cage_count: int,
+    target_trigger_stages: t.Optional[t.List[taac_types.Stage]] = None,
+    baseline_trigger_stages: t.Optional[t.List[taac_types.Stage]] = None,
+    port_state_change: bool = False,
+    iteration: int = 1,
+) -> Playbook:
+    """Build a reusable apply, validate, trigger, and restore speed-flip flow.
+
+    The speed patcher changes every endpoint to ``target_speed_in_gbps`` and
+    warmboots the agent. The playbook validates configured speed and link
+    state, runs caller-supplied trigger stages at the target speed, removes the
+    patcher, validates the restored baseline, and optionally repeats trigger
+    stages at the baseline speed. Cleanup performs an idempotent unregister so
+    a failed stage cannot leave the speed patcher applied.
+
+    Device names, interfaces, platform-specific cage requirements, and service
+    events are caller inputs, so this factory is not tied to a topology or
+    chassis model.
+    """
+
+    def speed_patcher_step(register_patcher: bool) -> taac_types.Step:
+        return create_register_speed_flip_patcher_step(
+            register_patcher=register_patcher,
+            port_state_change=port_state_change,
+            patcher_name=patcher_name,
+            endpoints=endpoints,
+            speed_in_gbps=target_speed_in_gbps,
+            target_port_cage_count=target_port_cage_count,
+        )
+
+    def validation_stage(
+        health_check_params: t.Dict[str, t.Any],
+    ) -> taac_types.Stage:
+        return create_steps_stage(
+            steps=[
+                *[
+                    create_verify_port_operational_state_step(
+                        interfaces=interfaces,
+                        operational_state=True,
+                        device_regexes=[hostname],
+                    )
+                    for hostname, interfaces in endpoints.items()
+                ],
+                create_port_speed_validation_step(health_check_params),
+            ]
+        )
+
+    stages = [
+        create_steps_stage(steps=[speed_patcher_step(register_patcher=True)]),
+        validation_stage(target_health_check_params),
+        *(target_trigger_stages or []),
+        create_steps_stage(steps=[speed_patcher_step(register_patcher=False)]),
+        validation_stage(baseline_health_check_params),
+        *(baseline_trigger_stages or []),
+    ]
+    return Playbook(
+        name=name,
+        stages=stages,
+        iteration=iteration,
+        cleanup_steps=[speed_patcher_step(register_patcher=False)],
     )
 
 
