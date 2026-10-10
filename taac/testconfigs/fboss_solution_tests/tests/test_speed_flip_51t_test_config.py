@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 import json
+import typing as t
 import unittest
 
 from ixia.ixia import types as ixia_types
@@ -36,6 +37,13 @@ def _health_check_params(speed: int) -> dict[str, object]:
 
 def _step_params(step: taac_types.Step) -> dict[str, object]:
     params = step.step_params
+    if params is None or params.json_params is None:
+        return {}
+    return json.loads(params.json_params)
+
+
+def _task_params(task: taac_types.Task) -> dict[str, object]:
+    params = task.params
     if params is None or params.json_params is None:
         return {}
     return json.loads(params.json_params)
@@ -227,3 +235,53 @@ class SpeedFlip51TTestConfigTest(unittest.TestCase):
             [endpoint.name for endpoint in traffic_item.dest_endpoints],
             [f"{_PEER}:{_PEER_IXIA_PORT}"],
         )
+
+    def test_configures_and_cleans_device_side_bgp_peers(self) -> None:
+        setup_tasks = list(self.test_config.setup_tasks or [])
+        self.assertEqual(
+            [task.task_name for task in setup_tasks],
+            [
+                "configure_parallel_bgp_peers",
+                "configure_parallel_bgp_peers",
+                "coop_apply_patchers",
+                "wait_for_agent_convergence",
+                "wait_for_bgp_convergence",
+            ],
+        )
+        peer_task_params = [_task_params(task) for task in setup_tasks[:2]]
+        self.assertEqual(
+            [params["hostname"] for params in peer_task_params],
+            [_DUT, _PEER],
+        )
+        self.assertEqual(
+            [
+                next(iter(json.loads(t.cast(str, params["config_json"]))))
+                for params in peer_task_params
+            ],
+            [_DUT_IXIA_PORT, _PEER_IXIA_PORT],
+        )
+        peer_configs = [
+            next(iter(json.loads(t.cast(str, params["config_json"])).values()))[0]
+            for params in peer_task_params
+        ]
+        self.assertEqual(
+            [config["peer_group_name"] for config in peer_configs],
+            ["PEERGROUP_SSW_FSW_V6", "PEERGROUP_FSW_RSW_V6"],
+        )
+        self.assertEqual(
+            [config["remote_as_4_byte"] for config in peer_configs],
+            [7001, 7001],
+        )
+
+        teardown_tasks = list(self.test_config.teardown_tasks or [])
+        self.assertEqual(
+            [task.task_name for task in teardown_tasks],
+            ["coop_unregister_patchers"],
+        )
+        cleanup_params = _task_params(teardown_tasks[0])
+        self.assertEqual(cleanup_params["hostnames"], [_DUT, _PEER])
+        self.assertEqual(
+            cleanup_params["config_names"],
+            ["agent", "bgpcpp", "bgpcpp_softdrain"],
+        )
+        self.assertEqual(cleanup_params.get("regex"), "^speed_flip_51t_")
