@@ -4,6 +4,9 @@ import json
 import unittest
 
 from taac.playbooks import playbook_definitions
+from taac.testconfigs.fboss_solution_tests import (
+    speed_flip_test_configs,
+)
 from taac.test_as_a_config import types as taac_types
 
 
@@ -118,3 +121,47 @@ class ReusableSpeedFlipPlaybookTest(unittest.TestCase):
         )
 
         self.assertEqual(wrapped.cleanup_steps, playbook.cleanup_steps)
+
+
+class SpeedFlip51TTestConfigTest(unittest.TestCase):
+    def test_exposes_independent_supported_cases_for_the_ko3_pair(self) -> None:
+        test_config = getattr(
+            speed_flip_test_configs,
+            "SPEED_FLIP_51T_SINGLE_CAGE_TWO_PORT_TEST_CONFIG",
+            None,
+        )
+        self.assertIsNotNone(test_config)
+        if test_config is None:
+            return
+
+        self.assertEqual(
+            test_config.name,
+            "SPEED_FLIP_51T_SINGLE_CAGE_TWO_PORT_TEST_CONFIG",
+        )
+        self.assertEqual(
+            [endpoint.name for endpoint in test_config.endpoints],
+            [_DUT, _PEER],
+        )
+        self.assertEqual(
+            [playbook.name for playbook in test_config.playbooks],
+            [
+                "SPEED_FLIP_51T_SPD_001_100G_TO_200G_WARMBOOT",
+                "SPEED_FLIP_51T_SPD_004_100G_TO_200G_AGENT_CRASH",
+                "SPEED_FLIP_51T_SPD_007_100G_TO_200G_COOP_CRASH_WARMBOOT",
+            ],
+        )
+
+        for playbook in test_config.playbooks:
+            self.assertEqual(playbook.iteration, 1)
+            self.assertEqual(len(playbook.cleanup_steps or []), 1)
+            register_params = _step_params(playbook.stages[0].steps[0])
+            self.assertEqual(register_params["endpoints"], _ENDPOINTS)
+            self.assertEqual(register_params["target_port_cage_count"], 1)
+
+    def test_replaces_the_old_bundled_ko3_config(self) -> None:
+        names = [
+            config.name for config in speed_flip_test_configs.SPEED_FLIP_TEST_CONFIGS
+        ]
+
+        self.assertIn("SPEED_FLIP_51T_SINGLE_CAGE_TWO_PORT_TEST_CONFIG", names)
+        self.assertNotIn("SPEED_FLIP_51T_KO3_SSW_FSW_TEST_PORTS_UP", names)
