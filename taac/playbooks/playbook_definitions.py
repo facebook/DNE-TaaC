@@ -4402,6 +4402,10 @@ def create_bidirectional_speed_flip_playbook(
     target_port_cage_count: int,
     target_trigger_stages: t.Optional[t.List[taac_types.Stage]] = None,
     baseline_trigger_stages: t.Optional[t.List[taac_types.Stage]] = None,
+    prechecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
+    postchecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
+    snapshot_checks: t.Optional[t.List[taac_types.SnapshotHealthCheck]] = None,
+    traffic_items_to_start: t.Optional[t.List[str]] = None,
     port_state_change: bool = False,
     iteration: int = 1,
 ) -> Playbook:
@@ -4458,6 +4462,10 @@ def create_bidirectional_speed_flip_playbook(
         name=name,
         stages=stages,
         iteration=iteration,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        traffic_items_to_start=traffic_items_to_start,
         cleanup_steps=[speed_patcher_step(register_patcher=False)],
     )
 
