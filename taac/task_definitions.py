@@ -301,6 +301,7 @@ def create_ixia_sync_raw_source_macs_task(traffic_item_regex: str = ".*") -> Tas
 def create_coop_unregister_patchers_task(
     hostnames: t.List[str] | str,
     config_names: t.Optional[t.List[str]] = None,
+    regex: t.Optional[str] = None,
 ) -> Task:
     """
     Create a task to unregister all patchers for the given host(s).
@@ -309,6 +310,8 @@ def create_coop_unregister_patchers_task(
         hostnames: Single hostname or list of hostnames to unregister patchers from
         config_names: Optional list of config names to scope the unregister
             (e.g. ["bgpcpp", "agent"]). If None, unregisters all configs.
+        regex: Optional patcher-name regex. If omitted, unregisters all
+            matching-owner patchers in the selected configs.
 
     Returns:
         Task object to unregister patchers
@@ -319,6 +322,8 @@ def create_coop_unregister_patchers_task(
         params = {"hostnames": hostnames}
     if config_names is not None:
         params["config_names"] = config_names
+    if regex is not None:
+        params["regex"] = regex
 
     return Task(
         task_name="coop_unregister_patchers",
