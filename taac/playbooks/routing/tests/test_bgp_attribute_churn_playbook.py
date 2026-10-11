@@ -2267,16 +2267,21 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             for playbook in NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG.playbooks
             if playbook.name == "bgp_ebb_nexthop_group_count_threshold_playbook"
         )
+        # Run-task and validation steps carry their inputs outside
+        # step_params, so only parameterized steps are decoded here.
         payloads = [
             _step_payload(step)
             for stage in playbook.stages or []
             for step in stage.steps or []
+            if step.step_params is not None
         ]
         storm = next(
             payload
             for payload in payloads
             if payload.get("custom_step_name") == "bgp_nhg_random_storm"
         )
+        stage_ids = [stage.id for stage in playbook.stages or []]
+        self.assertIn("ebb16_fibagent_restart", stage_ids)
 
         self.assertEqual(48, storm["epoch_count"])
         self.assertEqual(25, storm["epoch_interval_seconds"])

@@ -67,6 +67,7 @@ from taac.constants import (
     OpenRRouteAction,
 )
 from taac.health_checks.healthcheck_definitions import (
+    create_bgp_rib_fib_consistency_check,
     create_bgp_session_snapshot_check,
 )
 from taac.playbooks.playbook_definitions import (
@@ -104,11 +105,13 @@ from taac.steps.step_definitions import (
     create_bgp_instability_setup_steps,
     create_bgp_restart_setup_steps,
     create_custom_step,
+    create_daemon_control_step,
     create_igp_metric_churn_step,
     create_longevity_step,
     create_openr_route_action_step,
     create_route_registry_cleanup_step,
     create_route_registry_prefix_list_setup_steps,
+    create_validation_step,
 )
 from taac.task_definitions import (
     create_nexthop_group_poll_periodic_task,
@@ -154,6 +157,7 @@ from taac.test_as_a_config.types import (
     PointInTimeHealthCheck,
     SnapshotHealthCheck,
     Stage,
+    ValidationStage,
 )
 
 
@@ -2555,6 +2559,63 @@ def get_bgp_ebb_ibgp_plane_session_oscillation_playbook(
     )
 
 
+def _create_fibagent_restart_stage(
+    device_name: str,
+    reprogram_wait_seconds: int,
+) -> Stage:
+    """FibAgentBgp restart with RIB/FibAgent/hardware agreement on both sides.
+
+    The restart does not change the BGP RIB, so passing the same
+    RIB-vs-FibAgent-vs-hardware check before and after proves FibAgentBgp
+    reprograms exactly the prefixes and next hops it held before the restart.
+    The pre-restart check isolates restart regressions from storm leftovers.
+    """
+    return create_steps_stage(
+        stage_id="ebb16_fibagent_restart",
+        description="Restart FibAgentBgp and verify programmed prefixes are unchanged",
+        steps=[
+            create_validation_step(
+                point_in_time_checks=[
+                    create_bgp_rib_fib_consistency_check(
+                        check_id="fibagent_restart_pre_rib_fib",
+                        retry_count=3,
+                        retry_delay_seconds=10.0,
+                    )
+                ],
+                stage=ValidationStage.MID_TEST,
+                description="Verify RIB, FibAgent, and hardware FIB agree before FibAgentBgp restart",
+                fail_on_failure=True,
+            ),
+            create_daemon_control_step(
+                device_name=device_name,
+                daemon_name="FibAgentBgp",
+                action="disable",
+            ),
+            create_daemon_control_step(
+                device_name=device_name,
+                daemon_name="FibAgentBgp",
+                action="enable",
+            ),
+            create_longevity_step(
+                duration=reprogram_wait_seconds,
+                description=f"Allow FibAgentBgp {reprogram_wait_seconds} seconds to reprogram after restart",
+            ),
+            create_validation_step(
+                point_in_time_checks=[
+                    create_bgp_rib_fib_consistency_check(
+                        check_id="fibagent_restart_post_rib_fib",
+                        retry_count=3,
+                        retry_delay_seconds=10.0,
+                    )
+                ],
+                stage=ValidationStage.MID_TEST,
+                description="Verify RIB, FibAgent, and hardware FIB agree after FibAgentBgp restart",
+                fail_on_failure=True,
+            ),
+        ],
+    )
+
+
 def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     device_name: str,
     expected_established_sessions: int,
@@ -2588,6 +2649,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     nexthop_group_min_consecutive_samples: int = 3,
     fibagent_nhg_watermark_high: int = 1000,
     fibagent_nhg_watermark_low: int = 1000,
+    fibagent_restart_reprogram_wait_seconds: int = 120,
     enable_update_group: bool = True,
     exclude_bgp_mon: bool = True,
     bgp_mon_parent_network: str | None = None,
@@ -2600,6 +2662,15 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
 
     Creates independent selected-path membership per prefix, proves the DUT
     sustained the requested BGP multipath NHG floor, then verifies recovery.
+    After the post-storm soak, restarts FibAgentBgp and requires the BGP RIB,
+    FibAgent, and hardware FIB to agree both before and after the restart.
+    Stages abort on the first failure, so the restart stage only runs once the
+    storm itself passes.
+
+    Args:
+        fibagent_restart_reprogram_wait_seconds: Time allowed after FibAgentBgp
+            comes back for it to reprogram the full table before the
+            post-restart RIB-FIB check runs; the check also retries.
     """
     target_prefix_counts = tuple(
         items.get("target_prefix_count") for items in ixia_items_by_afi.values()
@@ -2707,6 +2778,10 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
                             description=f"Soak after final prefix changes for {soak_duration} seconds",
                         ),
                     ],
+                ),
+                _create_fibagent_restart_stage(
+                    device_name=device_name,
+                    reprogram_wait_seconds=fibagent_restart_reprogram_wait_seconds,
                 ),
             ],
             playbook_name="bgp_ebb_nexthop_group_count_threshold_playbook",
