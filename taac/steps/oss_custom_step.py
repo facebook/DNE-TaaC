@@ -185,9 +185,9 @@ class OssCustomStep(StepBase[taac_types.CustomStepInput]):
         # pyre-fixme[16]
         await self.driver.async_register_python_patcher(
             patcher_name=patcher_name,
-            patcher_args={"interface": interface, "mtu": str(mtu)},
+            patcher_args={"intfs": interface, "mtu": str(mtu)},
             config_name="agent",
-            py_func_name="change_interface_mtu",
+            py_func_name="change_mtu",
             patcher_desc="",
         )
         # Write + activate but do NOT restart: this playbook declares no

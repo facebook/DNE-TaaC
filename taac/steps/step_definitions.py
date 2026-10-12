@@ -5809,6 +5809,7 @@ def create_register_speed_flip_patcher_step(
     speed_in_gbps: int,
     description: t.Optional[str] = None,
     target_port_cage_count: int = 4,
+    apply_patcher_method: t.Optional[int] = None,
 ) -> Step:
     """
     Create a step to register/unregister speed flip patcher (v3 shape used by speed_flip_test_configs).
@@ -5825,21 +5826,23 @@ def create_register_speed_flip_patcher_step(
             runtime (see ``RegisterSpeedFlipPatcherStep.run``). The onus is on
             the POC configuring/running the test to supply at least this many
             cages per device; defaults to 4.
+        apply_patcher_method: ``ApplyPatcherMethod`` value used to activate the
+            change; AGENT_WARMBOOT when unset. AGENT_RELOAD applies it with a
+            config reload alone, without restarting the agent.
     """
+    params: t.Dict[str, t.Any] = {
+        "register_patcher": register_patcher,
+        "port_state_change": port_state_change,
+        "patcher_name": patcher_name,
+        "endpoints": endpoints,
+        "speed_in_gbps": speed_in_gbps,
+        "target_port_cage_count": target_port_cage_count,
+    }
+    if apply_patcher_method is not None:
+        params["apply_patcher_method"] = apply_patcher_method
     return Step(
         name=StepName.REGISTER_SPEED_FLIP_PATCHER,
-        step_params=Params(
-            json_params=json.dumps(
-                {
-                    "register_patcher": register_patcher,
-                    "port_state_change": port_state_change,
-                    "patcher_name": patcher_name,
-                    "endpoints": endpoints,
-                    "speed_in_gbps": speed_in_gbps,
-                    "target_port_cage_count": target_port_cage_count,
-                }
-            )
-        ),
+        step_params=Params(json_params=json.dumps(params)),
         description=description,
     )
 
@@ -12170,6 +12173,13 @@ class RegisterSpeedFlipPatcherStep(StepBase[taac_types.BaseInput]):
         if port_state_change:
             await self._disable_device_ports(device_infos)
 
+        # AGENT_RELOAD when a config reload is enough and a restart is not.
+        apply_patcher_method = taac_types.ApplyPatcherMethod(
+            params.get(
+                "apply_patcher_method", taac_types.ApplyPatcherMethod.AGENT_WARMBOOT
+            )
+        )
+
         if register_patcher:
             await self._register_speed_flip_patchers(
                 device_infos=device_infos,
@@ -12182,7 +12192,7 @@ class RegisterSpeedFlipPatcherStep(StepBase[taac_types.BaseInput]):
                 device_infos=device_infos,
             )
 
-        await self._warmboot_agent(device_infos=device_infos)
+        await self._apply_patchers(device_infos, apply_patcher_method)
 
     def _assert_target_port_cage_count(
         self,
@@ -12243,12 +12253,14 @@ class RegisterSpeedFlipPatcherStep(StepBase[taac_types.BaseInput]):
             ]
         )
 
-    async def _warmboot_agent(self, device_infos: t.List[_SpeedFlipDeviceInfo]) -> None:
+    async def _apply_patchers(
+        self,
+        device_infos: t.List[_SpeedFlipDeviceInfo],
+        apply_patcher_method: taac_types.ApplyPatcherMethod,
+    ) -> None:
         await asyncio.gather(
             *[
-                device_info.driver.async_apply_patchers(
-                    taac_types.ApplyPatcherMethod.AGENT_WARMBOOT
-                )
+                device_info.driver.async_apply_patchers(apply_patcher_method)
                 for device_info in device_infos
             ]
         )

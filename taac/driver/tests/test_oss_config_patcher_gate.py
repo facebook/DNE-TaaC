@@ -36,6 +36,13 @@ _PATCHER_CALLS: t.Dict[str, t.Callable[[FbossSwitch], t.Awaitable[t.Any]]] = {
     "static_route": lambda s: s.async_add_static_route_patcher(
         {"10.0.0.0/24": ["10.0.0.1"]}, "p", is_patcher_name_uuid_needed=False
     ),
+    "change_speed": lambda s: s.async_change_speed_patcher(
+        ["eth1/1/1", "eth1/2/1"],
+        "FOURHUNDREDG",
+        "PROFILE_400G_4_PAM4_RS544X2N_OPTICAL",
+        "speed",
+    ),
+    "unregister_python": lambda s: s.async_unregister_python_patcher("p", "agent"),
 }
 
 
@@ -103,8 +110,34 @@ class ConfigPatcherGateTest(TestCase):
 
         backend["async_register"].assert_awaited_once()
         backend["async_unregister"].assert_awaited_once_with(self.switch, "bgpcpp", "p")
-        backend["async_apply"].assert_awaited_once_with(self.switch, None, False)
+        backend["async_apply"].assert_awaited_once_with(
+            self.switch, None, False, activate=True
+        )
         backend["async_restore_baselines"].assert_awaited_once_with(self.switch)
+
+    async def test_pure_oss_change_speed_registers_coops_change_speed(self) -> None:
+        with _taac_env(*_PURE_OSS), _mocked_backend() as backend:
+            name = await _PATCHER_CALLS["change_speed"](self.switch)
+            await self.switch.async_apply_patchers(restart_services=False)
+
+        self.assertEqual("speed", name)
+        (call,) = backend["async_register"].await_args_list
+        patcher = call.args[1]
+        self.assertEqual(
+            ("agent", "speed", "change_speed"),
+            (patcher.config_name, patcher.name, patcher.py_func_name),
+        )
+        self.assertEqual(
+            {
+                "intfs": "eth1/1/1,eth1/2/1",
+                "speed": "FOURHUNDREDG",
+                "profile_id": "PROFILE_400G_4_PAM4_RS544X2N_OPTICAL",
+            },
+            patcher.args,
+        )
+        backend["async_apply"].assert_awaited_once_with(
+            self.switch, None, False, activate=False
+        )
 
     def test_driver_reads_the_shared_gate(self) -> None:
         self.assertIs(

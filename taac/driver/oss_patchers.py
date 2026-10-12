@@ -23,6 +23,7 @@ one is always True; every patcher parses its own.
 
 from __future__ import annotations
 
+import collections
 import inspect
 import ipaddress
 import json
@@ -40,16 +41,23 @@ from configerator.structs.neteng.fboss.bgp.bgp_config.thrift_types import (
     PeerGroup,
     RouteLimit,
 )
+from configerator.structs.neteng.robotron.bgp_policy.thrift_types import BgpPolicies
 from neteng.fboss.agent_config.thrift_types import AgentConfig
 from neteng.fboss.bgp_attr.thrift_types import AddPath
 from neteng.fboss.switch_config.thrift_types import (
     Interface,
+    Port,
+    PortProfileID,
+    PortSpeed,
+    PortState,
+    PortType,
     SpanningTreeState,
     StaticRouteWithNextHops,
     SwitchConfig,
     Vlan,
     VlanPort,
 )
+from taac.driver import oss_bgp_policy
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -62,7 +70,42 @@ PATCHER_CONFIG_TYPES: t.Dict[str, type] = {
     "add_peer_group_patcher": BgpConfig,
     "add_bgp_peers": BgpConfig,
     "configure_vlans": AgentConfig,
+    "change_speed": AgentConfig,
+    "change_port_admin_state": AgentConfig,
+    "change_mtu": AgentConfig,
     "add_static_routes": AgentConfig,
+    "add_bgp_policy_statement": BgpConfig,
+    "add_bgp_policy_match_prefix_to_propagate_routes": BgpConfig,
+}
+
+# Hardware whose /1 and /5 subports share a cage and so constrain each other's
+# speed (COOP's _validate_51t_speed_change).
+_HARDWARE_51T: t.FrozenSet[str] = frozenset(
+    {
+        "MONTBLANC",
+        "MINIPACK3M",
+        "MORGAN800CC",
+        "MINIPACK3BA",
+        "MINIPACK3BAM",
+        "MINIPACK3N",
+        "MINIPACK3NM",
+    }
+)
+# 25.6T and 12.8T hardware with COOP adjacent-port / slot rules
+# (_validate_25t_speed_change, _validate_12t_speed_change).
+_HARDWARE_25T: t.FrozenSet[str] = frozenset(
+    {"FUJI", "ELBERT", "DARWIN", "WEDGE400", "WEDGE400C"}
+)
+# Of those, the ones whose adjacent slots must change speed together.
+_HARDWARE_25T_PAIRED: t.FrozenSet[str] = frozenset({"FUJI", "ELBERT"})
+_HARDWARE_12T: t.FrozenSet[str] = frozenset({"MINIPACK", "YAMP"})
+# Allowed (port, adjacent) speeds in Gbps on those, in either order.
+_SUPPORTED_51T_SPEED_COMBINATIONS: t.FrozenSet[t.Tuple[int, int]] = frozenset(
+    {(100, 100), (200, 200), (200, 400), (400, 400)}
+)
+_PORT_STATES: t.Dict[str, PortState] = {
+    "enable": PortState.ENABLED,
+    "disable": PortState.DISABLED,
 }
 
 _ROUTE_LIMIT_FIELDS: t.FrozenSet[str] = frozenset(
@@ -282,9 +325,268 @@ def _move_ports_to_vlan(
     return sw(ports=ports, vlanPorts=vlan_ports)
 
 
+def _value(enum_member: t.Any) -> int:
+    """An enum's integer value, whichever thrift flavour produced it: the agent
+    client may return py3 structs, whose enums are not the thrift-python ones."""
+    return enum_member.value if hasattr(enum_member, "value") else int(enum_member)
+
+
+def _profile_config(entry: t.Any, profile: PortProfileID) -> t.Any:
+    for supported, port_config in entry.supportedProfiles.items():
+        if _value(supported) == profile.value:
+            return port_config
+    return None
+
+
+def _wire(platform_mapping: t.Any, profile_value: int) -> t.Optional[t.Tuple[int, ...]]:
+    """What a profile puts on the wire: speed, lanes, modulation, FEC."""
+    for entry in platform_mapping.platformSupportedProfiles or []:
+        if _value(entry.factor.profileID) == profile_value:
+            iphy = entry.profile.iphy
+            return (
+                _value(entry.profile.speed),
+                iphy.numLanes,
+                _value(iphy.modulation),
+                _value(iphy.fec),
+            )
+    return None
+
+
+def _fit_profile(
+    entry: t.Any, profile: PortProfileID, platform_mapping: t.Any
+) -> t.Optional[PortProfileID]:
+    """The requested profile if the port offers it, as in COOP. Otherwise the
+    one profile it offers that is wire-identical: media families are assigned
+    per cage, so the two ends of a mixed optical/copper link need different ids
+    for the same signal (e.g. 23 vs 22 at 100G), and the speed-flip step passes
+    one id per platform and speed. None when there is no unique such profile."""
+    if _profile_config(entry, profile) is not None:
+        return profile
+    want = _wire(platform_mapping, profile.value)
+    if want is None:
+        return None
+    candidates = [
+        _value(offered)
+        for offered in entry.supportedProfiles
+        if _wire(platform_mapping, _value(offered)) == want
+    ]
+    return PortProfileID(candidates[0]) if len(candidates) == 1 else None
+
+
+def _51t_adjacent_port(port_name: str) -> str:
+    parts = port_name.split("/")
+    if len(parts) != 3:
+        return ""
+    adjacent = {"1": "5", "5": "1"}.get(parts[2])
+    return f"{parts[0]}/{parts[1]}/{adjacent}" if adjacent else ""
+
+
+def _25t_adjacent_port(port_name: str) -> str:
+    """FUJI/ELBERT pair odd and even slots: ethX/3/1 with ethX/4/1."""
+    parts = port_name.split("/")
+    if len(parts) != 3 or not parts[1].isdigit():
+        return ""
+    slot = int(parts[1])
+    return f"{parts[0]}/{slot - 1 if slot % 2 == 0 else slot + 1}/{parts[2]}"
+
+
+def _slot(port_name: str) -> t.Optional[int]:
+    parts = port_name.split("/")
+    return int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else None
+
+
+def _cage(port_name: str) -> str:
+    return port_name.rsplit("/", 1)[0]
+
+
+def _vlan_for(sw: SwitchConfig, logical_id: int, taken: t.Set[int]) -> int:
+    """A VLAN ID for a port that gets its own: the config's numbering when every
+    such port's VLAN is its logicalID plus one offset (e.g. 2000 + id),
+    otherwise the next ID above theirs."""
+    users = collections.Counter(p.ingressVlan for p in sw.ports)
+    own = [p for p in sw.ports if users[p.ingressVlan] == 1]
+    offsets = {p.ingressVlan - p.logicalID for p in own}
+    if len(offsets) == 1:
+        vlan_id = offsets.pop() + logical_id
+        if vlan_id not in taken:
+            return vlan_id
+    vlan_id = max((p.ingressVlan for p in own), default=sw.defaultVlan) + 1
+    while vlan_id in taken:
+        vlan_id += 1
+    return vlan_id
+
+
+def _new_port(
+    template: t.Optional[Port],
+    entry: t.Any,
+    vlan_id: int,
+    speed: PortSpeed,
+    profile: PortProfileID,
+) -> Port:
+    """A named port the config lacks, e.g. a /5 that its adjacent /1 subsumed in the
+    baseline. It takes every setting from its adjacent port except the ones tied to
+    its own link, which are left unset -- in COOP-generated configs those are
+    the only settings that differ between a /1 and its /5."""
+    fields: t.Dict[str, t.Any] = {
+        "logicalID": entry.mapping.id,
+        "name": entry.mapping.name,
+        "ingressVlan": vlan_id,
+        "speed": speed,
+        "profileID": profile,
+        "state": PortState.ENABLED,
+    }
+    if template is None:
+        return Port(**fields)
+    blank = Port()
+    for reset in ("description", "expectedLLDPValues", "expectedNeighborReachability"):
+        fields[reset] = getattr(blank, reset)
+    return template(**fields)
+
+
+def _add_missing_ports(
+    sw: SwitchConfig,
+    entries: t.Mapping[str, t.Any],
+    intfs: t.Sequence[str],
+    speed: PortSpeed,
+    profiles: t.Mapping[str, PortProfileID],
+) -> SwitchConfig:
+    """Create the named ports the config lacks, placed like their adjacent port:
+
+    * adjacent port in a VLAN shared with other ports (e.g. an RSW's server downlinks):
+      the same VLAN, whose interface serves it too.
+    * adjacent port in its own VLAN with an L3 interface (point-to-point links): a VLAN
+      named ``vlan<ID>`` and an interface without addresses, as COOP generates
+      for an unused port of that kind.
+    * otherwise (adjacent port unused in the default VLAN, or none): the default
+      VLAN with no interface.
+    """
+    present = {p.name for p in sw.ports}
+    missing = [name for name in intfs if name not in present]
+    if not missing:
+        return sw
+    users = collections.Counter(p.ingressVlan for p in sw.ports)
+    intf_by_vlan = {i.vlanID: i for i in sw.interfaces}
+    taken = {v.id for v in sw.vlans} | {sw.defaultVlan}
+    ports, vlans = list(sw.ports), list(sw.vlans)
+    vlan_ports, interfaces = list(sw.vlanPorts), list(sw.interfaces)
+    for name in missing:
+        entry = entries[name]
+        adjacent = next(
+            (p for p in sw.ports if _cage(p.name or "") == _cage(name)), None
+        )
+        adjacent_vlan = adjacent.ingressVlan if adjacent is not None else sw.defaultVlan
+        adjacent_intf = intf_by_vlan.get(adjacent_vlan)
+        if adjacent_vlan != sw.defaultVlan and users[adjacent_vlan] > 1:
+            vlan_id = adjacent_vlan
+        elif adjacent_vlan != sw.defaultVlan and adjacent_intf is not None:
+            vlan_id = _vlan_for(sw, entry.mapping.id, taken)
+            taken.add(vlan_id)
+            vlans.append(
+                Vlan(name=f"vlan{vlan_id}", id=vlan_id, routable=True, recordStats=True)
+            )
+            intf_fields: t.Dict[str, t.Any] = {
+                k: getattr(adjacent_intf, k)
+                for k in (
+                    "mtu",
+                    "type",
+                    "routerID",
+                    "scope",
+                    "isVirtual",
+                    "isStateSyncDisabled",
+                )
+            }
+            interfaces.append(
+                Interface(intfID=vlan_id, vlanID=vlan_id, ipAddresses=[], **intf_fields)
+            )
+        else:
+            vlan_id = sw.defaultVlan
+            if vlan_id not in {v.id for v in vlans}:
+                vlans.append(Vlan(name="default", id=vlan_id, routable=False))
+        ports.append(_new_port(adjacent, entry, vlan_id, speed, profiles[name]))
+        vlan_ports.append(
+            VlanPort(
+                vlanID=vlan_id,
+                logicalPort=entry.mapping.id,
+                spanningTreeState=SpanningTreeState.FORWARDING,
+                emitTags=False,
+            )
+        )
+        logger.info(f"change_speed: added {name} in VLAN {vlan_id}")
+    return sw(ports=ports, vlans=vlans, vlanPorts=vlan_ports, interfaces=interfaces)
+
+
+def _remove_subsumed_ports(sw: SwitchConfig, platform_mapping: t.Any) -> SwitchConfig:
+    """COOP's remove_subsumed_ports: drop every port an active profile subsumes
+    (the platform mapping lists them per profile), its VLAN memberships, and the
+    interfaces of VLANs that lose their last port."""
+    subsumed: t.Set[int] = set()
+    port_vlans: t.Set[int] = set()
+    for port in sw.ports:
+        entry = platform_mapping.ports.get(port.logicalID)
+        if entry is None:
+            if port.portType == PortType.FABRIC_PORT:
+                # Fabric ports may be relocated outside the platform mapping's
+                # id range; they neither subsume nor are subsumed.
+                continue
+            raise PatcherError(
+                f"change_speed: port {port.logicalID} not in platform mapping"
+            )
+        port_config = _profile_config(entry, port.profileID)
+        if port_config is None:
+            raise PatcherError(
+                f"change_speed: port {port.logicalID} has unsupported profile "
+                f"{port.profileID!r}"
+            )
+        port_vlans.add(port.ingressVlan)
+        if (
+            port_config.subsumedPorts is not None
+            and port.portType != PortType.HYPER_PORT
+        ):
+            subsumed |= set(port_config.subsumedPorts)
+    if not subsumed & {p.logicalID for p in sw.ports}:
+        return sw
+
+    ports = [p for p in sw.ports if p.logicalID not in subsumed]
+    vlan_ports = [vp for vp in sw.vlanPorts if vp.logicalPort not in subsumed]
+    all_vlans = {v.id for v in sw.vlans}
+    empty_vlans = {v.id for v in sw.vlans} - port_vlans | {sw.defaultVlan}
+    # A surviving port's tagged membership keeps its VLAN (and interface) too.
+    keep_vlans = (
+        empty_vlans | {p.ingressVlan for p in ports} | {vp.vlanID for vp in vlan_ports}
+    )
+    logger.info(
+        "change_speed: removed subsumed ports "
+        f"{sorted(p.name or str(p.logicalID) for p in sw.ports if p.logicalID in subsumed)}"
+    )
+    return sw(
+        ports=ports,
+        vlans=[v for v in sw.vlans if v.id in keep_vlans],
+        vlanPorts=vlan_ports,
+        interfaces=[
+            i
+            for i in sw.interfaces
+            if i.vlanID in keep_vlans
+            or (i.vlanID not in all_vlans and i.portID not in subsumed)
+        ],
+    )
+
+
+class PatcherInputs(t.Protocol):
+    """Device facts a patcher reads beyond its config, as COOP's ``_input``."""
+
+    async def platform_mapping(self) -> t.Any: ...
+
+    def hardware(self) -> t.Optional[str]: ...
+
+
 class OssPatchApplier:
-    def __init__(self, logger: logging.Logger = logger) -> None:
+    def __init__(
+        self,
+        logger: logging.Logger = logger,
+        inputs: t.Optional[PatcherInputs] = None,
+    ) -> None:
         self.logger = logger
+        self.inputs = inputs
 
     async def async_apply(
         self,
@@ -482,6 +784,241 @@ class OssPatchApplier:
             sw = _move_ports_to_vlan(sw, vlan_id, list(spec.get("ports") or []))
         return config(sw=sw)
 
+    async def change_speed(
+        self, config: AgentConfig, config_name: str, my_args: t.Dict[str, t.Any]
+    ) -> AgentConfig:
+        """Set ``intfs`` (comma-separated port names) to ``speed`` (a PortSpeed
+        name) with ``profile_id`` (a PortProfileID name), as COOP's change_speed.
+
+        Every port must offer the profile in the platform mapping, or else exactly
+        one wire-identical profile (``_fit_profile``), and on 51T hardware a
+        /1-/5 pair must stay a valid speed combination. A named port
+        the config lacks is created (see ``_new_port``). Ports a resulting
+        profile subsumes are then removed with their VLAN memberships, which is
+        why an apply that removes ports cold boots the agent (oss_coop_patcher).
+        """
+        intfs = [name for name in my_args["intfs"].split(",") if name]
+        try:
+            speed = PortSpeed[my_args["speed"]]
+            profile = PortProfileID[my_args["profile_id"]]
+        except KeyError as exc:
+            raise PatcherError(
+                f"change_speed: unknown PortSpeed or PortProfileID name {exc}"
+            ) from exc
+        platform_mapping = await self._platform_mapping()
+        entries = {e.mapping.name: e for e in platform_mapping.ports.values()}
+
+        unknown = [name for name in intfs if name not in entries]
+        if unknown:
+            raise PatcherError(f"change_speed: {unknown} not in the platform mapping")
+        fitted = {
+            name: _fit_profile(entries[name], profile, platform_mapping)
+            for name in intfs
+        }
+        unsupported = [name for name, fit in fitted.items() if fit is None]
+        if unsupported:
+            raise PatcherError(
+                f"change_speed: profile {profile.name} not supported on ports: "
+                f"{', '.join(unsupported)} (and no unique wire-identical profile)"
+            )
+        profiles = {name: fit for name, fit in fitted.items() if fit is not None}
+        for name, fit in profiles.items():
+            if fit != profile:
+                self.logger.info(
+                    f"change_speed: {name} takes {fit.name}, its wire-identical "
+                    f"profile for {profile.name}"
+                )
+        self._validate_speed_change(config, intfs, speed)
+
+        sw = _add_missing_ports(config.sw, entries, intfs, speed, profiles)
+        sw = sw(
+            ports=[
+                p(speed=speed, profileID=profiles[p.name], state=PortState.ENABLED)
+                if p.name in profiles
+                else p
+                for p in sw.ports
+            ]
+        )
+        sw = _remove_subsumed_ports(sw, platform_mapping)
+        # A requested port another port's profile still subsumes is gone again;
+        # registering that would report a speed change on a port that is absent.
+        present = {p.name for p in sw.ports}
+        lost = [name for name in intfs if name not in present]
+        if lost:
+            raise PatcherError(
+                f"change_speed: {lost} would be subsumed by another port's "
+                "profile; change that port's speed in the same request"
+            )
+        return config(sw=sw)
+
+    async def _platform_mapping(self) -> t.Any:
+        if self.inputs is None:
+            raise PatcherError("change_speed needs the device's platform mapping")
+        return await self.inputs.platform_mapping()
+
+    def _validate_speed_change(
+        self, config: AgentConfig, intfs: t.Sequence[str], speed: PortSpeed
+    ) -> None:
+        """COOP's validate_speed_change: the adjacent-port / slot rule of the
+        device's hardware family, if it has one."""
+        hardware = ((self.inputs.hardware() if self.inputs else None) or "").upper()
+        if hardware in _HARDWARE_51T:
+            self._validate_51t_speed_change(hardware, config, intfs, speed)
+        elif hardware in _HARDWARE_25T:
+            self._validate_25t_speed_change(hardware, intfs, speed)
+        elif hardware in _HARDWARE_12T:
+            self._validate_12t_speed_change(hardware, intfs, speed)
+        else:
+            self.logger.info(
+                f"change_speed: no adjacent-port rule for hardware {hardware!r}"
+            )
+
+    def _validate_25t_speed_change(
+        self, hardware: str, intfs: t.Sequence[str], speed: PortSpeed
+    ) -> None:
+        violations = []
+        if speed == PortSpeed.FOURHUNDREDG:
+            for name in intfs:
+                slot = _slot(name)
+                if slot is None:
+                    violations.append(
+                        f"Port {name} has invalid format (expected ethX/Y/Z)"
+                    )
+                elif hardware in ("WEDGE400", "WEDGE400C") and not 1 <= slot <= 16:
+                    violations.append(
+                        f"Port {name} cannot be 400G: {hardware} allows 400G only on "
+                        "eth1/1/1 through eth1/16/1"
+                    )
+                elif hardware == "DARWIN" and not (1 <= slot <= 31 and slot % 2):
+                    violations.append(
+                        f"Port {name} cannot be 400G: DARWIN allows 400G only on odd "
+                        "ports eth1/1/1 .. eth1/31/1"
+                    )
+                elif hardware in _HARDWARE_25T_PAIRED and not slot % 2:
+                    violations.append(
+                        f"Port {name} cannot be 400G: {hardware} allows 400G only on "
+                        "odd-numbered ports"
+                    )
+        elif hardware in _HARDWARE_25T_PAIRED:
+            for name in intfs:
+                adjacent = _25t_adjacent_port(name)
+                if not adjacent:
+                    violations.append(f"Adjacent port for port {name} not found")
+                elif adjacent not in intfs:
+                    violations.append(
+                        f"Port {name} -> {speed.value // 1000}G needs its adjacent "
+                        f"port {adjacent} in the same request"
+                    )
+        if violations:
+            raise PatcherError(
+                f"change_speed: not allowed on 25.6T hardware {hardware}:\n"
+                + "\n".join(f" - {v}" for v in violations)
+            )
+
+    def _validate_12t_speed_change(
+        self, hardware: str, intfs: t.Sequence[str], speed: PortSpeed
+    ) -> None:
+        if speed != PortSpeed.TWOHUNDREDG:
+            return
+        parity = 1 if hardware == "MINIPACK" else 0
+        bad = [n for n in intfs if (_slot(n) or 0) % 2 != parity]
+        if bad:
+            raise PatcherError(
+                f"change_speed: 12.8T {hardware} allows 200G only on "
+                f"{'odd' if parity else 'even'} ports, not {bad}"
+            )
+
+    def _validate_51t_speed_change(
+        self,
+        hardware: str,
+        config: AgentConfig,
+        intfs: t.Sequence[str],
+        speed: PortSpeed,
+    ) -> None:
+        violations = []
+        if speed == PortSpeed.EIGHTHUNDREDG:
+            violations = [
+                f"800G speed not allowed on port {name}, allowed only on X/Y/1"
+                for name in intfs
+                if name.split("/")[-1] != "1"
+            ]
+        else:
+            port_speeds = {
+                p.name: p.speed.value // 1000 for p in config.sw.ports if p.name
+            }
+            target = speed.value // 1000
+            for name in intfs:
+                adjacent = _51t_adjacent_port(name)
+                if not adjacent:
+                    violations.append(f"Adjacent port for port {name} not found")
+                    continue
+                adjacent_speed = port_speeds.get(adjacent)
+                if adjacent in intfs or adjacent_speed is None:
+                    continue
+                if (
+                    target,
+                    adjacent_speed,
+                ) not in _SUPPORTED_51T_SPEED_COMBINATIONS and (
+                    adjacent_speed,
+                    target,
+                ) not in _SUPPORTED_51T_SPEED_COMBINATIONS:
+                    violations.append(
+                        f"Port {name} -> {target}G incompatible with adjacent "
+                        f"port {adjacent} @ {adjacent_speed}G"
+                    )
+        if violations:
+            raise PatcherError(
+                f"change_speed: not allowed on 51T hardware {hardware}; both "
+                "ports must be 100G, or a mix of 200G/400G:\n"
+                + "\n".join(f" - {v}" for v in violations)
+            )
+
+    def change_port_admin_state(
+        self, config: AgentConfig, config_name: str, my_args: t.Dict[str, t.Any]
+    ) -> AgentConfig:
+        """``{port_name: "enable" | "disable"}``; the state persists across
+        agent restarts."""
+        bad = {name: v for name, v in my_args.items() if v not in _PORT_STATES}
+        if bad:
+            raise PatcherError(
+                f"change_port_admin_state: states must be one of "
+                f"{sorted(_PORT_STATES)}, got {bad}"
+            )
+        names = {p.name for p in config.sw.ports}
+        unknown = sorted(set(my_args) - names)
+        if unknown:
+            raise PatcherError(f"change_port_admin_state: no ports {unknown}")
+        return config(
+            sw=config.sw(
+                ports=[
+                    p(state=_PORT_STATES[my_args[p.name]]) if p.name in my_args else p
+                    for p in config.sw.ports
+                ]
+            )
+        )
+
+    def change_mtu(
+        self, config: AgentConfig, config_name: str, my_args: t.Dict[str, t.Any]
+    ) -> AgentConfig:
+        """Set ``mtu`` on the interfaces ``intfs`` names: comma-separated port
+        names (meaning their ingress VLAN's interface), interface names, or VLAN
+        IDs. MTU lives on the L3 interface, not the port."""
+        intfs = [name for name in my_args["intfs"].split(",") if name]
+        mtu = int(my_args["mtu"])
+        vlan_ids = {p.ingressVlan for p in config.sw.ports if p.name in intfs}
+        vlan_ids |= {int(name) for name in intfs if name.isdigit()}
+
+        def named(intf: Interface) -> bool:
+            return (intf.name or "") in intfs or (intf.vlanID or 0) in vlan_ids
+
+        if not any(named(i) for i in config.sw.interfaces):
+            raise PatcherError(f"change_mtu: no interface matches {intfs}")
+        return config(
+            sw=config.sw(
+                interfaces=[i(mtu=mtu) if named(i) else i for i in config.sw.interfaces]
+            )
+        )
+
     def add_static_routes(
         self, config: AgentConfig, config_name: str, my_args: t.Dict[str, t.Any]
     ) -> AgentConfig:
@@ -494,3 +1031,56 @@ class OssPatchApplier:
                 StaticRouteWithNextHops(prefix=prefix, nexthops=json.loads(next_hops))
             )
         return config(sw=config.sw(staticRoutesWithNhops=routes))
+
+    def add_bgp_policy_statement(
+        self, config: BgpConfig, config_name: str, my_args: t.Dict[str, t.Any]
+    ) -> BgpConfig:
+        """Add a policy statement (``name``, ``description``, ``policy_entries``
+        as COOP's thrift-shaped dicts). A statement of that name already in the
+        config is left as it is, as in COOP."""
+        statement = oss_bgp_policy.create_policy_statement(my_args)
+        policies = config.policies or BgpPolicies()
+        statements = list(policies.bgp_policy_statements or [])
+        if any(s.name == statement.name for s in statements):
+            self.logger.info(f"Policy already present: {statement.name}")
+            return config
+        return config(policies=policies(bgp_policy_statements=[*statements, statement]))
+
+    def add_bgp_policy_match_prefix_to_propagate_routes(
+        self, config: BgpConfig, config_name: str, my_args: t.Dict[str, t.Any]
+    ) -> BgpConfig:
+        """Put a term matching ``matching_prefix`` (and longer) first in the
+        ``in_stmt_name`` and ``out_stmt_name`` statements; the ingress term also
+        sets local-pref 100.
+
+        A named statement the config lacks is skipped with a warning, as COOP
+        skips it silently: callers derive both names from the role path,
+        including drain variants a given config does not carry."""
+        prefix = my_args["matching_prefix"]
+        # Same statement for both: the ingress term wins, as in COOP's if/elif.
+        targets = {
+            my_args["out_stmt_name"]: oss_bgp_policy.matching_prefix_term(
+                prefix, False
+            ),
+            my_args["in_stmt_name"]: oss_bgp_policy.matching_prefix_term(prefix, True),
+        }
+        policies = config.policies
+        statements = list((policies.bgp_policy_statements if policies else None) or [])
+        absent = sorted(set(targets) - {s.name for s in statements})
+        if absent:
+            self.logger.warning(
+                f"add_bgp_policy_match_prefix_to_propagate_routes: no statement "
+                f"{absent} to add {prefix} to"
+            )
+        if policies is None or len(absent) == len(targets):
+            return config
+        return config(
+            policies=policies(
+                bgp_policy_statements=[
+                    s(policy_entries=[targets[s.name], *s.policy_entries])
+                    if s.name in targets
+                    else s
+                    for s in statements
+                ]
+            )
+        )

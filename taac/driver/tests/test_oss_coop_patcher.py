@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import tempfile
+from unittest.mock import patch
 
 from configerator.structs.neteng.fboss.bgp.bgp_config.thrift_types import (
     BgpConfig,
@@ -17,7 +18,20 @@ from configerator.structs.neteng.fboss.bgp.bgp_config.thrift_types import (
 )
 from later.unittest import TestCase
 from neteng.fboss.agent_config.thrift_types import AgentConfig
-from neteng.fboss.switch_config.thrift_types import Port, SwitchConfig, VlanPort
+from neteng.fboss.platform_config.platform_config.thrift_types import (
+    PlatformMapping,
+    PlatformPortConfig,
+    PlatformPortEntry,
+    PlatformPortMapping,
+)
+from neteng.fboss.switch_config.thrift_types import (
+    Port,
+    PortProfileID,
+    PortSpeed,
+    SwitchConfig,
+    Vlan,
+    VlanPort,
+)
 from neteng.test_infra.dne.taac.driver import oss_coop_patcher as ocp
 from taac.driver.config_modifiers import (
     deserialize_config,
@@ -50,6 +64,11 @@ class _FakeSwitch:
         self.files = dict(files)
         self.reads = []
         self.events = []
+        self.platform_mapping_reads = 0
+
+    async def async_get_platform_mapping(self) -> PlatformMapping:
+        self.platform_mapping_reads += 1
+        return _cage_platform_mapping()
 
     async def async_run_cmd_on_shell(self, cmd: str) -> str:
         cmd = cmd.split(" || ")[0]
@@ -118,6 +137,71 @@ def _baseline_agent() -> AgentConfig:
             ports=[Port(logicalID=1, name="eth1/1/1", ingressVlan=10)],
             vlanPorts=[VlanPort(vlanID=10, logicalPort=1)],
         )
+    )
+
+
+_P800 = PortProfileID.PROFILE_800G_8_PAM4_RS544X2N_OPTICAL
+_P400 = PortProfileID.PROFILE_400G_4_PAM4_RS544X2N_OPTICAL
+
+
+def _cage_platform_mapping() -> PlatformMapping:
+    """/1 (id 1) at 800G subsumes /5 (id 2)."""
+    return PlatformMapping(
+        ports={
+            1: PlatformPortEntry(
+                mapping=PlatformPortMapping(id=1, name="eth1/1/1"),
+                supportedProfiles={
+                    _P400: PlatformPortConfig(),
+                    _P800: PlatformPortConfig(subsumedPorts=[2]),
+                },
+            ),
+            2: PlatformPortEntry(
+                mapping=PlatformPortMapping(id=2, name="eth1/1/5"),
+                supportedProfiles={_P400: PlatformPortConfig()},
+            ),
+        }
+    )
+
+
+def _cage_agent(*, adjacent: bool = True) -> AgentConfig:
+    """/1 and /5 at 400G, or /1 alone at 800G with /5 subsumed."""
+    ports = [
+        Port(
+            logicalID=1,
+            name="eth1/1/1",
+            ingressVlan=11,
+            speed=PortSpeed.FOURHUNDREDG if adjacent else PortSpeed.EIGHTHUNDREDG,
+            profileID=_P400 if adjacent else _P800,
+        )
+    ]
+    if adjacent:
+        ports.append(
+            Port(
+                logicalID=2,
+                name="eth1/1/5",
+                ingressVlan=12,
+                speed=PortSpeed.FOURHUNDREDG,
+                profileID=_P400,
+            )
+        )
+    return AgentConfig(
+        sw=SwitchConfig(
+            defaultVlan=4094,
+            ports=ports,
+            vlans=[Vlan(name="default", id=4094), Vlan(name="v11", id=11)]
+            + ([Vlan(name="v12", id=12)] if adjacent else []),
+            vlanPorts=[VlanPort(vlanID=11, logicalPort=1)]
+            + ([VlanPort(vlanID=12, logicalPort=2)] if adjacent else []),
+        )
+    )
+
+
+def _speed_patcher(name: str, intfs: str, speed: str, profile) -> ocp.OssPatcher:
+    return ocp.OssPatcher(
+        name=name,
+        config_name="agent",
+        py_func_name="change_speed",
+        args={"intfs": intfs, "speed": speed, "profile_id": profile.name},
     )
 
 
@@ -503,6 +587,35 @@ class OssCoopPatcherTest(TestCase):
             self.switch.events,
         )
 
+    async def test_apply_retries_a_failed_activation(self) -> None:
+        for patcher, failing, expected in (
+            (
+                _peer_group("A"),
+                "async_restart_service",
+                [("restart", FbossSystemctlServiceName.BGP), ("wait_bgp",)],
+            ),
+            (_vlan_patcher(), "async_try_agent_config_reload", [("reload_agent",)]),
+        ):
+            with self.subTest(failing=failing):
+                ocp.clear(HOST)
+                await self._register(patcher)
+                original = getattr(self.switch, failing)
+
+                async def fail_once(*args, _name=failing, _original=original) -> None:
+                    setattr(self.switch, _name, _original)
+                    raise RuntimeError("activation failed")
+
+                setattr(self.switch, failing, fail_once)
+                with self.assertRaisesRegex(RuntimeError, "activation failed"):
+                    await ocp.async_apply(self.switch)
+                self.switch.events.clear()
+
+                # Installed but not activated: the retry activates it again.
+                await ocp.async_apply(self.switch)
+                self.assertEqual(expected, self.switch.events[-len(expected) :])
+                await ocp.async_restore_baselines(self.switch)
+                self.switch.events.clear()
+
     async def test_restore_baselines_retries_a_failed_activation(self) -> None:
         await self._register(_peer_group("A"))
         await ocp.async_apply(self.switch)
@@ -526,6 +639,17 @@ class OssCoopPatcherTest(TestCase):
             self.switch.events,
         )
 
+    async def test_restoring_only_the_agent_reloads_it(self) -> None:
+        # A small agent-only change needs no restart, as in the default apply.
+        await self._register(_vlan_patcher())
+        await ocp.async_apply(self.switch)
+        self.switch.events.clear()
+
+        await ocp.async_restore_baselines(self.switch)
+
+        self.assertEqual(_baseline_agent(), self.switch.agent())
+        self.assertEqual([("reload_agent",)], self.switch.events)
+
     async def test_restore_baselines_on_a_clean_device_restarts_nothing(self) -> None:
         await ocp.async_restore_baselines(self.switch)
         self.assertEqual([], self.switch.events)
@@ -543,3 +667,129 @@ class OssCoopPatcherTest(TestCase):
             [("restart", FbossSystemctlServiceName.BGP), ("wait_bgp",)],
             self.switch.events,
         )
+
+
+class PortRemovalActivationTest(TestCase):
+    """A config that drops a port cold boots the agent (T281221621)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        ocp.clear(HOST)
+        self.addCleanup(ocp.clear, HOST)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.patcher_dir = tmp.name
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop(ocp.PORT_REMOVAL_WARMBOOT_ENV, None)
+
+    def _switch(self, agent: AgentConfig) -> _FakeSwitch:
+        return _FakeSwitch({AGENT_LIVE: serialize_config(agent)})
+
+    async def _register(self, switch: _FakeSwitch, patcher: ocp.OssPatcher) -> None:
+        await ocp.async_register(switch, patcher, patcher_dir=self.patcher_dir)
+
+    async def _flip_to_800g(self, switch: _FakeSwitch) -> None:
+        await self._register(
+            switch, _speed_patcher("p800", "eth1/1/1", "EIGHTHUNDREDG", _P800)
+        )
+
+    async def test_subsuming_a_port_cold_boots_the_agent(self) -> None:
+        switch = self._switch(_cage_agent())
+        await self._flip_to_800g(switch)
+        await ocp.async_apply(switch, taac_types.ApplyPatcherMethod.AGENT_WARMBOOT)
+
+        self.assertEqual(["eth1/1/1"], [p.name for p in switch.agent().sw.ports])
+        self.assertEqual(
+            [
+                ("write", AGENT_LIVE),
+                ("cold_boot_file",),
+                ("restart", FbossSystemctlServiceName.AGENT),
+                ("wait_agent",),
+            ],
+            switch.events,
+        )
+
+    async def test_opt_out_keeps_the_requested_method(self) -> None:
+        os.environ[ocp.PORT_REMOVAL_WARMBOOT_ENV] = "1"
+        switch = self._switch(_cage_agent())
+        await self._flip_to_800g(switch)
+        await ocp.async_apply(switch, taac_types.ApplyPatcherMethod.AGENT_WARMBOOT)
+
+        self.assertNotIn(("cold_boot_file",), switch.events)
+        self.assertIn(("restart", FbossSystemctlServiceName.AGENT), switch.events)
+
+    async def test_unregister_brings_the_adjacent_port_back_without_a_cold_boot(
+        self,
+    ) -> None:
+        switch = self._switch(_cage_agent())
+        await self._flip_to_800g(switch)
+        await ocp.async_apply(switch, taac_types.ApplyPatcherMethod.AGENT_WARMBOOT)
+        switch.events.clear()
+
+        await ocp.async_unregister(switch, "agent", "p800")
+        await ocp.async_apply(switch, taac_types.ApplyPatcherMethod.AGENT_WARMBOOT)
+
+        self.assertEqual(
+            ["eth1/1/1", "eth1/1/5"], [p.name for p in switch.agent().sw.ports]
+        )
+        self.assertEqual(
+            [("restart", FbossSystemctlServiceName.AGENT), ("wait_agent",)],
+            switch.events,
+        )
+
+    async def test_restoring_a_baseline_without_the_adjacent_port_cold_boots(
+        self,
+    ) -> None:
+        # The baseline runs /1 at 800G; a downshift creates /5, and dropping the
+        # patcher removes it again.
+        switch = self._switch(_cage_agent(adjacent=False))
+        await self._register(
+            switch,
+            _speed_patcher("p400", "eth1/1/1,eth1/1/5", "FOURHUNDREDG", _P400),
+        )
+        await ocp.async_apply(switch, taac_types.ApplyPatcherMethod.AGENT_WARMBOOT)
+        self.assertNotIn(("cold_boot_file",), switch.events)
+        self.assertEqual(
+            ["eth1/1/1", "eth1/1/5"], [p.name for p in switch.agent().sw.ports]
+        )
+        switch.events.clear()
+
+        await ocp.async_restore_baselines(switch)
+
+        self.assertEqual(["eth1/1/1"], [p.name for p in switch.agent().sw.ports])
+        self.assertEqual(
+            [
+                ("cold_boot_file",),
+                ("restart", FbossSystemctlServiceName.AGENT),
+                ("wait_agent",),
+            ],
+            switch.events,
+        )
+
+    async def test_rejected_first_register_leaves_no_baseline(self) -> None:
+        switch = self._switch(_cage_agent())
+        with self.assertRaises(PatcherError):
+            # /5 does not offer 800G.
+            await self._register(
+                switch, _speed_patcher("bad", "eth1/1/5", "EIGHTHUNDREDG", _P800)
+            )
+        self.assertNotIn(AGENT_BASELINE, switch.files)
+        self.assertEqual([], ocp.list_patchers(HOST, "agent"))
+
+    async def test_install_without_activating(self) -> None:
+        switch = self._switch(_cage_agent())
+        await self._flip_to_800g(switch)
+        await ocp.async_apply(switch, activate=False)
+
+        self.assertEqual([("write", AGENT_LIVE)], switch.events)
+        self.assertEqual(["eth1/1/1"], [p.name for p in switch.agent().sw.ports])
+
+    async def test_platform_mapping_is_read_once_per_host(self) -> None:
+        switch = self._switch(_cage_agent())
+        await self._flip_to_800g(switch)
+        await self._register(
+            switch, _speed_patcher("p400", "eth1/1/1", "FOURHUNDREDG", _P400)
+        )
+        self.assertEqual(1, switch.platform_mapping_reads)

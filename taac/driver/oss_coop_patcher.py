@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import os
 import tempfile
@@ -84,6 +85,11 @@ _OPTIONAL_CONFIGS: t.FrozenSet[str] = frozenset({"bgpcpp_softdrain"})
 IGNORED_CONFIGS: t.FrozenSet[str] = frozenset({"bgpcpp_drain"})
 
 PATCHER_DIR_ENV = "TAAC_OSS_PATCHER_DIR"
+# A config change that removes a port (e.g. a speed change subsuming a /5) can
+# crash a running agent (T281221621), so such an apply cold boots the agent, as
+# `fboss2 config interface ... profile` does. Set this to "1" to keep the
+# requested method instead.
+PORT_REMOVAL_WARMBOOT_ENV = "TAAC_OSS_PATCHER_PORT_REMOVAL_WARMBOOT"
 # Internal COOP waits this long between an agent reload and the warmboot after it.
 _RELOAD_TO_WARMBOOT_S = 30
 # async_run_cmd_on_shell does not surface the exit status.
@@ -119,6 +125,35 @@ class _ConfigState:
 _STATE: t.Dict[str, t.Dict[str, _ConfigState]] = {}
 # host -> configs whose device file must be (re)installed or reactivated.
 _PENDING: t.Dict[str, t.Set[str]] = {}
+# host -> names of ports the installed agent config dropped since the agent
+# last started.
+_REMOVED_PORTS: t.Dict[str, t.Set[str]] = {}
+# host -> the agent's platform mapping, fetched once.
+_PLATFORM_MAPPINGS: t.Dict[str, t.Any] = {}
+
+
+class _SwitchInputs:
+    """``PatcherInputs`` read off the device the patchers target."""
+
+    def __init__(self, switch: t.Any) -> None:
+        self._switch = switch
+
+    async def platform_mapping(self) -> t.Any:
+        host = self._switch.hostname
+        if host not in _PLATFORM_MAPPINGS:
+            _PLATFORM_MAPPINGS[host] = await self._switch.async_get_platform_mapping()
+        return _PLATFORM_MAPPINGS[host]
+
+    def hardware(self) -> t.Optional[str]:
+        from taac.oss_topology_info.device_info_loader import (
+            get_hardware_from_hostname_oss,
+        )
+
+        return get_hardware_from_hostname_oss(self._switch.hostname)
+
+
+def _applier(switch: t.Any) -> OssPatchApplier:
+    return OssPatchApplier(switch.logger, _SwitchInputs(switch))
 
 
 def default_patcher_dir() -> str:
@@ -150,6 +185,8 @@ def clear(host: str) -> None:
     """Forget a host's patchers without touching the device or working copies."""
     _STATE.pop(host, None)
     _PENDING.pop(host, None)
+    _REMOVED_PORTS.pop(host, None)
+    _PLATFORM_MAPPINGS.pop(host, None)
 
 
 async def async_register(
@@ -168,8 +205,9 @@ async def async_register(
     spec = _spec(config_name)
     _check_patcher_targets(patcher, spec)
 
-    applier = OssPatchApplier(switch.logger)
+    applier = _applier(switch)
     state = _STATE.get(host, {}).get(config_name)
+    snapshot_created = False
     if state is None:
         if (
             config_name in _OPTIONAL_CONFIGS
@@ -180,7 +218,7 @@ async def async_register(
                 f"{patcher.name} for {config_name}"
             )
             return ""
-        config = await _async_snapshot_baseline(switch, spec)
+        config, snapshot_created = await _async_snapshot_baseline(switch, spec)
         state = _ConfigState(
             os.path.join(
                 patcher_dir or default_patcher_dir(), host, f"{config_name}.conf"
@@ -189,14 +227,23 @@ async def async_register(
     else:
         config = _read_working_copy(state, spec)
 
-    if any(p.name == patcher.name for p in state.patchers):
-        patchers = [patcher if p.name == patcher.name else p for p in state.patchers]
-        config = await _async_rebuild(switch, spec, applier, patchers)
-    else:
-        patchers = [*state.patchers, patcher]
-        config = await applier.async_apply(
-            config, config_name, patcher.py_func_name, patcher.args
-        )
+    try:
+        if any(p.name == patcher.name for p in state.patchers):
+            patchers = [
+                patcher if p.name == patcher.name else p for p in state.patchers
+            ]
+            config = await _async_rebuild(switch, spec, applier, patchers)
+        else:
+            patchers = [*state.patchers, patcher]
+            config = await applier.async_apply(
+                config, config_name, patcher.py_func_name, patcher.args
+            )
+    except Exception:
+        # A rejected first patcher leaves nothing registered, so the snapshot it
+        # took would only make teardown restart a daemon for an unchanged file.
+        if snapshot_created:
+            await _async_run_checked(switch, f"rm -f {spec.baseline_path}")
+        raise
 
     # Record only once the patcher has applied cleanly, so a bad one is never
     # listed as registered.
@@ -222,12 +269,14 @@ async def async_unregister(switch: t.Any, config_name: str, patcher_name: str) -
     spec = _spec(config_name)
     remaining = [p for p in state.patchers if p.name != patcher_name]
     if remaining:
-        config = await _async_rebuild(
-            switch, spec, OssPatchApplier(switch.logger), remaining
-        )
+        config = await _async_rebuild(switch, spec, _applier(switch), remaining)
         _write_working_copy(state.working_path, config)
         state.patchers = remaining
     else:
+        if config_name == "agent":
+            await _async_note_removed_ports(
+                switch, await switch.async_read_file(spec.baseline_path)
+            )
         await _async_restore_baseline(switch, spec)
         _remove_working_copy(state.working_path)
         del _STATE[host][config_name]
@@ -240,17 +289,23 @@ async def async_restore_baselines(switch: t.Any) -> None:
 
     Driven by the baseline files on the device rather than by the registry, so a
     baseline left behind by a run that died before restoring is restored too.
-    Each restored config is activated -- the agent warmbooted, bgpd restarted --
+    Each restored config is activated as ``async_apply`` would with no method --
+    the agent reloaded, or warmbooted along with a bgp change, bgpd restarted --
     as is one an earlier unregister already restored but nobody applied.
     """
     host = switch.hostname
     changed = set(_PENDING.get(host, set()))
     for name, spec in CONFIG_SPECS.items():
         if await config_modifiers.async_file_exists(switch, spec.baseline_path):
+            if name == "agent":
+                await _async_note_removed_ports(
+                    switch, await switch.async_read_file(spec.baseline_path)
+                )
             await _async_restore_baseline(switch, spec)
             changed.add(name)
     for state in _STATE.get(host, {}).values():
         _remove_working_copy(state.working_path)
+    coldboot = _coldboot_for_removed_ports(switch)
     clear(host)
     # The baselines are gone from the device now, so this is the only record of
     # what still needs activating: kept until the restarts succeed, so a retry
@@ -259,11 +314,9 @@ async def async_restore_baselines(switch: t.Any) -> None:
 
     if changed:
         switch.logger.info(f"[oss-patcher] restored {sorted(changed)} on {host}")
-    agent_restarted = "agent" in changed
-    if agent_restarted:
-        await _async_restart_agent(switch)
-    if changed & _BGP_CONFIGS:
-        await _async_activate_bgp(switch, agent_restarted)
+    # As the default apply: an agent-only change reloads, agent plus bgp is one
+    # warmboot, and a restore that removes a port cold boots.
+    await _async_activate(switch, changed, None, coldboot)
     _PENDING.pop(host, None)
 
 
@@ -271,6 +324,7 @@ async def async_apply(
     switch: t.Any,
     method: t.Optional[taac_types.ApplyPatcherMethod] = None,
     coldboot: bool = False,
+    activate: bool = True,
 ) -> None:
     """Install the changed configs on the device, then activate them.
 
@@ -279,7 +333,9 @@ async def async_apply(
     reloaded (falling back to a warmboot), as COOP's default apply does, unless
     a bgp config changed too, in which case the agent is warmbooted. A change to
     either bgp config restarts bgpd once; it has no reload. ``coldboot``
-    overrides ``method`` for the agent.
+    overrides ``method`` for the agent, and is forced when the agent config
+    drops a port (see ``PORT_REMOVAL_WARMBOOT_ENV``). With ``activate=False``
+    the files are installed and nothing restarts: the caller activates them.
     """
     host = switch.hostname
     changed = set(_PENDING.get(host, set()))
@@ -291,11 +347,25 @@ async def async_apply(
         for name in sorted(changed)
         if name in states
     }
+    agent_config = to_install.get(CONFIG_SPECS["agent"].live_path)
+    if agent_config is not None:
+        await _async_note_removed_ports(
+            switch, config_modifiers.serialize_config(agent_config)
+        )
     if to_install:
         switch.logger.info(f"[oss-patcher] installing {sorted(to_install)} on {host}")
         await config_modifiers.async_write_configs(switch, to_install)
-    await _async_activate(switch, changed, method, coldboot)
+    if not activate:
+        _PENDING.pop(host, None)
+        switch.logger.info(f"[oss-patcher] {host}: installed without activating")
+        return
+    await _async_activate(
+        switch, changed, method, coldboot or _coldboot_for_removed_ports(switch)
+    )
+    # Cleared only once activation succeeds, so a failed restart is retried by
+    # the next apply rather than reported as nothing to do.
     _PENDING.pop(host, None)
+    _REMOVED_PORTS.pop(host, None)
 
 
 def _spec(config_name: str) -> ConfigSpec:
@@ -324,8 +394,12 @@ def _check_patcher_targets(patcher: OssPatcher, spec: ConfigSpec) -> None:
         )
 
 
-async def _async_snapshot_baseline(switch: t.Any, spec: ConfigSpec) -> t.Any:
+async def _async_snapshot_baseline(
+    switch: t.Any, spec: ConfigSpec
+) -> t.Tuple[t.Any, bool]:
+    """The baseline config, and whether this call created its snapshot."""
     baseline = spec.baseline_path
+    created = False
     if await config_modifiers.async_file_exists(switch, baseline):
         switch.logger.warning(
             f"[oss-patcher] {switch.hostname}:{baseline} already exists -- the "
@@ -333,7 +407,8 @@ async def _async_snapshot_baseline(switch: t.Any, spec: ConfigSpec) -> t.Any:
         )
     else:
         await _async_run_checked(switch, f"cp -a {spec.live_path} {baseline}")
-    return await _async_read_baseline(switch, spec)
+        created = True
+    return await _async_read_baseline(switch, spec), created
 
 
 async def _async_read_baseline(switch: t.Any, spec: ConfigSpec) -> t.Any:
@@ -366,6 +441,38 @@ async def _async_restore_baseline(switch: t.Any, spec: ConfigSpec) -> None:
         f"cp -a {baseline} {live}.restore && mv -f {live}.restore {live} "
         f"&& rm -f {baseline}",
     )
+
+
+def _port_names(raw_agent_config: str) -> t.Dict[int, str]:
+    ports = json.loads(raw_agent_config).get("sw", {}).get("ports", [])
+    return {p["logicalID"]: p.get("name", str(p["logicalID"])) for p in ports}
+
+
+async def _async_note_removed_ports(switch: t.Any, new_agent_config: str) -> None:
+    """Record the ports ``new_agent_config`` lacks that the device's live agent
+    config has, before it replaces that file."""
+    live = await switch.async_read_file(CONFIG_SPECS["agent"].live_path)
+    before, after = _port_names(live), _port_names(new_agent_config)
+    removed = {name for port_id, name in before.items() if port_id not in after}
+    if removed:
+        _REMOVED_PORTS.setdefault(switch.hostname, set()).update(removed)
+
+
+def _coldboot_for_removed_ports(switch: t.Any) -> bool:
+    removed = _REMOVED_PORTS.get(switch.hostname)
+    if not removed:
+        return False
+    if os.environ.get(PORT_REMOVAL_WARMBOOT_ENV) == "1":
+        switch.logger.warning(
+            f"[oss-patcher] {switch.hostname}: {sorted(removed)} removed without "
+            f"a cold boot ({PORT_REMOVAL_WARMBOOT_ENV}=1); see T281221621"
+        )
+        return False
+    switch.logger.info(
+        f"[oss-patcher] {switch.hostname}: cold booting the agent, the config "
+        f"removes {sorted(removed)} (T281221621)"
+    )
+    return True
 
 
 async def _async_activate(

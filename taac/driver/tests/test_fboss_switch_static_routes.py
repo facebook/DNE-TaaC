@@ -108,5 +108,29 @@ class StaticRoutePatcherTest(unittest.IsolatedAsyncioTestCase):
             await self.switch.async_coop_unregister_patchers("never_registered")
 
 
+class _FakeAgentClient:
+    async def getPlatformMapping(self):
+        return "platform-mapping"
+
+
+class _FakeAgentCtx:
+    async def __aenter__(self):
+        return _FakeAgentClient()
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class PlatformMappingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_platform_mapping_comes_from_the_agent(self):
+        switch = FbossSwitch("dut1", logging.getLogger(__name__))
+        with mock.patch.object(
+            FbossSwitch, "async_agent_client", property(lambda _self: _FakeAgentCtx())
+        ):
+            self.assertEqual(
+                "platform-mapping", await switch.async_get_platform_mapping()
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

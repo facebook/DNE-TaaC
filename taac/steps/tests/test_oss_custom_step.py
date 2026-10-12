@@ -303,9 +303,9 @@ class TestMtuHandlers(unittest.IsolatedAsyncioTestCase):
         )
         step.driver.async_register_python_patcher.assert_awaited_once_with(
             patcher_name="mtu_exceed_patcher",
-            patcher_args={"interface": PORT, "mtu": "1500"},
+            patcher_args={"intfs": PORT, "mtu": "1500"},
             config_name="agent",
-            py_func_name="change_interface_mtu",
+            py_func_name="change_mtu",
             patcher_desc="",
         )
         step.driver.async_apply_patchers.assert_awaited_once_with(

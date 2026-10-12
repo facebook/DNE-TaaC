@@ -1213,14 +1213,59 @@ class FbossSwitch(AbstractSwitch):
         self,
         apply_patcher_method: Optional[Any] = None,
         coldboot: bool = False,
+        restart_services: bool = True,
         **kwargs,
     ) -> None:
         """Install every changed config, then activate per ``apply_patcher_method``
-        (a ``taac_types.ApplyPatcherMethod``) or cold-boot the agent."""
+        (a ``taac_types.ApplyPatcherMethod``) or cold-boot the agent.
+        ``restart_services=False`` installs without activating, for a caller
+        that reloads or restarts the agent itself."""
         self._require_oss_config_patcher()
         from taac.driver import oss_coop_patcher
 
-        await oss_coop_patcher.async_apply(self, apply_patcher_method, coldboot)
+        await oss_coop_patcher.async_apply(
+            self, apply_patcher_method, coldboot, activate=restart_services
+        )
+
+    async def async_change_speed_patcher(
+        self,
+        intf_names: List[str],
+        desired_speed: str,
+        profile_id: str,
+        patcher_name: str,
+        patcher_desc: str = "",
+    ) -> str:
+        """Register COOP's ``change_speed`` patcher on the agent config for
+        ``intf_names``; ``desired_speed`` and ``profile_id`` are PortSpeed and
+        PortProfileID names. Returns the patcher name. The signature matches
+        ``FbossSwitchInternalMixin``'s."""
+        self._require_oss_config_patcher()
+        await self.async_register_python_patcher(
+            "agent",
+            patcher_name,
+            "change_speed",
+            {
+                "intfs": ",".join(intf_names),
+                "speed": desired_speed,
+                "profile_id": profile_id,
+            },
+            patcher_desc,
+        )
+        return patcher_name
+
+    async def async_unregister_python_patcher(
+        self, patcher_name: str, config_name: str
+    ) -> None:
+        """Unregister one patcher from ``config_name``; the signature matches
+        ``FbossSwitchInternalMixin``'s."""
+        self._require_oss_config_patcher()
+        await self.async_coop_unregister_patchers(patcher_name, config_name)
+
+    async def async_get_platform_mapping(self) -> Any:
+        """The agent's platform mapping (ports, their supported profiles and the
+        ports each profile subsumes)."""
+        async with self.async_agent_client as client:
+            return await client.getPlatformMapping()
 
     async def async_restore_patched_configs(self) -> None:
         """Drop every patcher, put each baseline left on the box back, and
