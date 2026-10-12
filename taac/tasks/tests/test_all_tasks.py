@@ -1,25 +1,32 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
 import base64
+import contextlib
 import json
 import math
+import typing as t
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, call, MagicMock, patch
 
 import later.unittest
 from taac.task_definitions import create_coop_apply_patchers_task
+from neteng.test_infra.dne.taac.tasks import all as tasks_all
 from taac.tasks.all import (
     AristaCreateFileFromConfig,
     AristaDaemonControlTask,
     ConfigureParallelBgpPeers,
     CoopApplyPatchersTask,
+    CoopApplyPatchersV2,
+    CoopRegisterPatcherTask,
+    CoopUnregisterPatchersTask,
     IxiaStopTrafficAndWaitTask,
     IxiaSyncRawSourceMacsTask,
     RunCommandsOnShell,
     ScpFile,
     ValidateBgpcppUpdateGroupState,
 )
+from taac.utils import oss_taac_lib_utils
 
 
 ALL_PATH = "neteng.test_infra.dne.taac.tasks.all"
@@ -179,6 +186,222 @@ class CoopApplyPatchersTaskTest(later.unittest.TestCase):
 
         driver.async_agent_config_reload.assert_awaited_once_with()
         driver.async_restart_service.assert_awaited_once()
+
+
+@contextlib.contextmanager
+def _taac_env(taac_oss: bool, meta_internal: bool):
+    """The tasks split internal from OSS on their own TAAC_OSS and pick the pure-OSS
+    patcher through the shared gate, so drive both."""
+    with (
+        patch(f"{ALL_PATH}.TAAC_OSS", taac_oss),
+        patch.object(oss_taac_lib_utils, "TAAC_OSS", taac_oss),
+        patch.object(oss_taac_lib_utils, "TAAC_OSS_META_INTERNAL", meta_internal),
+    ):
+        yield
+
+
+class CoopUnregisterPatchersTaskTest(later.unittest.TestCase):
+    """A config with nothing to unregister must not end the loop. fsw is drainable,
+    so the default configs are agent, bgpcpp, bgpcpp_drain and bgpcpp_softdrain;
+    with `break`, nothing after the empty agent config was ever unregistered."""
+
+    async def _run_teardown(
+        self, taac_oss: bool, owner: t.Optional[str]
+    ) -> t.Tuple[MagicMock, t.Dict[str, list]]:
+        patcher = SimpleNamespace(name="p", owner=owner)
+        registered = {
+            "agent": [],
+            "bgpcpp": [patcher],
+            "bgpcpp_drain": [],
+            "bgpcpp_softdrain": [patcher],
+        }
+
+        async def list_patchers(config_name: str) -> list:
+            return list(registered[config_name])
+
+        async def unregister(patcher_name: str, config_name: str, **kwargs) -> None:
+            registered[config_name] = [
+                p for p in registered[config_name] if p.name != patcher_name
+            ]
+
+        driver = MagicMock()
+        driver.async_coop_list_patchers = AsyncMock(side_effect=list_patchers)
+        driver.async_coop_unregister_patchers = AsyncMock(side_effect=unregister)
+        driver.async_restore_patched_configs = AsyncMock()
+        with (
+            _taac_env(taac_oss=taac_oss, meta_internal=False),
+            patch(
+                f"{ALL_PATH}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+        ):
+            await CoopUnregisterPatchersTask(logger=MagicMock()).run(
+                {"hostname": "fsw.example"}
+            )
+        return driver, registered
+
+    def _assert_every_config_cleaned(
+        self, driver: MagicMock, registered: t.Dict[str, list]
+    ) -> None:
+        self.assertEqual(
+            [
+                call("p", "bgpcpp", auto_remediate_failure=True),
+                call("p", "bgpcpp_softdrain", auto_remediate_failure=True),
+            ],
+            driver.async_coop_unregister_patchers.await_args_list,
+        )
+        self.assertEqual(
+            {"agent": [], "bgpcpp": [], "bgpcpp_drain": [], "bgpcpp_softdrain": []},
+            registered,
+        )
+
+    def test_default_configs_for_a_drainable_host(self) -> None:
+        self.assertEqual(
+            ["agent", "bgpcpp", "bgpcpp_drain", "bgpcpp_softdrain"],
+            tasks_all.get_default_configs("fsw.example"),
+        )
+
+    async def test_internal_empty_config_does_not_stop_the_rest(self) -> None:
+        # COOP stamps the owner; OSS patchers carry none.
+        driver, registered = await self._run_teardown(
+            taac_oss=False, owner=tasks_all.DNE_TEST_REGRESSION_NAME
+        )
+        self._assert_every_config_cleaned(driver, registered)
+        driver.async_restore_patched_configs.assert_not_awaited()
+
+    async def test_pure_oss_empty_config_does_not_stop_the_rest(self) -> None:
+        driver, registered = await self._run_teardown(taac_oss=True, owner=None)
+        self._assert_every_config_cleaned(driver, registered)
+        driver.async_restore_patched_configs.assert_awaited_once_with()
+
+
+class CoopPatcherTaskGateTest(later.unittest.TestCase):
+    """The OSS patcher is pure-OSS only; the TAAC_OSS_META_INTERNAL container skips
+    the COOP patcher tasks, as every OSS run did before the OSS patcher."""
+
+    async def test_container_skips_every_coop_patcher_task(self) -> None:
+        runs = [
+            (
+                CoopRegisterPatcherTask,
+                {
+                    "hostname": "fsw.example",
+                    "config_name": "bgpcpp",
+                    "patcher_name": "p",
+                    "py_func_name": "remove_bgp_peers",
+                    "patcher_args": "{}",
+                },
+            ),
+            (CoopUnregisterPatchersTask, {"hostname": "fsw.example"}),
+            (CoopApplyPatchersTask, {"hostnames": ["fsw.example"]}),
+            (
+                CoopApplyPatchersV2,
+                {"hostnames": ["fsw.example"], "apply_patcher_method": 2},
+            ),
+        ]
+        with (
+            _taac_env(taac_oss=True, meta_internal=True),
+            patch(
+                f"{ALL_PATH}.async_get_device_driver", new_callable=AsyncMock
+            ) as get_driver,
+        ):
+            for task_cls, params in runs:
+                await task_cls(logger=MagicMock()).run(params)
+
+        get_driver.assert_not_awaited()
+
+    async def test_pure_oss_apply_uses_the_oss_patcher(self) -> None:
+        driver = MagicMock()
+        driver.async_apply_patchers = AsyncMock()
+        with (
+            _taac_env(taac_oss=True, meta_internal=False),
+            patch(
+                f"{ALL_PATH}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+        ):
+            await CoopApplyPatchersTask(logger=MagicMock()).run(
+                {"hostnames": ["fsw.example"], "do_warmboot": True}
+            )
+
+        driver.async_apply_patchers.assert_awaited_once_with(
+            tasks_all.taac_types.ApplyPatcherMethod.AGENT_WARMBOOT, coldboot=False
+        )
+
+    async def test_pure_oss_teardown_restores_baselines(self) -> None:
+        driver = MagicMock()
+        driver.async_coop_list_patchers = AsyncMock(return_value=[])
+        driver.async_restore_patched_configs = AsyncMock()
+        driver.async_apply_patchers = AsyncMock()
+        with (
+            _taac_env(taac_oss=True, meta_internal=False),
+            patch(
+                f"{ALL_PATH}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+        ):
+            await CoopUnregisterPatchersTask(logger=MagicMock()).run(
+                {"hostname": "fsw.example"}
+            )
+
+        driver.async_restore_patched_configs.assert_awaited_once_with()
+        driver.async_apply_patchers.assert_not_awaited()
+
+    async def test_pure_oss_partial_unregister_applies(self) -> None:
+        registered = {"bgpcpp": [SimpleNamespace(name="drop", owner=None)]}
+        registered["bgpcpp"].append(SimpleNamespace(name="keep", owner=None))
+
+        async def list_patchers(config_name: str) -> list:
+            return list(registered.get(config_name, []))
+
+        async def unregister(patcher_name: str, config_name: str, **kwargs) -> None:
+            registered[config_name] = [
+                p for p in registered[config_name] if p.name != patcher_name
+            ]
+
+        driver = MagicMock()
+        driver.async_coop_list_patchers = AsyncMock(side_effect=list_patchers)
+        driver.async_coop_unregister_patchers = AsyncMock(side_effect=unregister)
+        driver.async_restore_patched_configs = AsyncMock()
+        driver.async_apply_patchers = AsyncMock()
+        with (
+            _taac_env(taac_oss=True, meta_internal=False),
+            patch(
+                f"{ALL_PATH}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+        ):
+            await CoopUnregisterPatchersTask(logger=MagicMock()).run(
+                {"hostname": "fsw.example", "regex": "drop"}
+            )
+
+        self.assertEqual(["keep"], [p.name for p in registered["bgpcpp"]])
+        driver.async_apply_patchers.assert_awaited_once_with()
+        driver.async_restore_patched_configs.assert_not_awaited()
+
+    async def test_internal_unregister_never_restores_oss_baselines(self) -> None:
+        driver = MagicMock()
+        driver.async_coop_list_patchers = AsyncMock(return_value=[])
+        driver.async_restore_patched_configs = AsyncMock()
+        driver.async_apply_patchers = AsyncMock()
+        with (
+            _taac_env(taac_oss=False, meta_internal=False),
+            patch(
+                f"{ALL_PATH}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+        ):
+            await CoopUnregisterPatchersTask(logger=MagicMock()).run(
+                {"hostname": "fsw.example"}
+            )
+
+        driver.async_coop_list_patchers.assert_awaited()
+        driver.async_restore_patched_configs.assert_not_awaited()
+        driver.async_apply_patchers.assert_not_awaited()
 
 
 class ConfigureParallelBgpPeersTest(later.unittest.TestCase):
@@ -352,6 +575,8 @@ class ConfigureParallelBgpPeersTest(later.unittest.TestCase):
         vlan_args = vlan_call.kwargs["patcher_args"]
         primary = json.loads(vlan_args["vlan2000"])
         secondary = json.loads(vlan_args["vlan4016"])
+        # Only the OSS patcher needs telling; COOP replaces addresses anyway.
+        self.assertNotIn("retain_existing_vlan_addresses", primary)
         self.assertEqual(primary["ports"], [129])
         self.assertEqual(primary["ip_addresses"], ["2401:db00:501c::10/127"])
         self.assertEqual(secondary["ports"], [137])
@@ -371,6 +596,54 @@ class ConfigureParallelBgpPeersTest(later.unittest.TestCase):
             [peer["remote_as_4_byte"] for peer in peer_configs],
             ["65000", "6016"],
         )
+
+    async def test_oss_split_tells_the_patcher_to_replace_addresses(self) -> None:
+        driver = MagicMock()
+        driver.async_get_all_port_info = AsyncMock(
+            return_value={
+                129: SimpleNamespace(name="eth1/17/1", portId=129, vlans=[2000]),
+            }
+        )
+        driver.async_register_python_patcher = AsyncMock()
+        config = {
+            "eth1/17/1": [
+                {
+                    "starting_ip": "2401:db00:501c::10",
+                    "increment_ip": "::2",
+                    "prefix_length": 127,
+                    "description": "primary",
+                    "peer_group_name": "TAAC_REBOOT_IXIA_V6",
+                    "num_sessions": 1,
+                    "remote_as_4_byte": 65000,
+                    "gateway_starting_ip": "2401:db00:501c::11",
+                    "gateway_increment_ip": "::2",
+                    "vlan_id": 2000,
+                    "retain_existing_vlan_addresses": False,
+                }
+            ]
+        }
+        with (
+            patch(
+                f"{ALL_PATH}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+            patch(f"{ALL_PATH}.oss_config_patcher_enabled", return_value=True),
+        ):
+            await ConfigureParallelBgpPeers(logger=MagicMock()).run(
+                {
+                    "hostname": "rsw001.p001.f01.qzd1",
+                    "config_json": json.dumps(config),
+                }
+            )
+
+        vlan_call = next(
+            call
+            for call in driver.async_register_python_patcher.await_args_list
+            if call.kwargs["config_name"] == "agent"
+        )
+        vlan_config = json.loads(vlan_call.kwargs["patcher_args"]["vlan2000"])
+        self.assertIs(False, vlan_config["retain_existing_vlan_addresses"])
 
     async def test_shared_vlan_split_rejects_non_lowest_primary(self) -> None:
         driver = MagicMock()

@@ -37,6 +37,7 @@ Call these from a TAAC step or task with the device's driver::
 
 import json
 import logging
+import re
 import typing as t
 
 # Both of these imports resolve in OSS as well as internally. The module path is
@@ -76,6 +77,7 @@ from configerator.structs.neteng.robotron.bgp_policy.thrift_types import (
 from taac.driver.abstract_switch import AbstractSwitch
 from taac.driver.driver_constants import FbossSystemctlServiceName
 from thrift.python.serializer import deserialize, Protocol, serialize
+from thrift.python.types import StructOrUnion
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -83,6 +85,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 # retargeted identically; the TypeVar keeps _retarget from widening either one
 # into a union at its call sites.
 _PolicyHolder = t.TypeVar("_PolicyHolder", PeerGroup, BgpPeer)
+_Config = t.TypeVar("_Config", bound=StructOrUnion)
 
 
 # Drain markers and the bgpd startup-config symlink. Mirrors the layout in
@@ -105,6 +108,7 @@ MARKER_SOFT_DRAINED: str = f"{FBOSS_DRAIN_DIR}/SOFT_DRAINED"
 COOP_DIR: str = "/etc/coop"
 LIVE_CONFIG_PATH: str = f"{COOP_DIR}/bgpcpp.conf"
 SOFTDRAIN_CONFIG_PATH: str = f"{COOP_DIR}/bgpcpp_softdrain.conf"
+AGENT_CONFIG_PATH: str = f"{COOP_DIR}/agent.conf"
 
 _UNDRAIN: str = "undrain"
 _SOFT_DRAIN: str = "soft-drain"
@@ -182,7 +186,7 @@ def _assert_fboss_device(switch: AbstractSwitch, state_name: str) -> None:
         )
 
 
-async def _async_file_exists(switch: AbstractSwitch, path: str) -> bool:
+async def async_file_exists(switch: AbstractSwitch, path: str) -> bool:
     """Check for a regular file using only the AbstractSwitch API.
 
     ``FbossSwitch.async_check_if_file_exists`` would be the obvious call, but it
@@ -293,7 +297,7 @@ async def _apply_drain_state(
     hostname = switch.hostname
     _assert_fboss_device(switch, state_name)
 
-    if not await _async_file_exists(switch, target_config):
+    if not await async_file_exists(switch, target_config):
         raise ConfigModifierError(
             f"Cannot {state_name} {hostname}: BGP config {target_config} is missing. "
             "Generate the base configs first -- drain/undrain only selects between "
@@ -519,62 +523,93 @@ def _clear_policy(network: BgpNetwork) -> BgpNetwork:
     return network(policy_name=None)
 
 
-def _reset_policies(config: BgpConfig) -> BgpConfig:
-    """Replace the config's entire policy section with the three propagate policies.
+def _reset_policies(config: BgpConfig, keep_existing: bool = False) -> BgpConfig:
+    """Install the three propagate policies.
 
-    The whole ``BgpPolicies`` container goes, not just the statements: the
-    auxiliary lists (community lists, as-path lists, prefix lists) only existed
-    to serve the policies being removed, and our three define their communities
-    inline. ``obj_uuid`` is carried over because it identifies the container
-    itself rather than anything in it.
+    By default the whole ``BgpPolicies`` container is replaced, not just the
+    statements: the auxiliary lists (community lists, as-path lists, prefix
+    lists) only existed to serve the policies being removed, and our three
+    define their communities inline. ``obj_uuid`` is carried over because it
+    identifies the container itself rather than anything in it.
+
+    With ``keep_existing`` (the scoped mode) the propagate policies are
+    appended instead, so peer groups left un-retargeted keep resolving their
+    original policies.
     """
     existing = config.policies
-    removed = len(existing.bgp_policy_statements) if existing else 0
+    kept = list(existing.bgp_policy_statements) if (keep_existing and existing) else []
+    kept_names = {p.name for p in kept}
+    added = [p for p in PROPAGATE_POLICIES if p.name not in kept_names]
     logger.info(
-        f"Replacing {removed} policy statement(s) with "
-        f"{len(PROPAGATE_POLICIES)} propagate policies"
+        f"{'Keeping' if keep_existing else 'Replacing'} "
+        f"{len(existing.bgp_policy_statements) if existing else 0} policy "
+        f"statement(s); adding {len(added)} propagate policies"
     )
+    if keep_existing and existing:
+        return config(policies=existing(bgp_policy_statements=kept + added))
     return config(
         policies=BgpPolicies(
-            bgp_policy_statements=list(PROPAGATE_POLICIES),
+            bgp_policy_statements=kept + added,
             obj_uuid=existing.obj_uuid if existing else None,
         )
     )
 
 
-def _retarget_peer_groups(config: BgpConfig, egress_policy: str) -> BgpConfig:
-    """Point every peer group at the propagate policies.
+def _retarget_peer_groups(
+    config: BgpConfig, egress_policy: str, peer_group_regex: t.Optional[str] = None
+) -> BgpConfig:
+    """Point peer groups at the propagate policies.
 
-    Every one, with no role resolution: a soft-drain is a whole-device
-    operation, so a peer group left on its original policy would keep
-    advertising LIVE while the rest of the device drains.
+    By default every one, with no role resolution: a soft-drain is a
+    whole-device operation, so a peer group left on its original policy would
+    keep advertising LIVE while the rest of the device drains.
+
+    ``peer_group_regex`` scopes the retarget to matching group names, for a DUT
+    wired into a live fabric where retargeting the fabric-facing groups would
+    advertise everything into it (unscoped, that crash-looped fboss_sw_agent on
+    a 2-RSW-2-FSW pod). Scoped, the drain is only observable on the matched
+    groups.
     """
     peer_groups = config.peer_groups
     if not peer_groups:
         logger.warning("Config has no peer groups to retarget")
         return config
 
+    match = re.compile(peer_group_regex).search if peer_group_regex else None
+    picked = [g for g in peer_groups if match is None or match(g.name or "")]
     logger.info(
-        f"Retargeting {len(peer_groups)} peer group(s) to "
+        f"Retargeting {len(picked)}/{len(peer_groups)} peer group(s) to "
         f"({POLICY_PROPAGATE_IN}, {egress_policy})"
     )
     return config(
-        peer_groups=[_retarget(peer_group, egress_policy) for peer_group in peer_groups]
+        peer_groups=[
+            _retarget(g, egress_policy) if g in picked else g for g in peer_groups
+        ]
     )
 
 
-def _retarget_peers(config: BgpConfig, egress_policy: str) -> BgpConfig:
-    """Point every peer at the propagate policies.
+def _retarget_peers(
+    config: BgpConfig, egress_policy: str, peer_group_regex: t.Optional[str] = None
+) -> BgpConfig:
+    """Point peers at the propagate policies.
 
     Peer-level policy names override the peer group's, so a peer still naming a
-    policy we just deleted would both dangle and escape the drain.
+    policy we just deleted would both dangle and escape the drain. With
+    ``peer_group_regex``, only peers of matching groups are touched -- the
+    others keep their (still present) original policies.
     """
     peers = config.peers
     if not peers:
         return config
 
-    logger.info(f"Retargeting {len(peers)} peer(s) to egress {egress_policy}")
-    return config(peers=[_retarget(peer, egress_policy) for peer in peers])
+    match = re.compile(peer_group_regex).search if peer_group_regex else None
+    picked = [p for p in peers if match is None or match(p.peer_group_name or "")]
+    logger.info(
+        f"Retargeting {len(picked)}/{len(peers)} peer(s) to egress {egress_policy}"
+    )
+    return config(
+        peers=[_retarget(p, egress_policy) if p in picked else p for p in peers]
+    )
 
 
 def _clear_network_policies(config: BgpConfig) -> BgpConfig:
@@ -613,19 +648,24 @@ def _set_drain_state(config: BgpConfig, drain_state: DrainState) -> BgpConfig:
 
 
 def _generate_variant(
-    base: BgpConfig, egress_policy: str, drain_state: DrainState
+    base: BgpConfig,
+    egress_policy: str,
+    drain_state: DrainState,
+    peer_group_regex: t.Optional[str] = None,
 ) -> BgpConfig:
     """Build one of the two config variants from the shared base.
 
     Both variants go through this, so the live and drain copies cannot drift
     into differing by anything other than these two arguments.
     """
-    config = _retarget_peer_groups(base, egress_policy)
-    config = _retarget_peers(config, egress_policy)
+    config = _retarget_peer_groups(base, egress_policy, peer_group_regex)
+    config = _retarget_peers(config, egress_policy, peer_group_regex)
     return _set_drain_state(config, drain_state)
 
 
-def generate_base_configs(config: BgpConfig) -> tuple[BgpConfig, BgpConfig]:
+def generate_base_configs(
+    config: BgpConfig, peer_group_regex: t.Optional[str] = None
+) -> tuple[BgpConfig, BgpConfig]:
     """Derive the live and soft-drain configs from a device's current config.
 
     The two outputs are identical except for the egress policy every peer group
@@ -635,35 +675,54 @@ def generate_base_configs(config: BgpConfig) -> tuple[BgpConfig, BgpConfig]:
 
     Args:
         config: the device's current BGP config. Not modified.
+        peer_group_regex: scope the transform to peer groups (and their peers)
+            whose name matches. Original policies and network policy references
+            are then kept, so unmatched groups keep working. Default: every
+            group, with the policy section replaced wholesale.
 
     Returns:
         ``(live_config, soft_drain_config)``.
     """
-    base = _clear_network_policies(_reset_policies(config))
+    scoped = peer_group_regex is not None
+    base = _reset_policies(config, keep_existing=scoped)
+    if not scoped:
+        base = _clear_network_policies(base)
     return (
-        _generate_variant(base, POLICY_PROPAGATE_OUT, DrainState.UNDRAINED),
-        _generate_variant(base, POLICY_PROPAGATE_OUT_DRAIN, DrainState.SOFT_DRAINED),
+        _generate_variant(
+            base, POLICY_PROPAGATE_OUT, DrainState.UNDRAINED, peer_group_regex
+        ),
+        _generate_variant(
+            base,
+            POLICY_PROPAGATE_OUT_DRAIN,
+            DrainState.SOFT_DRAINED,
+            peer_group_regex,
+        ),
     )
 
 
-def _deserialize_config(raw_config: str, hostname: str) -> BgpConfig:
-    """Parse a bgpd config file.
+def deserialize_config(
+    config_type: type[_Config], raw_config: str, source: str
+) -> _Config:
+    """Parse a daemon config file: bgpd's ``BgpConfig`` or wedge_agent's ``AgentConfig``.
 
-    Protocol.JSON is SimpleJSON, which is what bgpd reads and writes
-    (SimpleJSONSerializer in Config.cpp / ConfigManager.cpp). Protocol.COMPACT_JSON
-    would parse and serialize using field ids instead of names and would not
-    round-trip against the daemon.
+    Protocol.JSON is SimpleJSON, which is what both daemons read and write
+    (SimpleJSONSerializer in bgpd's Config.cpp / ConfigManager.cpp and in
+    fboss/agent/AgentConfig.cpp). Protocol.COMPACT_JSON would parse and serialize
+    using field ids instead of names and would not round-trip against them.
+
+    Raises:
+        ConfigModifierError: ``raw_config`` is not a parseable ``config_type`` --
+            including a file truncated on its way off the device.
     """
     try:
-        return deserialize(BgpConfig, raw_config.encode(), protocol=Protocol.JSON)
+        return deserialize(config_type, raw_config.encode(), protocol=Protocol.JSON)
     except Exception as exc:
         raise ConfigModifierError(
-            f"Cannot {_BASE_CONFIG_SETUP} {hostname}: {LIVE_CONFIG_PATH} is not a "
-            f"parseable BGP config ({exc})."
+            f"{source} is not a parseable {config_type.__name__} ({exc})."
         ) from exc
 
 
-def _serialize_config(config: BgpConfig) -> str:
+def serialize_config(config: StructOrUnion) -> str:
     """Serialize a config as indented JSON, newline-terminated.
 
     thrift's SimpleJSON writer emits the whole document on a single line. At the
@@ -682,16 +741,27 @@ def _serialize_config(config: BgpConfig) -> str:
     return json.dumps(json.loads(compact), indent=2, ensure_ascii=False) + "\n"
 
 
-async def _async_write_config(
-    switch: AbstractSwitch, config: BgpConfig, remote_path: str
+async def async_write_configs(
+    switch: AbstractSwitch, configs: t.Mapping[str, StructOrUnion]
 ) -> None:
-    """Serialize a config and write it to the device."""
-    contents = _serialize_config(config)
-    # pyre-ignore[16]: FbossSwitch-only, and _assert_fboss_device has already run.
-    await switch.async_write_file_on_device(contents, remote_path)
+    """Write several configs to the device, keyed by destination path.
+
+    Every config is serialized before any file is written, so one that fails to
+    serialize cannot leave the device with only part of the set updated. Each file
+    is then replaced atomically on its own; there is no cross-file transaction, so
+    restart the daemons only after this returns.
+    """
+    contents = {path: serialize_config(config) for path, config in configs.items()}
+    for path, text in contents.items():
+        # pyre-ignore[16]: FbossSwitch-only; callers have checked the device type.
+        await switch.async_write_file_on_device(text, path)
 
 
-async def setup_base_configs(switch: AbstractSwitch, restart_bgp: bool = True) -> None:
+async def setup_base_configs(
+    switch: AbstractSwitch,
+    restart_bgp: bool = True,
+    peer_group_regex: t.Optional[str] = None,
+) -> None:
     """Generate both BGP configs on a device and leave it undrained.
 
     Reads the device's live config, rewrites its policies into the three
@@ -715,7 +785,7 @@ async def setup_base_configs(switch: AbstractSwitch, restart_bgp: bool = True) -
     hostname = switch.hostname
     _assert_fboss_device(switch, _BASE_CONFIG_SETUP)
 
-    if not await _async_file_exists(switch, LIVE_CONFIG_PATH):
+    if not await async_file_exists(switch, LIVE_CONFIG_PATH):
         raise ConfigModifierError(
             f"Cannot {_BASE_CONFIG_SETUP} {hostname}: {LIVE_CONFIG_PATH} is missing. "
             "The device must already be running a BGP config -- this generates the "
@@ -724,16 +794,20 @@ async def setup_base_configs(switch: AbstractSwitch, restart_bgp: bool = True) -
 
     switch.logger.info(f"{hostname}: reading BGP config from {LIVE_CONFIG_PATH}")
     raw_config = await switch.async_read_file(LIVE_CONFIG_PATH)
-    config = _deserialize_config(raw_config, hostname)
+    config = deserialize_config(
+        BgpConfig,
+        raw_config,
+        f"Cannot {_BASE_CONFIG_SETUP} {hostname}: {LIVE_CONFIG_PATH}",
+    )
 
-    live_config, drain_config = generate_base_configs(config)
+    live_config, drain_config = generate_base_configs(config, peer_group_regex)
 
-    for target_config, path in (
-        (live_config, LIVE_CONFIG_PATH),
-        (drain_config, SOFTDRAIN_CONFIG_PATH),
-    ):
-        switch.logger.info(f"{hostname}: writing {path}")
-        await _async_write_config(switch, target_config, path)
+    switch.logger.info(
+        f"{hostname}: writing {LIVE_CONFIG_PATH} and {SOFTDRAIN_CONFIG_PATH}"
+    )
+    await async_write_configs(
+        switch, {LIVE_CONFIG_PATH: live_config, SOFTDRAIN_CONFIG_PATH: drain_config}
+    )
 
     # Leave the device in a known state rather than wherever its markers happened
     # to point: the symlink may still reference a config that no longer exists.

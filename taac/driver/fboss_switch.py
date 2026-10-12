@@ -15,6 +15,7 @@ import socket
 import time
 import typing
 import typing as t
+import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -218,10 +219,12 @@ from taac.utils.oss_taac_lib_utils import (
     await_sync,
     none_throws,
     oss_agent_restart_paths_enabled,
+    oss_config_patcher_enabled,
     retryable,
     to_fb_fqdn,
     to_fb_uqdn,
 )
+from taac.test_as_a_config import types as taac_types
 
 if not TAAC_OSS:
     from openr.py.openr.cli.utils.commands import OpenrCtrlCmd
@@ -1115,6 +1118,118 @@ class FbossSwitch(AbstractSwitch):
         )
         return True
 
+    # ----------------------------------------------------------------------
+    # COOP python-patcher contract.
+    #
+    # Meta mode registers patchers with the COOP agent (FbossSwitchInternal
+    # overrides these). OSS serves the same register/unregister/apply contract
+    # against the config files -- see oss_coop_patcher.py for the mechanism.
+    #
+    # oss_coop_patcher is imported per call: it needs the agent_config thrift
+    # bindings, and a module-level import would make every FbossSwitch import
+    # depend on them.
+    # ----------------------------------------------------------------------
+
+    def _require_oss_config_patcher(self) -> None:
+        """The OSS patcher is pure-OSS only (see ``oss_config_patcher_enabled``):
+        internal runs use COOP through FbossSwitchInternal, and the
+        TAAC_OSS_META_INTERNAL container targets COOP-managed Meta devices."""
+        if not oss_config_patcher_enabled():
+            raise NotImplementedError(
+                "COOP patcher operations are not available here. Use "
+                "FbossSwitchInternal for COOP-based patcher operations; the OSS "
+                "file-based patcher runs only under TAAC_OSS without "
+                "TAAC_OSS_META_INTERNAL."
+            )
+
+    async def async_register_python_patcher(
+        self,
+        config_name: str,
+        patcher_name: str,
+        py_func_name: str,
+        patcher_args: Dict[str, Any],
+        patcher_desc: str = "",
+        auto_remediate_failure: bool = False,
+    ) -> str:
+        """Add a patcher to the config's working copy; ``async_apply_patchers``
+        installs it. Returns the working copy's path, which lives under
+        ``$TAAC_OSS_PATCHER_DIR`` (see ``oss_coop_patcher.default_patcher_dir``).
+
+        The signature matches ``FbossSwitchInternalMixin``'s, which
+        ``FbossSwitchInternal`` inherits ahead of this one;
+        ``auto_remediate_failure`` has nothing to remediate here."""
+        self._require_oss_config_patcher()
+        from taac.driver import oss_coop_patcher
+
+        working_path = await oss_coop_patcher.async_register(
+            self,
+            oss_coop_patcher.OssPatcher(
+                name=patcher_name,
+                config_name=config_name,
+                py_func_name=py_func_name,
+                args=dict(patcher_args or {}),
+                desc=patcher_desc,
+            ),
+        )
+        self.logger.info(
+            f"[oss-patcher] registered {patcher_name} ({py_func_name}) "
+            f"on {self.hostname}:{config_name}"
+        )
+        return working_path
+
+    async def async_coop_list_patchers(
+        self, config_name: Optional[str] = None
+    ) -> List[Any]:
+        self._require_oss_config_patcher()
+        from taac.driver import oss_coop_patcher
+
+        return oss_coop_patcher.list_patchers(self.hostname, config_name or "agent")
+
+    async def async_coop_unregister_patchers(
+        self,
+        patcher_name: str,
+        config_name: Optional[str] = None,
+        auto_remediate_failure: bool = False,
+    ) -> None:
+        """Unregister a config patcher."""
+        self._require_oss_config_patcher()
+        from taac.driver import oss_coop_patcher
+
+        # Without a config_name, drop the name from every config holding it. An
+        # unknown name is a no-op: callers unregister defensively before adding.
+        config_names = (
+            [config_name]
+            if config_name is not None
+            else oss_coop_patcher.find_configs(self.hostname, patcher_name)
+        )
+        for name in config_names:
+            if await oss_coop_patcher.async_unregister(self, name, patcher_name):
+                self.logger.info(
+                    f"[oss-patcher] unregistered {patcher_name} on "
+                    f"{self.hostname}:{name}"
+                )
+
+    async def async_apply_patchers(
+        self,
+        apply_patcher_method: Optional[Any] = None,
+        coldboot: bool = False,
+        **kwargs,
+    ) -> None:
+        """Install every changed config, then activate per ``apply_patcher_method``
+        (a ``taac_types.ApplyPatcherMethod``) or cold-boot the agent."""
+        self._require_oss_config_patcher()
+        from taac.driver import oss_coop_patcher
+
+        await oss_coop_patcher.async_apply(self, apply_patcher_method, coldboot)
+
+    async def async_restore_patched_configs(self) -> None:
+        """Drop every patcher, put each baseline left on the box back, and
+        warmboot the agent / restart bgpd for what was restored (teardown)."""
+        self._require_oss_config_patcher()
+        from taac.driver import oss_coop_patcher
+
+        await oss_coop_patcher.async_restore_baselines(self)
+
     async def async_register_patcher_to_shut_ports_persistently(
         self, patcher_name: str, interfaces: List[str], additional_desc=None
     ) -> None:
@@ -1138,18 +1253,27 @@ class FbossSwitch(AbstractSwitch):
         patcher_desc: str = "",
         is_patcher_name_uuid_needed: bool = True,
     ) -> str:
-        raise NotImplementedError(
-            "Static route patcher not available in OSS mode. "
-            "Use FbossSwitchInternal for COOP-based patcher operations."
+        """Register COOP's ``add_static_routes`` agent patcher and reload the
+        agent config, as ``FbossSwitchInternalMixin`` does. The routes live in
+        the agent config, so later applies keep them and teardown's unregister
+        withdraws them. Returns the patcher name."""
+        self._require_oss_config_patcher()
+        if is_patcher_name_uuid_needed:
+            patcher_name += uuid.uuid4().hex
+        await self.async_register_python_patcher(
+            "agent",
+            patcher_name,
+            "add_static_routes",
+            {
+                prefix: json.dumps(next_hops)
+                for prefix, next_hops in prefix_to_next_hops_map.items()
+            },
+            patcher_desc,
         )
-
-    async def async_coop_unregister_patchers(
-        self, patcher_name: str, config_name: Optional[str] = None
-    ) -> None:
-        raise NotImplementedError(
-            "COOP patcher operations not available in OSS mode. "
-            "Use FbossSwitchInternal for COOP-based patcher operations."
+        await self.async_apply_patchers(
+            apply_patcher_method=taac_types.ApplyPatcherMethod.AGENT_RELOAD
         )
+        return patcher_name
 
     async def async_get_ip_route(
         self, ip: str, print_interfaces: bool = True

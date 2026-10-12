@@ -37,7 +37,6 @@ from taac.driver.abstract_switch import AbstractSwitch
 from taac.driver.config_modifiers import (
     _FILE_EXISTS_SENTINEL as FILE_EXISTS_SENTINEL,
     _HIDDEN_STARTUP_CONFIG_SYMLINK as HIDDEN_SYMLINK,
-    _serialize_config,
     build_propagate_policies,
     COMMUNITY_DRAIN,
     COMMUNITY_LIVE,
@@ -53,6 +52,7 @@ from taac.driver.config_modifiers import (
     POLICY_PROPAGATE_OUT,
     POLICY_PROPAGATE_OUT_DRAIN,
     PROPAGATE_POLICIES,
+    serialize_config,
     setup_base_configs,
     SOFTDRAIN_CONFIG_PATH,
     STARTUP_CONFIG_SYMLINK,
@@ -689,7 +689,7 @@ class GenerateBaseConfigsTest(TestCase):
         # tries to read or diff a config on the box.
         for config in (self.live, self.drain):
             with self.subTest(drain_state=config.drain_state):
-                rendered = _serialize_config(config)
+                rendered = serialize_config(config)
 
                 self.assertTrue(rendered.endswith("\n"))
                 self.assertGreater(len(rendered.splitlines()), 100)
@@ -701,13 +701,54 @@ class GenerateBaseConfigsTest(TestCase):
         for config in (self.live, self.drain):
             with self.subTest(drain_state=config.drain_state):
                 compact = serialize(config, protocol=Protocol.JSON).decode()
-                rendered = _serialize_config(config)
+                rendered = serialize_config(config)
 
                 self.assertEqual(json.loads(compact), json.loads(rendered))
                 self.assertEqual(
                     config,
                     deserialize(BgpConfig, rendered.encode(), protocol=Protocol.JSON),
                 )
+
+
+class GenerateBaseConfigsScopedTest(TestCase):
+    """peer_group_regex scopes the transform to matching groups and keeps
+    everything the unmatched groups depend on."""
+
+    def setUp(self) -> None:
+        self.original = _sample_config()
+        self.live, self.drain = generate_base_configs(
+            self.original, peer_group_regex="SLB"
+        )
+
+    def test_only_matching_groups_are_retargeted(self) -> None:
+        groups = {g.name: g for g in _present(self.live.peer_groups)}
+        self.assertEqual(POLICY_PROPAGATE_OUT, groups["RSW_TO_SLB"].egress_policy_name)
+        self.assertEqual("LEGACY_OUT", groups["RSW_TO_FSW"].egress_policy_name)
+        self.assertEqual("LEGACY_IN", groups["RSW_TO_FSW"].ingress_policy_name)
+
+    def test_original_policies_survive_alongside_propagate(self) -> None:
+        names = [p.name for p in _present(self.live.policies).bgp_policy_statements]
+        self.assertIn("LEGACY_IN", names)
+        self.assertIn("LEGACY_OUT", names)
+        self.assertIn(POLICY_PROPAGATE_OUT, names)
+        self.assertIn(POLICY_PROPAGATE_OUT_DRAIN, names)
+
+    def test_network_policies_are_kept(self) -> None:
+        self.assertEqual("ORIGINATE_V4", self.live.networks4[0].policy_name)
+
+    def test_unmatched_peers_are_untouched(self) -> None:
+        # Sample peers carry no peer_group_name, so none match the regex.
+        peer = self.live.peers[0]
+        self.assertEqual("PEER_OVERRIDE_IN", peer.ingress_policy_name)
+        self.assertEqual("PEER_OVERRIDE_OUT", peer.egress_policy_name)
+
+    def test_drain_variant_flips_only_matched_groups(self) -> None:
+        groups = {g.name: g for g in _present(self.drain.peer_groups)}
+        self.assertEqual(
+            POLICY_PROPAGATE_OUT_DRAIN, groups["RSW_TO_SLB"].egress_policy_name
+        )
+        self.assertEqual("LEGACY_OUT", groups["RSW_TO_FSW"].egress_policy_name)
+        self.assertEqual(DrainState.SOFT_DRAINED, self.drain.drain_state)
 
 
 class SetupBaseConfigsTest(TestCase):

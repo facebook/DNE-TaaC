@@ -79,6 +79,18 @@ def oss_agent_restart_paths_enabled() -> bool:
     return TAAC_OSS and not TAAC_OSS_META_INTERNAL
 
 
+def oss_config_patcher_enabled() -> bool:
+    """Whether config patchers use the OSS implementation in
+    ``driver/oss_coop_patcher.py``, which edits ``/etc/coop/*.conf`` directly.
+
+    Internal runs apply patchers through COOP (``FbossSwitchInternal``). Under
+    ``TAAC_OSS_META_INTERNAL=1`` the device is still a Meta lab device: COOP owns
+    its config and its agent reads ``/etc/coop/agent/current``, not the files the
+    OSS patcher edits. So the container keeps the pre-OSS-patcher behaviour too.
+    """
+    return TAAC_OSS and not TAAC_OSS_META_INTERNAL
+
+
 # =============================================================================
 # none_throws - from libfb.py.pyre
 # =============================================================================

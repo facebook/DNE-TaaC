@@ -35,7 +35,9 @@ class SetupBaseConfigsTaskTest(unittest.IsolatedAsyncioTestCase):
             await task.run({})
 
         mock_get_driver.assert_awaited_once_with("switch-1")
-        mock_setup.assert_awaited_once_with(driver, restart_bgp=True)
+        mock_setup.assert_awaited_once_with(
+            driver, restart_bgp=True, peer_group_regex=None
+        )
 
     async def test_params_hostname_overrides_the_task_hostname(self) -> None:
         # Lets one Task definition be retargeted from params without rewriting
@@ -57,7 +59,9 @@ class SetupBaseConfigsTaskTest(unittest.IsolatedAsyncioTestCase):
             mock_get_driver.return_value = driver = MagicMock()
             await task.run({"restart_bgp": False})
 
-        mock_setup.assert_awaited_once_with(driver, restart_bgp=False)
+        mock_setup.assert_awaited_once_with(
+            driver, restart_bgp=False, peer_group_regex=None
+        )
 
     async def test_missing_hostname_raises_before_touching_a_device(self) -> None:
         # The task configures one specific device; with no hostname there is
@@ -85,3 +89,15 @@ class SetupBaseConfigsTaskTest(unittest.IsolatedAsyncioTestCase):
         from taac.tasks import registry
 
         self.assertIn(SetupBaseConfigsTask, registry.TASK_REGISTRY)
+
+    async def test_peer_group_regex_is_forwarded(self) -> None:
+        task = SetupBaseConfigsTask(logger=self.logger, hostname="switch-1")
+        get_driver, setup = self._patches()
+
+        with get_driver as mock_get_driver, setup as mock_setup:
+            mock_get_driver.return_value = driver = MagicMock()
+            await task.run({"peer_group_regex": "^PEERGROUP_IXIA"})
+
+        mock_setup.assert_awaited_once_with(
+            driver, restart_bgp=True, peer_group_regex="^PEERGROUP_IXIA"
+        )

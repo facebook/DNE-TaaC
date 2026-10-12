@@ -48,6 +48,7 @@ from taac.utils.oss_taac_lib_utils import (
     async_retryable,
     get_ipv6_for_host,
     none_throws,
+    oss_config_patcher_enabled,
 )
 
 # `async_get_memory_current_pct` has an OSS-safe stub in system_stress_utils that
@@ -483,13 +484,16 @@ class ConfigureParallelBgpPeers(BaseTask):
                         ]
                     )
                 )
-                configure_vlan_configs[f"vlan{vlan_id}"].append(
-                    await self.create_configure_vlan_config(
-                        vlan_ip_addresses,
-                        interface_port_info,
-                        vlan_id,
-                    )
+                vlan_config = await self.create_configure_vlan_config(
+                    vlan_ip_addresses,
+                    interface_port_info,
+                    vlan_id,
                 )
+                if oss_config_patcher_enabled() and not retain_existing_vlan_addresses:
+                    # COOP replaces a VLAN's addresses; the OSS patcher merges
+                    # them unless told otherwise.
+                    vlan_config["retain_existing_vlan_addresses"] = False
+                configure_vlan_configs[f"vlan{vlan_id}"].append(vlan_config)
         await self.register_patchers_to_configure_vlans(
             hostname, configure_vlan_configs, configure_vlans_patcher_name
         )
@@ -643,19 +647,30 @@ class IxiaSyncRawSourceMacsTask(BaseTask):
         self.logger.info(f"Synced RAW traffic source MACs: {synced}")
 
 
+def _skip_coop_patcher_task(task: BaseTask) -> bool:
+    """COOP patcher tasks run internally (COOP) or in pure OSS (the OSS patcher).
+    The TAAC_OSS_META_INTERNAL container has neither -- its devices are
+    COOP-managed -- so it skips them, as every OSS run did before the OSS patcher.
+    """
+    if TAAC_OSS and not oss_config_patcher_enabled():
+        task.logger.info(
+            f"Skipping {task.NAME}: coop patchers are not available under "
+            "TAAC_OSS_META_INTERNAL=1."
+        )
+        return True
+    return False
+
+
 class CoopUnregisterPatchersTask(BaseTask):
     NAME = "coop_unregister_patchers"
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
-        if TAAC_OSS:
-            self.logger.info(
-                "Skipping coop_unregister_patchers: coop patchers are not "
-                "available under TAAC_OSS=1."
-            )
+        if _skip_coop_patcher_task(self):
             return
         hostnames = params.get("hostnames") or [none_throws(params.get("hostname"))]
         regex = params.get("regex", r".*.")
-        owner = params.get("owner", DNE_TEST_REGRESSION_NAME)
+        # OSS patchers carry no owner; COOP stamps DNE_TEST_REGRESSION_NAME.
+        owner = params.get("owner", None if TAAC_OSS else DNE_TEST_REGRESSION_NAME)
         config_names = params.get("config_names")
         unregister_patchers_coroutines = []
         for hostname in hostnames:
@@ -692,7 +707,7 @@ class CoopUnregisterPatchersTask(BaseTask):
                 if re.search(regex, patcher.name) and patcher.owner == owner
             ]
             if not patchers_to_unregister:
-                break
+                continue
             self.logger.info(
                 f"Unregistering patchers {patchers_to_unregister} from {hostname}:{config_name}"
             )
@@ -714,17 +729,28 @@ class CoopUnregisterPatchersTask(BaseTask):
                 err_msg = f"Failed to unregister patchers {patchers_to_unregister} from {hostname}:{config_name}"
                 self.logger.error(err_msg)
                 raise Exception(err_msg)
+        if oss_config_patcher_enabled():
+            await self._activate_oss_unregister(driver, hostname)
+
+    async def _activate_oss_unregister(self, driver: t.Any, hostname: str) -> None:
+        """OSS unregister only rewrites config files, so activate them here and
+        callers need no apply task. With every patcher gone the baselines go back
+        (including one a crashed run left behind); otherwise the rebuilt configs
+        are installed. Either way only the daemons whose config changed restart."""
+        for config_name in get_default_configs(hostname):
+            if await driver.async_coop_list_patchers(config_name):
+                # pyre-fixme[16]: `AbstractSwitch` has no attribute
+                #  `async_apply_patchers`.
+                await driver.async_apply_patchers()
+                return
+        await driver.async_restore_patched_configs()
 
 
 class CoopRegisterPatcherTask(BaseTask):
     NAME = "coop_register_patcher"
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
-        if TAAC_OSS:
-            self.logger.info(
-                "Skipping coop_register_patcher: coop patchers are not "
-                "available under TAAC_OSS=1."
-            )
+        if _skip_coop_patcher_task(self):
             return
         hostname = params["hostname"]
         config_names = params.get("config_names") or [params["config_name"]]
@@ -749,13 +775,27 @@ class CoopApplyPatchersTask(BaseTask):
     NAME = "coop_apply_patchers"
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
-        if TAAC_OSS:
-            self.logger.info(
-                "Skipping coop_apply_patchers: coop patchers are not "
-                "available under TAAC_OSS=1."
-            )
+        if _skip_coop_patcher_task(self):
             return
         hostnames = params["hostnames"]
+        if oss_config_patcher_enabled():
+            # No COOP agent: the OSS driver installs every changed config and
+            # activates it itself, so config_names is ignored. Without a boot
+            # flag it reloads the agent and restarts bgpd only for what changed,
+            # as the branch below does.
+            method = (
+                taac_types.ApplyPatcherMethod.AGENT_WARMBOOT
+                if params.get("do_warmboot")
+                else None
+            )
+            for hostname in hostnames:
+                driver = await async_get_device_driver(hostname)
+                # pyre-fixme[16]: `AbstractSwitch` has no attribute
+                #  `async_apply_patchers`.
+                await driver.async_apply_patchers(
+                    method, coldboot=bool(params.get("do_coldboot"))
+                )
+            return
         config_names = params.get("config_names")
         config_name = params.get("config_name")
         # ``create_coop_apply_patchers_task`` serializes ``config_name="bgpcpp"``
@@ -827,6 +867,8 @@ class CoopApplyPatchersV2(BaseTask):
     NAME = "coop_apply_patchers_v2"
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
+        if _skip_coop_patcher_task(self):
+            return
         hostnames = params["hostnames"]
         apply_patcher_method = params["apply_patcher_method"]
         apply_patcher_method_enum = taac_types.ApplyPatcherMethod(apply_patcher_method)

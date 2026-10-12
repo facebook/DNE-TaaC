@@ -287,6 +287,13 @@ add_taac_thrift_python_library(
     OPTIONS json
     DEPENDS thrift_roots
 )
+add_taac_thrift_python_library(
+    agent_config_py
+    "${FBOSS_THRIFT_DIR}/fboss/agent/agent_config.thrift"
+    NAMESPACE "neteng.fboss"
+    OPTIONS json
+    DEPENDS thrift_roots switch_config_py platform_config_py
+)
 # Distinct from fboss_common_py above (fboss/lib/if/fboss_common.thrift);
 # this is the configerator-side common thrift included by ctrl.thrift
 # with the alias 'as fboss_common'.
@@ -501,6 +508,7 @@ add_custom_target(all_thrift_bindings ALL DEPENDS
     asic_config_py.py_sources_built
     asic_config_v2_py.py_sources_built
     platform_config_py.py_sources_built
+    agent_config_py.py_sources_built
     fboss_configerator_common_py.py_sources_built
     mka_structs_py.py_sources_built
     patch_py.py_sources_built
