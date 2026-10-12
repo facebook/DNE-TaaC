@@ -35,6 +35,7 @@ from configerator.structs.neteng.robotron.bgp_policy.thrift_types import (
 from neteng.test_infra.dne.taac.driver import config_modifiers as _config_modifiers
 from taac.driver.abstract_switch import AbstractSwitch
 from taac.driver.config_modifiers import (
+    _async_resolve_bgpd_config_path,
     _FILE_EXISTS_SENTINEL as FILE_EXISTS_SENTINEL,
     _HIDDEN_STARTUP_CONFIG_SYMLINK as HIDDEN_SYMLINK,
     build_propagate_policies,
@@ -51,6 +52,7 @@ from taac.driver.config_modifiers import (
     POLICY_PROPAGATE_IN,
     POLICY_PROPAGATE_OUT,
     POLICY_PROPAGATE_OUT_DRAIN,
+    PREDRAIN_CONFIG_PATH,
     PROPAGATE_POLICIES,
     serialize_config,
     setup_base_configs,
@@ -60,6 +62,7 @@ from taac.driver.config_modifiers import (
 )
 from taac.driver.driver_constants import FbossSystemctlServiceName
 from taac.driver.fboss_switch import FbossSwitch
+from taac.utils import oss_taac_lib_utils
 from thrift.python.serializer import deserialize, Protocol, serialize
 
 # ShipIt rewrites import statements but not string literals, so a hardcoded
@@ -88,11 +91,19 @@ class _Device:
         # Set to a path to emulate an ExecStartPre config_selector repointing the
         # symlink during the bgpd restart.
         self.symlink_after_restart: str | None = None
+        # What the bgpd unit's --config points at. The symlink is Meta's layout
+        # and the default here, so the existing tests describe that path; an OSS
+        # image names a real file instead.
+        self.bgpd_config_path: str = STARTUP_CONFIG_SYMLINK
 
     @property
     def mutating_commands(self) -> list[str]:
         """Commands that change device state, i.e. everything but the probes."""
-        return [c for c in self.commands if not c.startswith(("test -f ", "readlink "))]
+        return [
+            c
+            for c in self.commands
+            if not c.startswith(("test -f ", "readlink ", "systemctl cat ", "cmp -s "))
+        ]
 
     def command_containing(self, needle: str) -> str:
         matches = [c for c in self.commands if needle in c]
@@ -112,6 +123,24 @@ class _Device:
         if cmd.startswith("ln -sfn "):
             # "ln -sfn <target> <staging> && mv -Tf <staging> <link>"
             self.symlink_target = cmd.split()[2]
+        if cmd.startswith("systemctl cat "):
+            return f"--config {self.bgpd_config_path}\n"
+        if cmd.startswith("cmp -s "):
+            # "cmp -s <a> <b> && echo MATCH || echo DIFFER"
+            a, b = cmd.split()[2:4]
+            same = self.files.get(a, object()) == self.files.get(b, object())
+            return "MATCH\n" if same else "DIFFER\n"
+        if cmd.startswith("cp -a "):
+            src, dst = cmd.split()[2:4]
+            self.files[dst] = self.files[src]
+        if cmd.startswith("[ -f "):
+            # "[ -f <path> ] || cp -a <src> <dst>"
+            parts = cmd.split()
+            path, src, dst = parts[2], parts[-2], parts[-1]
+            if path not in self.files:
+                self.files[dst] = self.files[src]
+        if cmd.startswith("rm -f ") and "&&" not in cmd:
+            self.files.pop(cmd.split()[2], None)
         return ""
 
     async def restart_service(self, service, agents=None) -> None:
@@ -1087,3 +1116,217 @@ _GOLDEN_PROPAGATE_POLICIES_JSON = """
   "prefix_lists": []
 }
 """
+
+
+def _pure_oss(test: TestCase) -> None:
+    """Turn on the OSS-image drain path, which only pure OSS takes."""
+    for flag, value in (("TAAC_OSS", True), ("TAAC_OSS_META_INTERNAL", False)):
+        p = patch.object(oss_taac_lib_utils, flag, value)
+        p.start()
+        test.addCleanup(p.stop)
+
+
+class DrainOnRealConfigFileTest(TestCase):
+    """Images whose bgpd opens a real file, not the startup symlink.
+
+    Repointing a symlink nothing reads installs nothing, the restart reloads the
+    same config, and the symlink readback still passes because it reads the value
+    just written -- a drain that reports success and changed nothing. So the
+    drain is made by content there instead.
+    """
+
+    def setUp(self) -> None:
+        _pure_oss(self)
+        self.device = _Device()
+        self.device.bgpd_config_path = LIVE_CONFIG_PATH
+        self.device.files[LIVE_CONFIG_PATH] = "live"
+        self.device.files[SOFTDRAIN_CONFIG_PATH] = "drained"
+        self.switch = _make_fboss_switch(self.device)
+
+    async def test_drain_installs_the_drain_config_where_bgpd_reads(self) -> None:
+        await drain_device(self.switch)
+
+        self.assertEqual("drained", self.device.files[LIVE_CONFIG_PATH])
+
+    async def test_drain_parks_the_undrained_config(self) -> None:
+        # Undrain has to restore content, and by then the live path holds the
+        # drain config -- so the undrained copy has to be kept somewhere.
+        await drain_device(self.switch)
+
+        self.assertEqual("live", self.device.files[PREDRAIN_CONFIG_PATH])
+
+    async def test_undrain_restores_the_parked_config(self) -> None:
+        await drain_device(self.switch)
+        await undrain_device(self.switch)
+
+        self.assertEqual("live", self.device.files[LIVE_CONFIG_PATH])
+        self.assertNotIn(PREDRAIN_CONFIG_PATH, self.device.files)
+
+    async def test_a_second_drain_does_not_park_the_drained_config(self) -> None:
+        # Parking twice would capture the drain config as "undrained", and the
+        # undrain would then restore a drained device.
+        await drain_device(self.switch)
+        await drain_device(self.switch)
+        await undrain_device(self.switch)
+
+        self.assertEqual("live", self.device.files[LIVE_CONFIG_PATH])
+
+    async def test_undrain_without_a_drain_leaves_the_live_config_alone(self) -> None:
+        # setup_base_configs writes a fresh live config and ends with an undrain;
+        # restoring anything over it there would discard what it just wrote.
+        self.device.files[LIVE_CONFIG_PATH] = "freshly generated"
+        await undrain_device(self.switch)
+
+        self.assertEqual("freshly generated", self.device.files[LIVE_CONFIG_PATH])
+
+    async def test_new_setup_discards_a_config_parked_by_an_earlier_run(
+        self,
+    ) -> None:
+        # Drain, then a teardown that puts the pristine baseline over the live
+        # path while still drained; the next run's setup must not let its
+        # closing undrain install the earlier run's parked config.
+        self.device.files[LIVE_CONFIG_PATH] = "patched by the earlier run"
+        await drain_device(self.switch)
+        pristine = serialize(_sample_config(), protocol=Protocol.JSON).decode()
+        self.device.files[LIVE_CONFIG_PATH] = pristine
+
+        await setup_base_configs(self.switch)
+
+        expected_live, _ = generate_base_configs(_sample_config())
+        self.assertEqual(
+            expected_live,
+            deserialize(
+                BgpConfig,
+                self.device.files[LIVE_CONFIG_PATH].encode(),
+                protocol=Protocol.JSON,
+            ),
+        )
+        self.assertNotIn(PREDRAIN_CONFIG_PATH, self.device.files)
+
+    async def test_new_setup_after_an_interrupted_drain(self) -> None:
+        # Parked, then the drain died before installing anything.
+        self.device.files[PREDRAIN_CONFIG_PATH] = "stale"
+        self.device.files[LIVE_CONFIG_PATH] = serialize(
+            _sample_config(), protocol=Protocol.JSON
+        ).decode()
+
+        await setup_base_configs(self.switch)
+
+        self.assertNotEqual("stale", self.device.files[LIVE_CONFIG_PATH])
+        self.assertNotIn(PREDRAIN_CONFIG_PATH, self.device.files)
+
+    async def test_a_short_copy_is_not_reported_as_a_drain(self) -> None:
+        original = self.device.run_cmd
+
+        async def drop_the_copy(cmd: str, *args, **kwargs) -> str:
+            if cmd.startswith("cp -a ") and SOFTDRAIN_CONFIG_PATH in cmd:
+                self.device.commands.append(cmd)
+                return ""
+            return await original(cmd, *args, **kwargs)
+
+        t.cast(
+            AsyncMock, self.switch
+        ).async_run_cmd_on_shell.side_effect = drop_the_copy
+        with self.assertRaises(ConfigModifierError) as ctx:
+            await drain_device(self.switch)
+        self.assertIn("does not match", str(ctx.exception))
+
+    async def test_the_symlink_and_markers_are_still_kept_in_step(self) -> None:
+        # A device that later gains a config_selector must resolve to the same
+        # state the copy installed.
+        await drain_device(self.switch)
+
+        self.assertEqual(SOFTDRAIN_CONFIG_PATH, self.device.symlink_target)
+        self.assertIn(
+            f"rm -f {MARKER_UNDRAINED} && touch {MARKER_SOFT_DRAINED}",
+            self.device.commands,
+        )
+
+
+class BgpdConfigPathTest(TestCase):
+    def setUp(self) -> None:
+        _pure_oss(self)
+        self.device = _Device()
+        self.switch = _make_fboss_switch(self.device)
+
+    async def test_symlink_image_installs_nothing_by_copy(self) -> None:
+        # Meta's layout: the symlink swap is the selection, so no copy is made.
+        await drain_device(self.switch)
+
+        self.assertFalse([c for c in self.device.commands if c.startswith("cp -a ")])
+
+    async def test_a_quoted_config_path_is_unquoted(self) -> None:
+        original = self.device.run_cmd
+
+        async def quoted(cmd: str, *args, **kwargs) -> str:
+            if cmd.startswith("systemctl cat "):
+                return f'--config="{LIVE_CONFIG_PATH}"\n'
+            return await original(cmd, *args, **kwargs)
+
+        t.cast(AsyncMock, self.switch).async_run_cmd_on_shell.side_effect = quoted
+        self.assertEqual(
+            LIVE_CONFIG_PATH, await _async_resolve_bgpd_config_path(self.switch)
+        )
+
+    async def test_an_unreadable_unit_refuses_to_drain(self) -> None:
+        # Draining blind would report success without changing what bgpd serves.
+        original = self.device.run_cmd
+
+        async def no_config_flag(cmd: str, *args, **kwargs) -> str:
+            if cmd.startswith("systemctl cat "):
+                return "\n"
+            return await original(cmd, *args, **kwargs)
+
+        t.cast(
+            AsyncMock, self.switch
+        ).async_run_cmd_on_shell.side_effect = no_config_flag
+        with self.assertRaises(ConfigModifierError) as ctx:
+            await drain_device(self.switch)
+        self.assertIn("--config", str(ctx.exception))
+
+
+class BgpdConfigInstallGateTest(TestCase):
+    """Meta devices -- internal runs and the TAAC_OSS_META_INTERNAL container --
+    keep the symlink-only drain: no unit probe, no copy over bgpd's config."""
+
+    async def test_meta_devices_keep_the_symlink_drain(self) -> None:
+        for taac_oss, meta_internal in ((False, False), (True, True)):
+            with self.subTest(taac_oss=taac_oss, meta_internal=meta_internal):
+                with (
+                    patch.object(oss_taac_lib_utils, "TAAC_OSS", taac_oss),
+                    patch.object(
+                        oss_taac_lib_utils, "TAAC_OSS_META_INTERNAL", meta_internal
+                    ),
+                ):
+                    device = _Device()
+                    # Even if the unit named a real file, it is not read.
+                    device.bgpd_config_path = LIVE_CONFIG_PATH
+                    device.files[LIVE_CONFIG_PATH] = "live"
+                    device.files[SOFTDRAIN_CONFIG_PATH] = "drained"
+                    switch = _make_fboss_switch(device)
+                    await drain_device(switch)
+                    await undrain_device(switch)
+
+                self.assertFalse(
+                    [c for c in device.commands if c.startswith("systemctl cat ")]
+                )
+                self.assertFalse(
+                    [c for c in device.commands if c.startswith(("cp -a ", "[ -f "))]
+                )
+                self.assertEqual("live", device.files[LIVE_CONFIG_PATH])
+
+    def test_only_pure_oss_takes_the_oss_image_path(self) -> None:
+        for taac_oss, meta_internal, expected in (
+            (False, False, False),
+            (True, True, False),
+            (True, False, True),
+        ):
+            with (
+                patch.object(oss_taac_lib_utils, "TAAC_OSS", taac_oss),
+                patch.object(
+                    oss_taac_lib_utils, "TAAC_OSS_META_INTERNAL", meta_internal
+                ),
+            ):
+                self.assertEqual(
+                    expected, oss_taac_lib_utils.oss_bgpd_config_install_enabled()
+                )

@@ -91,6 +91,18 @@ def oss_config_patcher_enabled() -> bool:
     return TAAC_OSS and not TAAC_OSS_META_INTERNAL
 
 
+def oss_bgpd_config_install_enabled() -> bool:
+    """Whether a drain reads bgpd's ``--config`` path from its unit and, where
+    that is a real file, installs the drain config by content.
+
+    OSS images point ``--config`` straight at a file. Meta devices -- internal
+    runs and the ``TAAC_OSS_META_INTERNAL=1`` container alike -- select through
+    the startup symlink that their bgpd unit and config_selector use, so they
+    keep the symlink-only drain.
+    """
+    return TAAC_OSS and not TAAC_OSS_META_INTERNAL
+
+
 # =============================================================================
 # none_throws - from libfb.py.pyre
 # =============================================================================

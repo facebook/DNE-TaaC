@@ -340,13 +340,12 @@ async def async_apply(
     host = switch.hostname
     changed = set(_PENDING.get(host, set()))
     states = _STATE.get(host, {})
-    to_install = {
-        CONFIG_SPECS[name].live_path: _read_working_copy(
-            states[name], CONFIG_SPECS[name]
+    to_install = {}
+    for name in sorted(changed & states.keys()):
+        spec = CONFIG_SPECS[name]
+        to_install[await _async_device_path(switch, spec)] = _read_working_copy(
+            states[name], spec
         )
-        for name in sorted(changed)
-        if name in states
-    }
     agent_config = to_install.get(CONFIG_SPECS["agent"].live_path)
     if agent_config is not None:
         await _async_note_removed_ports(
@@ -406,7 +405,8 @@ async def _async_snapshot_baseline(
             "device was not restored after an earlier run. Using it as the baseline."
         )
     else:
-        await _async_run_checked(switch, f"cp -a {spec.live_path} {baseline}")
+        source = await _async_device_path(switch, spec)
+        await _async_run_checked(switch, f"cp -a {source} {baseline}")
         created = True
     return await _async_read_baseline(switch, spec), created
 
@@ -433,8 +433,22 @@ async def _async_rebuild(
     return config
 
 
+async def _async_device_path(switch: t.Any, spec: ConfigSpec) -> str:
+    """Where the device keeps ``spec``'s config. While a direct-file drain is in
+    effect, bgpd's live path holds the drain config and the undrained bgpcpp is
+    parked; snapshots, installs and restores of bgpcpp go to the parked copy,
+    which the undrain puts back."""
+    if spec.live_path == config_modifiers.LIVE_CONFIG_PATH and (
+        await config_modifiers.async_file_exists(
+            switch, config_modifiers.PREDRAIN_CONFIG_PATH
+        )
+    ):
+        return config_modifiers.PREDRAIN_CONFIG_PATH
+    return spec.live_path
+
+
 async def _async_restore_baseline(switch: t.Any, spec: ConfigSpec) -> None:
-    live, baseline = spec.live_path, spec.baseline_path
+    live, baseline = await _async_device_path(switch, spec), spec.baseline_path
     # Staged copy + rename, so the daemon never reads a half-copied file.
     await _async_run_checked(
         switch,

@@ -38,6 +38,7 @@ Call these from a TAAC step or task with the device's driver::
 import json
 import logging
 import re
+import shlex
 import typing as t
 
 # Both of these imports resolve in OSS as well as internally. The module path is
@@ -76,6 +77,9 @@ from configerator.structs.neteng.robotron.bgp_policy.thrift_types import (
 )
 from taac.driver.abstract_switch import AbstractSwitch
 from taac.driver.driver_constants import FbossSystemctlServiceName
+from taac.utils.oss_taac_lib_utils import (
+    oss_bgpd_config_install_enabled,
+)
 from thrift.python.serializer import deserialize, Protocol, serialize
 from thrift.python.types import StructOrUnion
 
@@ -109,6 +113,10 @@ COOP_DIR: str = "/etc/coop"
 LIVE_CONFIG_PATH: str = f"{COOP_DIR}/bgpcpp.conf"
 SOFTDRAIN_CONFIG_PATH: str = f"{COOP_DIR}/bgpcpp_softdrain.conf"
 AGENT_CONFIG_PATH: str = f"{COOP_DIR}/agent.conf"
+# Where the undrained config is parked while a drain is installed over the path
+# bgpd reads. Only used on images that read a real file rather than the startup
+# symlink -- see `_async_resolve_bgpd_config_path`.
+PREDRAIN_CONFIG_PATH: str = f"{COOP_DIR}/bgpcpp.predrain.conf"
 
 _UNDRAIN: str = "undrain"
 _SOFT_DRAIN: str = "soft-drain"
@@ -200,6 +208,63 @@ async def async_file_exists(switch: AbstractSwitch, path: str) -> bool:
         f"test -f {path} && echo {_FILE_EXISTS_SENTINEL} || true"
     )
     return _FILE_EXISTS_SENTINEL in (output or "")
+
+
+async def _async_resolve_bgpd_config_path(switch: AbstractSwitch) -> str:
+    """The config path bgpd is actually launched with.
+
+    The drain is a selection, so it only takes effect on the file the daemon
+    opens. Meta's unit points ``--config`` at ``STARTUP_CONFIG_SYMLINK`` and a
+    config_selector re-derives that symlink at ExecStartPre; an OSS image ships
+    neither, and points ``--config`` straight at a real file. Repointing the
+    symlink there installs nothing, the restart reloads the same config, and the
+    readback still passes because it reads the symlink we just wrote -- a drain
+    that reports success and changed nothing.
+
+    Read rather than assumed, so each image gets the mechanism it can honour.
+    Raises instead of guessing: a drain that cannot tell which file it has to
+    replace cannot tell whether it worked.
+    """
+    unit = FbossSystemctlServiceName.BGP.value
+    out = await switch.async_run_cmd_on_shell(
+        f"systemctl cat {unit} 2>/dev/null | "
+        r"grep -oE '[-][-]config[= ]+[^ \\]+' | head -1"
+    )
+    match = re.search(r"--config[= ]+(\S+)", out or "")
+    if not match:
+        raise ConfigModifierError(
+            f"Cannot read the --config path from the {unit} unit on "
+            f"{switch.hostname}, so there is no way to tell which file a drain "
+            "has to replace. Draining blind would report success without "
+            "changing what bgpd serves."
+        )
+    # An ExecStart may quote the path; the quotes are not part of it.
+    return match.group(1).strip("'\"")
+
+
+async def _async_install_config(
+    switch: AbstractSwitch, source: str, dest: str, state_name: str
+) -> None:
+    """Copy ``source`` over ``dest`` and verify it landed.
+
+    ``cp -a`` rather than a rename: dest is the path bgpd opens, and replacing
+    the inode under a running daemon is what the atomic-symlink dance exists to
+    avoid. The content is compared afterwards because a short write here is a
+    drained device still serving live routes.
+    """
+    switch.logger.info(
+        f"[{state_name}] {switch.hostname}: installing {source} at {dest}"
+    )
+    src, dst = shlex.quote(source), shlex.quote(dest)
+    await switch.async_run_cmd_on_shell(f"cp -a {src} {dst}")
+    out = await switch.async_run_cmd_on_shell(
+        f"cmp -s {src} {dst} && echo MATCH || echo DIFFER"
+    )
+    if "MATCH" not in (out or ""):
+        raise ConfigModifierError(
+            f"{state_name} of {switch.hostname} did not take effect: {dest} does "
+            f"not match {source} after the copy."
+        )
 
 
 async def _verify_startup_config(
@@ -332,11 +397,53 @@ async def _apply_drain_state(
         f"mv -Tf {_HIDDEN_STARTUP_CONFIG_SYMLINK} {STARTUP_CONFIG_SYMLINK}"
     )
 
+    # An image whose bgpd opens a real file never looks at that symlink, so the
+    # selection has to be made by content: park the undrained config and copy the
+    # target over the path bgpd reads. The symlink and markers are still kept in
+    # step above, so a device that later gains a config_selector resolves to the
+    # same state.
+    bgpd_config = (
+        await _async_resolve_bgpd_config_path(switch)
+        if oss_bgpd_config_install_enabled()
+        else STARTUP_CONFIG_SYMLINK
+    )
+    installed_from = target_config
+    if bgpd_config != STARTUP_CONFIG_SYMLINK:
+        if target_config == LIVE_CONFIG_PATH:
+            # Undraining: the live path currently holds the drain config, so the
+            # undrained content comes from the parked copy rather than from
+            # itself. Nothing parked means no drain is installed -- the live
+            # config is already what bgpd should serve, and setup_base_configs
+            # ends with an undrain for exactly that reason.
+            if not await async_file_exists(switch, PREDRAIN_CONFIG_PATH):
+                switch.logger.info(
+                    f"[{state_name}] {hostname}: no parked config at "
+                    f"{PREDRAIN_CONFIG_PATH}; {bgpd_config} is already undrained"
+                )
+                installed_from = None
+            else:
+                installed_from = PREDRAIN_CONFIG_PATH
+        else:
+            # Draining: park the undrained config once. Once, because a second
+            # drain would otherwise park the drained one and undrain to it.
+            await switch.async_run_cmd_on_shell(
+                f"[ -f {PREDRAIN_CONFIG_PATH} ] || "
+                f"cp -a {shlex.quote(bgpd_config)} {PREDRAIN_CONFIG_PATH}"
+            )
+
+        if installed_from is not None:
+            await _async_install_config(switch, installed_from, bgpd_config, state_name)
+
     if restart_bgp:
         switch.logger.info(f"[{state_name}] {hostname}: restarting bgpd")
         await switch.async_restart_service(FbossSystemctlServiceName.BGP)
 
     await _verify_startup_config(switch, target_config, state_name)
+
+    # Only after a successful undrain, so a failure between the copy and here
+    # leaves the parked config in place to recover from.
+    if bgpd_config != STARTUP_CONFIG_SYMLINK and target_config == LIVE_CONFIG_PATH:
+        await switch.async_run_cmd_on_shell(f"rm -f {PREDRAIN_CONFIG_PATH}")
 
 
 # ---------------------------------------------------------------------------
@@ -801,6 +908,12 @@ async def setup_base_configs(
     )
 
     live_config, drain_config = generate_base_configs(config, peer_group_regex)
+
+    if oss_bgpd_config_install_enabled():
+        # The configs written below are the new truth. A config parked by an
+        # earlier drain (a run torn down while drained, or a drain interrupted
+        # after parking) would otherwise be installed by the undrain below.
+        await switch.async_run_cmd_on_shell(f"rm -f {PREDRAIN_CONFIG_PATH}")
 
     switch.logger.info(
         f"{hostname}: writing {LIVE_CONFIG_PATH} and {SOFTDRAIN_CONFIG_PATH}"

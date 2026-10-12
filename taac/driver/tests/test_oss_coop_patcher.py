@@ -35,6 +35,7 @@ from neteng.fboss.switch_config.thrift_types import (
 from neteng.test_infra.dne.taac.driver import oss_coop_patcher as ocp
 from taac.driver.config_modifiers import (
     deserialize_config,
+    PREDRAIN_CONFIG_PATH,
     serialize_config,
 )
 from taac.driver.driver_constants import FbossSystemctlServiceName
@@ -45,6 +46,7 @@ from taac.test_as_a_config import types as taac_types
 HOST = "dut1"
 BGP_LIVE = ocp.CONFIG_SPECS["bgpcpp"].live_path
 BGP_BASELINE = ocp.CONFIG_SPECS["bgpcpp"].baseline_path
+PREDRAIN = PREDRAIN_CONFIG_PATH
 AGENT_LIVE = ocp.CONFIG_SPECS["agent"].live_path
 AGENT_BASELINE = ocp.CONFIG_SPECS["agent"].baseline_path
 SOFTDRAIN_LIVE = ocp.CONFIG_SPECS["bgpcpp_softdrain"].live_path
@@ -649,6 +651,28 @@ class OssCoopPatcherTest(TestCase):
 
         self.assertEqual(_baseline_agent(), self.switch.agent())
         self.assertEqual([("reload_agent",)], self.switch.events)
+
+    async def test_while_drained_bgpcpp_changes_go_to_the_parked_config(
+        self,
+    ) -> None:
+        # A direct-file drain: bgpd's live path holds the drain config and the
+        # undrained bgpcpp is parked; the undrain will put the parked copy back.
+        undrained = self.switch.files[BGP_LIVE]
+        self.switch.files[PREDRAIN] = undrained
+        self.switch.files[BGP_LIVE] = serialize_config(
+            BgpConfig(peer_groups=[PeerGroup(name="DRAIN")])
+        )
+        drained = self.switch.files[BGP_LIVE]
+
+        await self._register(_peer_group("A"))
+        self.assertEqual(undrained, self.switch.files[BGP_BASELINE])
+        await ocp.async_apply(self.switch)
+        self.assertEqual(drained, self.switch.files[BGP_LIVE])
+        self.assertEqual(["BASE", "A"], _group_names(self.switch.bgp(PREDRAIN)))
+
+        await ocp.async_restore_baselines(self.switch)
+        self.assertEqual(drained, self.switch.files[BGP_LIVE])
+        self.assertEqual(undrained, self.switch.files[PREDRAIN])
 
     async def test_restore_baselines_on_a_clean_device_restarts_nothing(self) -> None:
         await ocp.async_restore_baselines(self.switch)
