@@ -210,6 +210,23 @@ async def async_file_exists(switch: AbstractSwitch, path: str) -> bool:
     return _FILE_EXISTS_SENTINEL in (output or "")
 
 
+async def async_is_device_drained(switch: AbstractSwitch) -> bool:
+    """Whether a drain from ``drain_device`` is in effect.
+
+    The markers are kept in step on every image, and an image whose bgpd reads
+    a real file also has the undrained config parked while drained.
+    """
+    return await async_file_exists(
+        switch, MARKER_SOFT_DRAINED
+    ) or await async_file_exists(switch, PREDRAIN_CONFIG_PATH)
+
+
+async def async_read_bgp_config(switch: AbstractSwitch, path: str) -> BgpConfig:
+    return deserialize_config(
+        BgpConfig, await switch.async_read_file(path), f"{switch.hostname}:{path}"
+    )
+
+
 async def _async_resolve_bgpd_config_path(switch: AbstractSwitch) -> str:
     """The config path bgpd is actually launched with.
 

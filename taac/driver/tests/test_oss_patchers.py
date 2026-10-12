@@ -45,6 +45,11 @@ from neteng.fboss.switch_config.thrift_types import (
     Vlan,
     VlanPort,
 )
+from taac.driver.config_modifiers import (
+    POLICY_PROPAGATE_IN,
+    POLICY_PROPAGATE_OUT,
+    POLICY_PROPAGATE_OUT_DRAIN,
+)
 from neteng.test_infra.dne.taac.driver.oss_patchers import OssPatchApplier, PatcherError
 from pyre_extensions import none_throws
 
@@ -884,3 +889,106 @@ class ProfileFittingTest(TestCase):
             with self.subTest(offers=[p.name for p in offers]):
                 with self.assertRaisesRegex(PatcherError, "no unique wire-identical"):
                     await self._change(offers)
+
+
+def _drain_config() -> BgpConfig:
+    """Live base config: every group on the propagate policies, and one
+    group (``OTHER``) a scoped setup left on its own."""
+    return BgpConfig(
+        policies=BgpPolicies(
+            bgp_policy_statements=[
+                BgpPolicyStatement(name=name)
+                for name in (
+                    POLICY_PROPAGATE_IN,
+                    POLICY_PROPAGATE_OUT,
+                    POLICY_PROPAGATE_OUT_DRAIN,
+                    "OTHER_OUT",
+                )
+            ]
+        ),
+        peer_groups=[
+            PeerGroup(
+                name="FABRIC",
+                ingress_policy_name=POLICY_PROPAGATE_IN,
+                egress_policy_name=POLICY_PROPAGATE_OUT,
+            ),
+            PeerGroup(
+                name="OTHER",
+                ingress_policy_name=POLICY_PROPAGATE_IN,
+                egress_policy_name="OTHER_OUT",
+            ),
+        ],
+        peers=[
+            BgpPeer(peer_addr="2001:db8:1::1", peer_group_name="FABRIC"),
+            BgpPeer(peer_addr="10.0.0.1", peer_group_name="FABRIC"),
+            BgpPeer(peer_addr="2001:db8:2::1", peer_group_name="FABRIC"),
+            BgpPeer(peer_addr="2001:db8:1::/64", peer_group_name="FABRIC"),
+            BgpPeer(peer_addr="2001:db8:3::1", peer_group_name="OTHER"),
+        ],
+    )
+
+
+def _drain_args(*networks: str) -> t.Dict[str, str]:
+    return {
+        "interface_name": "eth1/1/1",
+        "networks": json.dumps(list(networks or ("2001:db8:1::/127", "10.0.0.0/31"))),
+    }
+
+
+class DrainInterfaceTest(unittest.TestCase):
+    def test_sessions_on_the_interface_take_the_drain_policy(self) -> None:
+        out = OssPatchApplier().drain_interface(
+            _drain_config(), "bgpcpp", _drain_args()
+        )
+
+        drained = (POLICY_PROPAGATE_IN, POLICY_PROPAGATE_OUT_DRAIN)
+        self.assertEqual(
+            [
+                ("2001:db8:1::1", *drained),
+                ("10.0.0.1", *drained),
+                ("2001:db8:2::1", None, None),
+                ("2001:db8:1::/64", None, None),
+                ("2001:db8:3::1", None, None),
+            ],
+            [
+                (p.peer_addr, p.ingress_policy_name, p.egress_policy_name)
+                for p in out.peers
+            ],
+        )
+        self.assertEqual(["eth1/1/1"], list(out.drained_interfaces))
+        self.assertEqual(_drain_config().peer_groups, out.peer_groups)
+        self.assertEqual(_drain_config().policies, out.policies)
+
+    def test_interface_without_a_session_is_refused(self) -> None:
+        with self.assertRaisesRegex(PatcherError, "no BGP peer"):
+            OssPatchApplier().drain_interface(
+                _drain_config(), "bgpcpp", _drain_args("2001:db8:9::/127")
+            )
+
+    def test_config_without_the_drain_policy_is_refused(self) -> None:
+        config = _drain_config()
+        config = config(
+            policies=BgpPolicies(
+                bgp_policy_statements=[
+                    s
+                    for s in none_throws(config.policies).bgp_policy_statements
+                    if s.name != POLICY_PROPAGATE_OUT_DRAIN
+                ]
+            )
+        )
+        with self.assertRaisesRegex(PatcherError, POLICY_PROPAGATE_OUT_DRAIN):
+            OssPatchApplier().drain_interface(config, "bgpcpp", _drain_args())
+
+    def test_session_outside_the_base_configs_is_refused(self) -> None:
+        with self.assertRaisesRegex(PatcherError, "advertises through OTHER_OUT"):
+            OssPatchApplier().drain_interface(
+                _drain_config(), "bgpcpp", _drain_args("2001:db8:3::/127")
+            )
+
+    def test_drained_session_is_refused(self) -> None:
+        applier = OssPatchApplier()
+        drained = applier.drain_interface(_drain_config(), "bgpcpp", _drain_args())
+        with self.assertRaisesRegex(
+            PatcherError, f"advertises through {POLICY_PROPAGATE_OUT_DRAIN}"
+        ):
+            applier.drain_interface(drained, "bgpcpp", _drain_args())

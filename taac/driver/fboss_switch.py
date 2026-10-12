@@ -287,6 +287,10 @@ def _to_interface_state(port_status: PortStatus) -> InterfaceState:
     )
 
 
+def _interface_drain_patcher_name(interface: str) -> str:
+    return f"interface-drain-{interface}"
+
+
 class FbossSwitch(AbstractSwitch):
     def __init__(
         self,
@@ -4455,6 +4459,9 @@ class FbossSwitch(AbstractSwitch):
             task_id: Optional task identifier passed through to the
                 local drainer (default 0, matching the CLI default).
         """
+        if oss_config_patcher_enabled():
+            await self._async_oss_set_interfaces_drained([interface], drain=True)
+            return
         self.logger.info(
             f"Softdraining interface '{interface}' on {self.hostname} "
             f"(task_id={task_id})"
@@ -4469,6 +4476,12 @@ class FbossSwitch(AbstractSwitch):
         self, interfaces: List[str], task_id: int = 0
     ) -> None:
         """Hard-drain several interfaces in one local-drainer request."""
+        if oss_config_patcher_enabled():
+            raise NotImplementedError(
+                "Hard interface drain is not available in OSS: it needs a deny "
+                "policy per peer group, which the OSS configs do not carry. Use "
+                "a soft drain (async_softdrain_interfaces)."
+            )
         self.logger.info(
             f"Draining interfaces {interfaces} on {self.hostname} "
             f"(task_id={task_id})"
@@ -4487,6 +4500,9 @@ class FbossSwitch(AbstractSwitch):
         The bulk API applies all interface policy changes before restarting
         BGP, avoiding one BGP restart per interface.
         """
+        if oss_config_patcher_enabled():
+            await self._async_oss_set_interfaces_drained(interfaces, drain=True)
+            return
         self.logger.info(
             f"Softdraining interfaces {interfaces} on {self.hostname} "
             f"(task_id={task_id})"
@@ -4509,6 +4525,9 @@ class FbossSwitch(AbstractSwitch):
         Args:
             interface: FBOSS interface name (e.g. "eth1/33/5").
         """
+        if oss_config_patcher_enabled():
+            await self._async_oss_set_interfaces_drained([interface], drain=False)
+            return
         self.logger.info(f"Undraining interface '{interface}' on {self.hostname}")
         async with self.get_async_local_drainer_client() as client:
             await client.undrain_interface(interface)
@@ -4522,12 +4541,154 @@ class FbossSwitch(AbstractSwitch):
         The bulk API applies all interface policy changes before restarting
         BGP, avoiding one BGP restart per interface.
         """
+        if oss_config_patcher_enabled():
+            await self._async_oss_set_interfaces_drained(interfaces, drain=False)
+            return
         self.logger.info(f"Undraining interfaces {interfaces} on {self.hostname}")
         async with self.get_async_local_drainer_client() as client:
             await client.undrain_interfaces(interfaces)
         self.logger.info(
             f"Undrain of interfaces {interfaces} on {self.hostname} completed"
         )
+
+    # ----------------------------------------------------------------------
+    # OSS interface drain: COOP drains an interface by registering a
+    # persistent ``interface-drain-<iface>`` bgpcpp patcher
+    # (interface_drain_router); OSS registers the same patcher with the OSS
+    # backend, so it survives other patcher changes and teardown removes it.
+    # ----------------------------------------------------------------------
+
+    async def _async_oss_set_interfaces_drained(
+        self, interfaces: List[str], drain: bool
+    ) -> None:
+        """Soft-drain or undrain ``interfaces`` on the live BGP config.
+
+        Only the live config: the soft-drain config drains every session
+        already, and a device drain parks the live config and an undrain puts
+        it back, so a drained interface stays drained across them. Refused
+        while the device is drained, since the live config is then not what
+        bgpd serves. One apply for the batch, so bgpd restarts once.
+        """
+        from neteng.test_infra.dne.taac.driver import config_modifiers, oss_coop_patcher
+
+        action = "drain" if drain else "undrain"
+        if await config_modifiers.async_is_device_drained(self):
+            raise config_modifiers.ConfigModifierError(
+                f"Cannot {action} {interfaces} on {self.hostname}: the device is "
+                "drained. Interface drain edits the live BGP config only; "
+                "undrain the device first."
+            )
+        registered = {
+            p.name for p in oss_coop_patcher.list_patchers(self.hostname, "bgpcpp")
+        }
+        names = {i: _interface_drain_patcher_name(i) for i in interfaces}
+        todo = [i for i in interfaces if (names[i] in registered) != drain]
+        for interface in sorted(set(interfaces) - set(todo)):
+            self.logger.info(
+                f"[oss-drain] {interface} on {self.hostname} is already "
+                f"{'drained' if drain else 'undrained'}"
+            )
+        if not todo:
+            return
+
+        if drain:
+            await self._async_oss_register_interface_drains(todo, names)
+        else:
+            for interface in todo:
+                await oss_coop_patcher.async_unregister(self, "bgpcpp", names[interface])
+        await self.async_apply_patchers()
+        await self._async_verify_interfaces_drained(todo, drain)
+        self.logger.info(f"[oss-drain] {action}ed {todo} on {self.hostname}")
+
+    async def _async_oss_register_interface_drains(
+        self, interfaces: List[str], names: Dict[str, str]
+    ) -> None:
+        """Register a drain patcher per interface, all or none: one the patcher
+        refuses unregisters those this call already added."""
+        from taac.driver import oss_coop_patcher
+
+        networks = {i: await self._async_interface_networks(i) for i in interfaces}
+        added: List[str] = []
+        try:
+            for interface in interfaces:
+                await self.async_register_python_patcher(
+                    "bgpcpp",
+                    names[interface],
+                    "drain_interface",
+                    {
+                        "interface_name": interface,
+                        "networks": json.dumps(networks[interface]),
+                    },
+                    f"Soft-draining {interface}",
+                )
+                added.append(names[interface])
+        except Exception:
+            for name in added:
+                await oss_coop_patcher.async_unregister(self, "bgpcpp", name)
+            raise
+
+    async def _async_interface_networks(self, interface: str) -> List[str]:
+        """The subnets of the L3 interface the port ``interface`` routes
+        through: its VLAN's, or its own for a port interface.
+
+        Link-local addresses are skipped: every interface has one, so they
+        would match peers on other links. A VLAN shared with other ports is
+        refused, since draining its subnet would drain their sessions too.
+        """
+        ports = await self.async_get_all_port_info()
+        port = next((p for p in ports.values() if p.name == interface), None)
+        if port is None:
+            raise InterfaceNotFoundError(
+                f"{interface} is not a port on {self.hostname}"
+            )
+        vlans = set(port.vlans or [])
+        networks: List[str] = []
+        for intf in (await self.async_get_all_interfaces()).values():
+            if intf.vlanId in vlans:
+                sharing = sorted(
+                    p.name
+                    for p in ports.values()
+                    if p.name != interface and intf.vlanId in (p.vlans or [])
+                )
+                if sharing:
+                    raise InvalidInputError(
+                        f"{interface} shares VLAN {intf.vlanId} "
+                        f"({intf.interfaceName}) with {sharing} on "
+                        f"{self.hostname}; draining its subnet would drain "
+                        "their sessions too"
+                    )
+            # By name: the agent client returns thrift-py3 or thrift-python
+            # types depending on the client provider.
+            elif intf.interfaceType.name != "PORT" or intf.portId != port.portId:
+                continue
+            for prefix in intf.address:
+                ip = ipaddress.ip_address(prefix.ip.addr)
+                if not ip.is_link_local:
+                    networks.append(
+                        str(ipaddress.ip_interface(f"{ip}/{prefix.prefixLength}").network)
+                    )
+        if not networks:
+            raise InvalidInputError(
+                f"{interface} on {self.hostname} has no routed address to find "
+                "BGP sessions on"
+            )
+        return networks
+
+    async def _async_verify_interfaces_drained(
+        self, interfaces: List[str], drained: bool
+    ) -> None:
+        """Read the live config back: ``drained_interfaces`` is the OSS record
+        of an interface drain, as PortInfo.isDrained is the local drainer's."""
+        from taac.driver import config_modifiers
+
+        path = config_modifiers.LIVE_CONFIG_PATH
+        config = await config_modifiers.async_read_bgp_config(self, path)
+        wrong = [i for i in interfaces if (i in config.drained_interfaces) != drained]
+        if wrong:
+            raise config_modifiers.ConfigModifierError(
+                f"{path} on {self.hostname} does not record {wrong} as "
+                f"{'drained' if drained else 'undrained'} after the apply"
+            )
 
     @memoize_on_app_overload()
     async def async_get_interface_detail(self, vlan_id) -> InterfaceDetail:

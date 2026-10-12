@@ -176,6 +176,7 @@ from taac.utils.oss_taac_lib_utils import (
     async_retryable,
     none_throws,
     oss_agent_restart_paths_enabled,
+    oss_config_patcher_enabled,
 )
 from taac.utils.system_stress_utils import (
     async_get_memory_current_pct,
@@ -10836,8 +10837,10 @@ class DrainUndrainStep(StepBase[taac_types.DrainUndrainInput]):
                 # FBOSS hard drain is a routing-policy operation and does not
                 # populate Agent PortInfo.isDrained (local_drainer explicitly
                 # reports per-interface state as UNKNOWN).  That field is an
-                # authoritative readback only for soft drain and undrain.
-                if not hard_interface_operation:
+                # authoritative readback only for soft drain and undrain. The
+                # OSS drain is BGP policy alone too, and the driver reads the
+                # live config back itself.
+                if not hard_interface_operation and not oss_config_patcher_enabled():
                     await self._wait_for_local_drainer_interface_state(
                         fboss_driver,
                         interface_names,

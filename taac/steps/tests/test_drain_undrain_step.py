@@ -83,6 +83,28 @@ class DrainUndrainStepTest(unittest.IsolatedAsyncioTestCase):
         self.driver.async_softdrain_interfaces.assert_awaited_once_with(self.interfaces)
         self.driver.async_softdrain_interface.assert_not_awaited()
 
+    async def test_oss_interface_drain_skips_port_info_readback(self) -> None:
+        for drain in (True, False):
+            with (
+                self.subTest(drain=drain),
+                patch(
+                    "neteng.test_infra.dne.taac.steps.step_definitions."
+                    "oss_config_patcher_enabled",
+                    return_value=True,
+                ),
+            ):
+                await self.step.run(
+                    taac_types.DrainUndrainInput(
+                        drain=drain,
+                        drain_handler=taac_types.DrainHandler.LOCAL_DRAINER,
+                    ),
+                    self._params(),
+                )
+
+        self.driver.async_softdrain_interfaces.assert_awaited_once_with(self.interfaces)
+        self.driver.async_undrain_interfaces.assert_awaited_once_with(self.interfaces)
+        self.driver.async_get_all_port_info.assert_not_awaited()
+
     async def test_undrain_uses_one_bulk_request(self) -> None:
         self.driver.async_get_all_port_info.return_value = self._port_map(False, False)
         await self.step.run(

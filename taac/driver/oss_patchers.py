@@ -58,6 +58,11 @@ from neteng.fboss.switch_config.thrift_types import (
     VlanPort,
 )
 from taac.driver import oss_bgp_policy
+from taac.driver.config_modifiers import (
+    POLICY_PROPAGATE_IN,
+    POLICY_PROPAGATE_OUT,
+    POLICY_PROPAGATE_OUT_DRAIN,
+)
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -76,6 +81,7 @@ PATCHER_CONFIG_TYPES: t.Dict[str, type] = {
     "add_static_routes": AgentConfig,
     "add_bgp_policy_statement": BgpConfig,
     "add_bgp_policy_match_prefix_to_propagate_routes": BgpConfig,
+    "drain_interface": BgpConfig,
 }
 
 # Hardware whose /1 and /5 subports share a cage and so constrain each other's
@@ -216,6 +222,18 @@ def _bgp_peer(
         ingress_policy_name=spec.get("ingress_policy_name"),
         egress_policy_name=spec.get("egress_policy_name"),
     )
+
+
+def _peer_on(
+    peer: BgpPeer,
+    networks: t.Sequence[t.Union[ipaddress.IPv4Network, ipaddress.IPv6Network]],
+) -> bool:
+    try:
+        addr = ipaddress.ip_address(peer.peer_addr)
+    except ValueError:
+        # A prefix spec (passive listener), not a session on one address.
+        return False
+    return any(addr in network for network in networks)
 
 
 def _session_peers(spec: t.Mapping[str, t.Any]) -> t.Iterator[BgpPeer]:
@@ -1083,4 +1101,78 @@ class OssPatchApplier:
                     for s in statements
                 ]
             )
+        )
+
+    def drain_interface(
+        self, config: BgpConfig, config_name: str, my_args: t.Dict[str, t.Any]
+    ) -> BgpConfig:
+        """Point the BGP sessions on one interface at the OSS drain policy.
+
+        COOP's ``drain_ma_interface`` with ``require_peer_match``: every peer
+        whose ``peer_addr`` falls in one of ``networks`` (a JSON list of the
+        interface's subnets) takes ``PROPAGATE_EVERYTHING_IN`` /
+        ``PROPAGATE_EVERYTHING_OUT_DRAIN``, and ``interface_name`` is recorded
+        in ``drained_interfaces``. Those are the only drain policies OSS has:
+        ``config_modifiers.generate_base_configs`` declares them in both the
+        live and the soft-drain config, and a device drain points every group
+        it manages at them.
+
+        Refused: a config without those policies, an interface with no peer,
+        and a session not on ``PROPAGATE_EVERYTHING_OUT`` -- already drained,
+        or in a group a scoped setup left on its own policies, which a device
+        drain does not drain either.
+        """
+        target = my_args.get("interface_name")
+        if not target:
+            raise PatcherError("drain_interface: no interface_name")
+        declared = {
+            s.name
+            for s in (
+                (config.policies.bgp_policy_statements if config.policies else None)
+                or []
+            )
+        }
+        missing = sorted({POLICY_PROPAGATE_IN, POLICY_PROPAGATE_OUT_DRAIN} - declared)
+        if missing:
+            raise PatcherError(
+                f"drain_interface: the config does not declare {', '.join(missing)}; "
+                "generate the base configs first"
+            )
+        networks = [
+            ipaddress.ip_network(network, strict=False)
+            for network in json.loads(my_args.get("networks", "[]"))
+        ]
+        groups = {g.name: g for g in config.peer_groups or []}
+
+        peers = list(config.peers)
+        matched = [i for i, peer in enumerate(peers) if _peer_on(peer, networks)]
+        if not matched:
+            raise PatcherError(
+                f"drain_interface: no BGP peer sits on {target} "
+                f"({', '.join(map(str, networks)) or 'no address'}), so there "
+                "is no session to drain"
+            )
+        for i in matched:
+            peer = peers[i]
+            group = groups.get(peer.peer_group_name or "")
+            egress = peer.egress_policy_name or (
+                group.egress_policy_name if group else None
+            )
+            if egress != POLICY_PROPAGATE_OUT:
+                raise PatcherError(
+                    f"drain_interface: peer {peer.peer_addr} on {target} "
+                    f"advertises through {egress}, not {POLICY_PROPAGATE_OUT}; "
+                    "only sessions the base configs manage can be drained"
+                )
+            self.logger.info(
+                f"drain_interface: {target}: peer {peer.peer_addr} -> "
+                f"({POLICY_PROPAGATE_IN}, {POLICY_PROPAGATE_OUT_DRAIN})"
+            )
+            peers[i] = peer(
+                ingress_policy_name=POLICY_PROPAGATE_IN,
+                egress_policy_name=POLICY_PROPAGATE_OUT_DRAIN,
+            )
+        return config(
+            peers=peers,
+            drained_interfaces=_merge(config.drained_interfaces, [target]),
         )
