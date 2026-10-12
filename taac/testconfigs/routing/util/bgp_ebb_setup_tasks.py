@@ -1057,6 +1057,7 @@ def build_ixia_ibgp_subset_activation_steps(n_v6: int, n_v4: int) -> list:
             "regex": regex,
             "session_start_idx": 1,
             "session_end_idx": end_idx,
+            "verify_started": start,
         }
 
     steps = [
@@ -1183,6 +1184,7 @@ def build_ixia_ebgp_subset_activation_steps(n_v6: int, n_v4: int) -> list:
             "regex": regex,
             "session_start_idx": 1,
             "session_end_idx": end_idx,
+            "verify_started": start,
         }
 
     steps = [

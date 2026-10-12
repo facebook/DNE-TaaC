@@ -2635,6 +2635,7 @@ def _ps_case1_start_bgp_peers_args(
         "regex": regex,
         "session_start_idx": start_idx,
         "session_end_idx": end_idx,
+        "verify_started": start,
     }
 
 

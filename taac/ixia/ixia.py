@@ -21,7 +21,7 @@ import time
 import typing as t
 import uuid
 import warnings
-from collections import defaultdict, namedtuple
+from collections import Counter, defaultdict, namedtuple
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from ipaddress import ip_address, IPv6Address
@@ -718,6 +718,19 @@ class InvalidInputError(Exception):
     pass
 
 
+def _bgp_session_indices_spec(indices: t.Iterable[int]) -> str:
+    """Render 1-based session indices in IxNetwork's ``1-4;6;7-12`` form."""
+    runs: list[list[int]] = []
+    for index in sorted(indices):
+        if runs and index == runs[-1][1] + 1:
+            runs[-1][1] = index
+        else:
+            runs.append([index, index])
+    return ";".join(
+        str(first) if first == last else f"{first}-{last}" for first, last in runs
+    )
+
+
 class IxiaSetupError(Exception):
     pass
 
@@ -870,6 +883,19 @@ _PROTOCOL_STATE_POLL_SECONDS: int = 2
 # ApplyOnTheFly failures are commonly transient while a large topology settles.
 _APPLY_CHANGES_MAX_ATTEMPTS: int = 3
 _APPLY_CHANGES_RETRY_DELAY_SECONDS: float = 10.0
+
+# A successful BGP peer Start can still leave some sessions `notStarted` (seen on
+# NRQEB008 SC1: 62 of 100 IPv6 sessions accepted TCP and closed it for the whole
+# run). A started session leaves `notStarted` within seconds even when the DUT
+# never answers (it goes `down`), so this window only bounds the stuck case.
+_BGP_START_SETTLE_SECONDS: int = 15
+_BGP_START_POLL_SECONDS: int = 3
+_BGP_START_MAX_RESTARTS: int = 2
+_BGP_START_FAILURE_SAMPLE_SIZE: int = 20
+# A dead port shows up only in the server's appErrors ("Port ... is not CPU
+# ready"), not in per-session state, so the failure quotes the latest ones.
+_BGP_START_FAILURE_SERVER_ERRORS: int = 5
+_IXIA_SERVER_ERROR_LEVELS: t.FrozenSet[str] = frozenset({"kError", "kWarning"})
 
 # Stamped on the installed transport wrapper, holding the `Ixia` that owns it,
 # and read back by the installer as its idempotency guard.
@@ -4686,6 +4712,7 @@ class Ixia:
         session_end_idx: t.Optional[int] = None,
         expected_peer_count: t.Optional[int] = None,
         validate_session_range: bool = False,
+        verify_started: bool = False,
     ) -> None:
         """Start or stop a contiguous range of emulated BGP sessions.
 
@@ -4699,6 +4726,9 @@ class Ixia:
             session_start_idx: First session index (inclusive, 1-based).
             session_end_idx: Last session index (inclusive, 1-based). Defaults
                 per peer to that peer's own ``Count``.
+            verify_started: After a Start, wait until no session in the range is
+                ``notStarted``, re-issuing Start for stragglers, and raise
+                ``IxiaOperationStateError`` naming any that never start.
 
         IXIA ``SessionIndices`` are 1-based; index 0 is not a valid session.
         A range starting at 0 leaves an IxNetwork-internal lock unreleased,
@@ -4720,20 +4750,9 @@ class Ixia:
                 "start_bgp_peers: session_end_idx must be >= session_start_idx, "
                 f"got [{session_start_idx}:{session_end_idx}]"
             )
-        if regex:
-            bgp_peers = self.find_bgp_peers(regex, ignore_case)
-        else:
-            device_group_idx_obj = self.vport_indices[
-                none_throws(vport_idx)
-            ].device_group_indices[none_throws(device_group_idx)]
-            bgp_peers = []
-            for (
-                network_group_index
-            ) in device_group_idx_obj.network_group_indices.values():
-                if network_group_index.ipv4_bgp_peer:
-                    bgp_peers.append(network_group_index.ipv4_bgp_peer)
-                if network_group_index.ipv6_bgp_peer:
-                    bgp_peers.append(network_group_index.ipv6_bgp_peer)
+        bgp_peers = self._select_bgp_peers(
+            regex, ignore_case, vport_idx, device_group_idx
+        )
         matched_names = [str(peer.Name) for peer in bgp_peers]
         self.logger.info(
             f"start_bgp_peers matched {len(bgp_peers)} peer object(s): {matched_names}"
@@ -4744,6 +4763,7 @@ class Ixia:
                 f"{expected_peer_count} peer object(s), got {len(bgp_peers)}: "
                 f"{matched_names}"
             )
+        started_ranges: list[t.Tuple[t.Any, int, int]] = []
         for bgp_peer in bgp_peers:
             # Compute the end index PER PEER. Must be a local -- reassigning
             # session_end_idx would lock it to the first peer's Count and apply
@@ -4767,11 +4787,129 @@ class Ixia:
                     )
             if start:
                 bgp_peer.Start(SessionIndices=f"{session_start_idx}-{peer_end_idx}")
+                started_ranges.append((bgp_peer, session_start_idx, peer_end_idx))
             else:
                 bgp_peer.Stop(SessionIndices=f"{session_start_idx}-{peer_end_idx}")
             self.logger.debug(
                 f"Successfully {'started' if start else 'stopped'} BGP sessions {session_start_idx}-{peer_end_idx} on {bgp_peer.Name}"
             )
+        if verify_started:
+            self._ensure_bgp_sessions_started(started_ranges)
+
+    def _select_bgp_peers(
+        self,
+        regex: t.Optional[str],
+        ignore_case: bool,
+        vport_idx: t.Optional[str],
+        device_group_idx: t.Optional[int],
+    ) -> list[t.Any]:
+        if regex:
+            return self.find_bgp_peers(regex, ignore_case)
+        device_group_idx_obj = self.vport_indices[
+            none_throws(vport_idx)
+        ].device_group_indices[none_throws(device_group_idx)]
+        bgp_peers = []
+        for network_group_index in device_group_idx_obj.network_group_indices.values():
+            if network_group_index.ipv4_bgp_peer:
+                bgp_peers.append(network_group_index.ipv4_bgp_peer)
+            if network_group_index.ipv6_bgp_peer:
+                bgp_peers.append(network_group_index.ipv6_bgp_peer)
+        return bgp_peers
+
+    def _ensure_bgp_sessions_started(
+        self, started_ranges: t.Sequence[t.Tuple[t.Any, int, int]]
+    ) -> None:
+        pending = self._bgp_sessions_not_started(started_ranges)
+        restarts = 0
+        deadline = time.monotonic() + _BGP_START_SETTLE_SECONDS
+        while pending:
+            if time.monotonic() < deadline:
+                time.sleep(_BGP_START_POLL_SECONDS)
+            elif restarts < _BGP_START_MAX_RESTARTS:
+                restarts += 1
+                for bgp_peer, indices in pending:
+                    self.logger.warning(
+                        f"{len(indices)} BGP session(s) on {bgp_peer.Name} still "
+                        f"notStarted; re-issuing Start (attempt {restarts}): "
+                        f"{_bgp_session_indices_spec(indices)}"
+                    )
+                    bgp_peer.Start(SessionIndices=_bgp_session_indices_spec(indices))
+                deadline = time.monotonic() + _BGP_START_SETTLE_SECONDS
+            else:
+                raise IxiaOperationStateError(
+                    "BGP sessions never left notStarted after "
+                    f"{_BGP_START_MAX_RESTARTS} re-start(s): "
+                    + "; ".join(
+                        self._bgp_start_failure_detail(bgp_peer, indices)
+                        for bgp_peer, indices in pending
+                    )
+                    + f"; Ixia server errors: {self._recent_ixia_server_errors()}"
+                )
+            pending = self._bgp_sessions_not_started(started_ranges)
+
+    def _recent_ixia_server_errors(self) -> list[str]:
+        try:
+            errors = [
+                error
+                for error in self.ixnetwork.Globals.AppErrors.find().Error.find()
+                if error.ErrorLevel in _IXIA_SERVER_ERROR_LEVELS
+            ]
+        except Exception as error:
+            return [f"unavailable ({type(error).__name__}: {error})"]
+        errors.sort(key=lambda error: str(error.LastModified))
+        return [
+            f"{error.LastModified} [{error.ErrorLevel}] {error.Name}: "
+            f"{error.Description}"
+            for error in errors[-_BGP_START_FAILURE_SERVER_ERRORS:]
+        ]
+
+    @staticmethod
+    def _bgp_sessions_not_started(
+        started_ranges: t.Sequence[t.Tuple[t.Any, int, int]],
+    ) -> list[t.Tuple[t.Any, list[int]]]:
+        pending = []
+        for bgp_peer, start_idx, end_idx in started_ranges:
+            # restpy serves attributes from the snapshot taken when the peer was
+            # fetched, so without refresh() every poll re-reads pre-Start state.
+            bgp_peer.refresh()
+            statuses = list(bgp_peer.SessionStatus)
+            if end_idx > len(statuses):
+                raise ValueError(
+                    f"start_bgp_peers cannot verify sessions {start_idx}-{end_idx} "
+                    f"on {bgp_peer.Name}: it reports {len(statuses)} session(s)"
+                )
+            indices = [
+                index
+                for index in range(start_idx, end_idx + 1)
+                if statuses[index - 1] == "notStarted"
+            ]
+            if indices:
+                pending.append((bgp_peer, indices))
+        return pending
+
+    @staticmethod
+    def _bgp_start_failure_detail(bgp_peer: t.Any, indices: t.Sequence[int]) -> str:
+        sample = indices[:_BGP_START_FAILURE_SAMPLE_SIZE]
+        try:
+            infos = list(bgp_peer.SessionInfo)
+            info = dict(Counter(infos[index - 1] for index in sample))
+        except Exception as error:
+            info = f"unavailable ({type(error).__name__})"
+        try:
+            active = [str(value).lower() for value in bgp_peer.Active.Values]
+            inactive = [
+                index
+                for index in sample
+                if active[0 if len(active) == 1 else index - 1] == "false"
+            ]
+        except Exception as error:
+            inactive = f"unavailable ({type(error).__name__})"
+        return (
+            f"{bgp_peer.Name}: {len(indices)} notStarted "
+            f"[{_bgp_session_indices_spec(sample)}"
+            f"{', ...' if len(indices) > len(sample) else ''}], "
+            f"SessionInfo={info}, inactive={inactive}"
+        )
 
     @external_api
     def restore_bgp_peer_ranges(

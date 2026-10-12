@@ -2,13 +2,19 @@
 # pyre-unsafe
 
 import contextlib
+import itertools
 import re
 import typing as t
 import unittest
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import call, MagicMock, patch
 
 from taac.constants import TestCaseFailure
-from taac.ixia.ixia import Ixia
+from taac.ixia.ixia import (
+    _bgp_session_indices_spec,
+    Ixia,
+    IxiaOperationStateError,
+)
 
 
 def _ixia() -> Ixia:
@@ -292,3 +298,155 @@ class StartBgpPeersTest(unittest.TestCase):
         self.assertEqual(2, apply_calls)
         ipv4.Start.assert_not_called()
         ipv6.Start.assert_not_called()
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class StartBgpPeersVerifyStartedTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ixia = _ixia()
+        self.peer = _peer("BGP_PEER_IPV6_IBGP", 5)
+        self.ixia.find_bgp_peers = MagicMock(return_value=[self.peer])
+        self.clock = _FakeClock()
+        patcher = patch(
+            "neteng.test_infra.dne.taac.ixia.ixia.time",
+            MagicMock(monotonic=self.clock.monotonic, sleep=self.clock.sleep),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _set_statuses(self, *reads: list[str]) -> None:
+        # Like restpy, SessionStatus only changes when refresh() re-fetches it;
+        # the cached value is the pre-Start snapshot.
+        fresh = itertools.chain(reads, itertools.repeat(reads[-1]))
+        self.peer.SessionStatus = ["notStarted"] * len(reads[0])
+
+        def refresh() -> MagicMock:
+            self.peer.SessionStatus = next(fresh)
+            return self.peer
+
+        self.peer.refresh.side_effect = refresh
+
+    def _start(self, end: int = 5) -> None:
+        self.ixia.start_bgp_peers(
+            start=True,
+            regex="BGP_PEER_IPV6_IBGP",
+            session_start_idx=1,
+            session_end_idx=end,
+            verify_started=True,
+        )
+
+    def test_started_sessions_need_no_retry(self) -> None:
+        self._set_statuses(["up", "down", "up", "down", "notStarted"])
+
+        self._start(end=4)
+
+        self.peer.Start.assert_called_once_with(SessionIndices="1-4")
+        self.assertEqual([], self.clock.sleeps)
+
+    def test_restarts_only_sessions_still_not_started(self) -> None:
+        stuck = ["up", "notStarted", "notStarted", "up", "notStarted"]
+        self._set_statuses(*([stuck] * 6), ["up"] * 5)
+
+        self._start()
+
+        self.assertEqual(
+            [call(SessionIndices="1-5"), call(SessionIndices="2-3;5")],
+            self.peer.Start.call_args_list,
+        )
+
+    def test_raises_with_diagnostics_when_sessions_never_start(self) -> None:
+        self._set_statuses(["up", "notStarted", "up", "up", "up"])
+        self.peer.SessionInfo = ["none", "ceaseErrorRx", "none", "none", "none"]
+        self.peer.Active = _ActiveVector(
+            ["true", "false", "true", "true", "true"], count=5
+        )
+
+        with self.assertRaises(IxiaOperationStateError) as raised:
+            self._start()
+
+        message = str(raised.exception)
+        self.assertIn("BGP_PEER_IPV6_IBGP: 1 notStarted [2]", message)
+        self.assertIn("Ixia server errors: [", message)
+        self.assertIn("SessionInfo={'ceaseErrorRx': 1}", message)
+        self.assertIn("inactive=[2]", message)
+        self.assertEqual(3, self.peer.Start.call_count)
+
+    def test_rejects_range_beyond_reported_sessions(self) -> None:
+        self._set_statuses(["up"] * 3)
+
+        with self.assertRaisesRegex(ValueError, "reports 3 session"):
+            self._start(end=5)
+
+    def test_stop_does_not_read_session_status(self) -> None:
+        self.ixia.start_bgp_peers(
+            start=False, regex="BGP_PEER_IPV6_IBGP", session_end_idx=5
+        )
+
+        self.peer.refresh.assert_not_called()
+
+    def test_session_indices_spec_merges_contiguous_runs(self) -> None:
+        self.assertEqual(
+            "1-3;6-8;10", _bgp_session_indices_spec([7, 1, 2, 10, 3, 6, 8])
+        )
+
+    def _set_server_errors(self, *errors: SimpleNamespace) -> None:
+        app_errors = MagicMock()
+        app_errors.find.return_value.Error.find.return_value = list(errors)
+        self.ixia.ixnetwork = MagicMock()
+        self.ixia.ixnetwork.Globals.AppErrors = app_errors
+
+    def test_failure_quotes_latest_server_errors_only(self) -> None:
+        self._set_statuses(["notStarted"] * 5)
+        self._set_server_errors(
+            SimpleNamespace(
+                LastModified="03:01:47",
+                ErrorLevel="kError",
+                Name="Download of package(s) failed",
+                Description="Port 1;90 is not CPU ready.",
+            ),
+            SimpleNamespace(
+                LastModified="03:01:12",
+                ErrorLevel="kWarning",
+                Name="PCPU errors on the chassis",
+                Description="Port CPU errors detected.",
+            ),
+            SimpleNamespace(
+                LastModified="03:02:00",
+                ErrorLevel="kMessage",
+                Name="informational",
+                Description="ignored",
+            ),
+        )
+
+        with self.assertRaises(IxiaOperationStateError) as raised:
+            self._start()
+
+        message = str(raised.exception)
+        self.assertIn("Port 1;90 is not CPU ready.", message)
+        self.assertNotIn("informational", message)
+        self.assertLess(message.index("PCPU errors"), message.index("not CPU ready"))
+
+    def test_failure_survives_unreadable_server_errors(self) -> None:
+        self._set_statuses(["notStarted"] * 5)
+        self.ixia.ixnetwork = MagicMock()
+        self.ixia.ixnetwork.Globals.AppErrors.find.side_effect = RuntimeError(
+            "gateway timeout"
+        )
+
+        with self.assertRaisesRegex(
+            IxiaOperationStateError,
+            r"Ixia server errors: \['unavailable \(RuntimeError: gateway timeout\)'\]",
+        ):
+            self._start()
