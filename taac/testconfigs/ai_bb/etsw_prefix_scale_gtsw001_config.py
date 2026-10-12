@@ -396,6 +396,9 @@ ETSW_45NH_PREFIXES: int = sum(sp.total for sp in ETSW_45NH_SPECS)
 ETSW_45NH_PATHS: int = ETSW_45NH_PREFIXES * ETSW_45NH_COUNT
 
 PREFIX_LIMIT_45NH: int = 5_000_000
+# Per-peer limit on the IXIA peer group. The FULL profile advertises 2,073,600
+# paths on each VF /64 port, past the setup helper's 2M default.
+ETSW_SCALE_PEER_MAX_ROUTES: int = 4_000_000
 
 _45NH_PORT_CONFIG: taac_types.BasicPortConfig = taac_types.BasicPortConfig(
     l1_config=MP3N_L1_CONFIG,
@@ -1207,6 +1210,7 @@ def _make_etsw_scale_test_config(
         egress_policy=EGRESS_POLICY,
         patcher_suffix=PATCHER_SUFFIX,
         prefix_limit=PREFIX_LIMIT_45NH,
+        max_routes=ETSW_SCALE_PEER_MAX_ROUTES,
         # Multi-million-path convergence stalls keepalives long enough to flap
         # a 30/10 session.
         hold_time_seconds=180,

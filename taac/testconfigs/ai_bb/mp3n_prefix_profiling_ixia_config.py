@@ -763,6 +763,7 @@ def create_mp3n_setup_tasks(
     hold_time_seconds: int = 30,
     keep_alive_seconds: int = 10,
     next_hop_self: bool = True,
+    max_routes: int = 2_000_000,
 ) -> List[taac_types.Task]:
     """Create setup tasks to configure BGP peering on DUT.
 
@@ -781,8 +782,11 @@ def create_mp3n_setup_tasks(
             which collapses an add-path advertisement carrying N distinct next
             hops down to one path. Scale runs that depend on the advertised
             next hops surviving must pass False.
+        max_routes: per-peer route limit on the IXIA peer group. The group is
+            warning-only, so bgpd keeps the session up but drops every path
+            past this limit (counted as PRD in `fboss2 show bgp summary`).
+            It must exceed the largest per-peer advertisement.
     """
-    max_routes = "2000000"
 
     tasks = [
         create_coop_unregister_patchers_task(device_name),
@@ -803,7 +807,7 @@ def create_mp3n_setup_tasks(
                 "bgp_peer_timers_out_delay_seconds": "0",
                 "bgp_peer_timers_withdraw_unprog_delay_seconds": "0",
                 "peer_tag": "IXIA",
-                "max_routes": max_routes,
+                "max_routes": str(max_routes),
                 "warning_only": "True",
                 "warning_limit": "0",
                 "next_hop_self": str(next_hop_self),
