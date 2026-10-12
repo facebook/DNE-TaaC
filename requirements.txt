@@ -29,6 +29,9 @@ pyre-extensions>=0.0.30
 # SSH / CLI automation used at module scope in taac/driver/fboss_switch.py.
 pexpect>=4.8.0
 
+# FBOSS state-read retry policy in taac/driver/fboss_switch.py.
+tenacity>=9.1.2,<10
+
 # LRU cache decorators used in taac/driver/memoize_on_app_overload.py
 # (from cachetools import LRUCache).
 cachetools>=5.0.0

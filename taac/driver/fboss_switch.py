@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-unsafe
 import asyncio
 import datetime
 import ipaddress
@@ -65,6 +64,13 @@ else:
 import neteng.fboss.bgp_thrift.types as fboss_bgp_thrift_types
 import neteng.fboss.fsdb.types as fsdb_types
 import pexpect
+from tenacity import (
+    AsyncRetrying,
+    RetryCallState,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
@@ -240,6 +246,17 @@ if not TAAC_OSS:
     from openr.thrift.Types.thrift_types import AdjacencyDatabase
 from thrift.py3.exceptions import Error as ThriftError
 from thrift.python.exceptions import Error as ThriftPythonError
+
+
+def _is_fboss_method_rate_limit(error: BaseException) -> bool:
+    return isinstance(error, (ThriftError, ThriftPythonError)) and any(
+        signature in str(error)
+        for signature in (
+            "ThriftMethoRateLimit",
+            "ThriftMethodRateLimit",
+            "reject thrift methd due to rate limit:",
+        )
+    )
 
 
 def fb_gethostbyname(hostname: str) -> str:
@@ -3413,13 +3430,31 @@ class FbossSwitch(AbstractSwitch):
 
     async def async_get_switch_run_state(self) -> SwitchRunState:
         """
-        Request agent run state
+        Request fresh agent run state, retrying explicit Thrift rate limits.
         Returns:
             SwitchRunState
         """
         self.logger.debug("Fetching agent_state")
-        async with self.async_agent_client as client:
-            return await client.getSwitchRunState()
+
+        async def read_state() -> SwitchRunState:
+            async with self.async_agent_client as client:
+                return await client.getSwitchRunState()
+
+        def log_retry(state: RetryCallState) -> None:
+            assert state.outcome is not None and state.next_action is not None
+            self.logger.warning(
+                f"getSwitchRunState on {self.hostname} rate limited on "
+                f"attempt {state.attempt_number}/4; retrying in "
+                f"{state.next_action.sleep:.2f}s: {state.outcome.exception()}"
+            )
+
+        return await AsyncRetrying(
+            retry=retry_if_exception(_is_fboss_method_rate_limit),
+            stop=stop_after_attempt(4),
+            wait=wait_exponential_jitter(initial=1, max=4.1, jitter=0.1),
+            before_sleep=log_retry,
+            reraise=True,
+        )(read_state)
 
     @async_retryable(retries=3, sleep_time=5, exceptions=(Exception,))
     async def async_get_all_port_info(self) -> Dict[int, PortInfoThrift]:
