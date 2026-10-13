@@ -532,3 +532,28 @@ AC100T_PREFIX_PROFILING_LIMITS: dict[str, int] = {
     "hybrid": 74100,
     "non_contiguous": 40100,
 }
+
+# ---------------------------------------------------------------------------
+# LAG (port-channel) tests
+# ---------------------------------------------------------------------------
+# test_config_for_portchannel needs two DUTs joined by a port-channel, each with
+# its own IXIA ports. The topology above cables every DUT only to IXIA, so the
+# LAG testbed (which DUTs, and the DUT-to-DUT member links) is not decided yet.
+# DUT1/DUT2 stand in until it is.
+# TODO(ac100t): real LAG pair, roles (they name the IXIA peer groups,
+# PEERGROUP_<role>_IXIA_V6/V4), port-channel names and member links.
+AC100T_LAG_UPLINK_DEVICE_NAME = AC100T_DUT1_DEVICE_NAME
+AC100T_LAG_DOWNLINK_DEVICE_NAME = AC100T_DUT2_DEVICE_NAME
+AC100T_LAG_UPLINK_ROLE = "TODO_AC100T_LAG_UPLINK_ROLE"
+AC100T_LAG_DOWNLINK_ROLE = "TODO_AC100T_LAG_DOWNLINK_ROLE"
+# Raw IPv6 literal: the factory builds DirectIxiaConnections from it.
+AC100T_LAG_IXIA_CHASSIS_IP = "2001:db8::3001"
+AC100T_LAG_UPLINK_IXIA_INTERFACE = AC100T_DUT1_IXIA_INTERFACES[0]
+AC100T_LAG_DOWNLINK_IXIA_INTERFACE = AC100T_DUT2_IXIA_INTERFACES[0]
+AC100T_LAG_UPLINK_IXIA_CHASSIS_PORT = "1/1"
+AC100T_LAG_DOWNLINK_IXIA_CHASSIS_PORT = "1/2"
+AC100T_LAG_UPLINK_PORTCHANNEL_NAME = "Port-Channel1"
+AC100T_LAG_DOWNLINK_PORTCHANNEL_NAME = "Port-Channel2"
+# 1-1: AC100T_LAG_DOWNLINK_PORTCHANNEL_LINKS[i] connects to the uplink's [i].
+AC100T_LAG_UPLINK_PORTCHANNEL_LINKS = [f"eth1/{port}/1" for port in (1, 2, 3, 4)]
+AC100T_LAG_DOWNLINK_PORTCHANNEL_LINKS = [f"eth1/{port}/1" for port in (1, 2, 3, 4)]

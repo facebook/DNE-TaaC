@@ -23,6 +23,7 @@ Classes of tests planned for ac100t (per the ac100t test plan):
     - Longevity tests                      <-- implemented below
     - Thrift hardening tests               <-- implemented below
     - Interface flaps                      <-- implemented below
+    - LAG (port-channel)                   <-- implemented below
     - ECMP-only resource testing           <-- implemented below
     - PTP tests                            (TODO -- deferred)
     - Speed flip tests                     (TODO -- mostly not feasible in
@@ -49,6 +50,10 @@ from taac.testconfigs.ai_bb.mp3n_prefix_profiling_ixia_config import (
 )
 from taac.testconfigs.fboss_solution_tests.fboss_bgp_and_platform_hardening_conveyor import (
     test_config_for_bgp_and_fboss_platform_hardening_in_conveyor,
+)
+from taac.testconfigs.fboss_solution_tests.portchannel_test_config import (
+    IxiaPortSpec,
+    test_config_for_portchannel,
 )
 from taac.testconfigs.fboss_solution_tests.qos_scheduling_test_config import (
     test_config_qos_scheduling,
@@ -726,6 +731,60 @@ AC100T_ECMP_ONLY_RESOURCE_TEST_CONFIG = test_config_for_ecmp_only_resource_testi
 
 
 # ===========================================================================
+# LAG (port-channel) tests (LAG_001..021)
+# ===========================================================================
+# The full LAG suite from test_config_for_portchannel: baseline, longevity,
+# all-link and variable-minlink flaps (incl. warmboot/coldboot), cross flaps
+# and mismatched minlink. Every device value is a placeholder until the LAG
+# testbed is decided (see the LAG section of ac100t_constants.py); the IXIA
+# address ranges below are documentation ranges.
+AC100T_LAG_TEST_CONFIG = test_config_for_portchannel(
+    test_config_name="AC100T_LAG_TEST_CONFIG",
+    ixia_chassis_ip=ac100t.AC100T_LAG_IXIA_CHASSIS_IP,
+    uplink_device=ac100t.AC100T_LAG_UPLINK_DEVICE_NAME,
+    uplink_role=ac100t.AC100T_LAG_UPLINK_ROLE,
+    uplink_ixia_ports=[
+        IxiaPortSpec(
+            interface=ac100t.AC100T_LAG_UPLINK_IXIA_INTERFACE,
+            chassis_port=ac100t.AC100T_LAG_UPLINK_IXIA_CHASSIS_PORT,
+            v6_session_count=8,
+            v4_session_count=8,
+            bgp_v6_starting_ip="2001:db8:0:1c01::0",
+            bgp_v6_gateway_ip="2001:db8:0:1c01::1",
+            bgp_v4_starting_ip="198.51.100.0",
+            bgp_v4_gateway_ip="198.51.100.1",
+            v6_prefix_count=25000,
+            v6_starting_prefixes="2001:db8:1000::",
+            v4_prefix_count=25000,
+            v4_starting_prefixes="198.18.0.0",
+        )
+    ],
+    downlink_device=ac100t.AC100T_LAG_DOWNLINK_DEVICE_NAME,
+    downlink_role=ac100t.AC100T_LAG_DOWNLINK_ROLE,
+    downlink_ixia_ports=[
+        IxiaPortSpec(
+            interface=ac100t.AC100T_LAG_DOWNLINK_IXIA_INTERFACE,
+            chassis_port=ac100t.AC100T_LAG_DOWNLINK_IXIA_CHASSIS_PORT,
+            v6_session_count=8,
+            v4_session_count=8,
+            bgp_v6_starting_ip="2001:db8:0:1c02::0",
+            bgp_v6_gateway_ip="2001:db8:0:1c02::1",
+            bgp_v4_starting_ip="198.51.100.128",
+            bgp_v4_gateway_ip="198.51.100.129",
+            v6_prefix_count=5000,
+            v6_starting_prefixes="2001:db8:2000::",
+            v4_prefix_count=5000,
+            v4_starting_prefixes="198.19.0.0",
+        )
+    ],
+    uplink_portchannel_name=ac100t.AC100T_LAG_UPLINK_PORTCHANNEL_NAME,
+    downlink_portchannel_name=ac100t.AC100T_LAG_DOWNLINK_PORTCHANNEL_NAME,
+    uplink_portchannel_links=ac100t.AC100T_LAG_UPLINK_PORTCHANNEL_LINKS,
+    downlink_portchannel_links=ac100t.AC100T_LAG_DOWNLINK_PORTCHANNEL_LINKS,
+)
+
+
+# ===========================================================================
 # Registry
 # ===========================================================================
 # The ONE symbol the central registry (testconfigs/internal/__init__.py and
@@ -738,6 +797,7 @@ AC100T_TEST_CONFIGS = [
     AC100T_DRAIN_TEST_CONFIG,
     AC100T_INTERFACE_FLAP_TEST_CONFIG,
     AC100T_L2_NDP_ARP_HARDENING_TEST_CONFIG,
+    AC100T_LAG_TEST_CONFIG,
     AC100T_FE_QOS_TEST_CONFIG,
     AC100T_PREFIX_PROFILING_CONTIGUOUS_TEST_CONFIG,
     AC100T_PREFIX_PROFILING_HYBRID_TEST_CONFIG,
