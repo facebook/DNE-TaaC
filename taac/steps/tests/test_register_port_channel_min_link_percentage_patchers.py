@@ -67,7 +67,7 @@ class RegisterPortChannelMinLinkPercentagePatchersTest(
             result,
             {"link_percentage": "0.5", "port_channel_name": "po1"},
         )
-        self.assertNotIn("min_link_up_percentage", result)
+        self.assertNotIn("link_up_percentage", result)
 
     def test_build_patcher_args_with_min_link_up_percentage(self):
         result = self.step._build_patcher_args("po1", 0.5, 0.25)
@@ -76,7 +76,7 @@ class RegisterPortChannelMinLinkPercentagePatchersTest(
             {
                 "link_percentage": "0.5",
                 "port_channel_name": "po1",
-                "min_link_up_percentage": "0.25",
+                "link_up_percentage": "0.25",
             },
         )
 
@@ -126,7 +126,7 @@ class RegisterPortChannelMinLinkPercentagePatchersTest(
         expected_args = {
             "link_percentage": "0.5",
             "port_channel_name": "po1",
-            "min_link_up_percentage": "0.25",
+            "link_up_percentage": "0.25",
         }
         self.driver_mock.async_register_python_patcher.assert_awaited_once_with(
             patcher_name=PATCHER_NAME,
@@ -135,6 +135,27 @@ class RegisterPortChannelMinLinkPercentagePatchersTest(
             py_func_name="set_port_channel_min_link_capacity",
             patcher_desc=PATCHER_DESCRIPTION,
         )
+
+    async def test_oss_installs_and_cold_boots_through_the_apply(self):
+        self.driver_mock.async_register_python_patcher = AsyncMock()
+        self.driver_mock.async_apply_patchers = AsyncMock()
+        self.driver_mock.async_create_cold_boot_file = AsyncMock()
+        self.driver_mock.async_restart_service = AsyncMock()
+
+        with patch(
+            "neteng.test_infra.dne.taac.steps.step_definitions."
+            "oss_config_patcher_enabled",
+            return_value=True,
+        ):
+            await (
+                self.step._register_and_apply_port_channel_min_link_percentage_patcher(
+                    self.driver_mock, True, PATCHER_NAME, "po1", 0.5, 0.25
+                )
+            )
+
+        self.driver_mock.async_apply_patchers.assert_awaited_once_with(coldboot=True)
+        self.driver_mock.async_create_cold_boot_file.assert_not_awaited()
+        self.driver_mock.async_restart_service.assert_not_awaited()
 
     async def test_register_and_apply_unregisters_when_register_patcher_false(self):
         self.driver_mock.async_unregister_python_patcher = AsyncMock()

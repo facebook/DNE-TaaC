@@ -35,7 +35,9 @@ from neteng.fboss.platform_config.platform_config.thrift_types import (
     PlatformPortProfileConfigEntry,
 )
 from neteng.fboss.switch_config.thrift_types import (
+    AggregatePort,
     Interface,
+    MinimumCapacity,
     Port,
     PortProfileID,
     PortSpeed,
@@ -716,6 +718,73 @@ class ChangeSpeedTest(TestCase):
                 "change_speed",
                 _speed_args("eth1/1/1", "FOURHUNDREDG", _P400),
             )
+
+
+class SetPortChannelMinLinkCapacityTest(unittest.TestCase):
+    def _config(self) -> AgentConfig:
+        return AgentConfig(
+            sw=SwitchConfig(
+                aggregatePorts=[
+                    AggregatePort(
+                        key=1,
+                        name="Port-Channel1",
+                        minimumCapacity=MinimumCapacity(linkPercentage=0.65),
+                        minimumCapacityToUp=MinimumCapacity(linkPercentage=0.75),
+                    ),
+                    AggregatePort(key=2, name="Port-Channel2"),
+                ]
+            )
+        )
+
+    def test_sets_both_thresholds_on_the_named_port_channel(self) -> None:
+        out = OssPatchApplier().set_port_channel_min_link_capacity(
+            self._config(),
+            "agent",
+            {
+                "port_channel_name": "Port-Channel1",
+                "link_percentage": "0.5",
+                "link_up_percentage": "0.6",
+            },
+        )
+        first, second = out.sw.aggregatePorts
+        self.assertEqual(MinimumCapacity(linkPercentage=0.5), first.minimumCapacity)
+        self.assertEqual(MinimumCapacity(linkPercentage=0.6), first.minimumCapacityToUp)
+        self.assertEqual(self._config().sw.aggregatePorts[1], second)
+
+    def test_without_link_up_percentage_the_up_threshold_is_kept(self) -> None:
+        out = OssPatchApplier().set_port_channel_min_link_capacity(
+            self._config(),
+            "agent",
+            {"port_channel_name": "Port-Channel1", "link_percentage": "0.5"},
+        )
+        self.assertEqual(
+            MinimumCapacity(linkPercentage=0.75),
+            out.sw.aggregatePorts[0].minimumCapacityToUp,
+        )
+
+    def test_bad_arguments_raise(self) -> None:
+        for args, message in (
+            ({"link_percentage": "0.5"}, "needs port_channel_name"),
+            (
+                {"port_channel_name": "Port-Channel1", "link_percentage": "x"},
+                "not a number",
+            ),
+            (
+                {"port_channel_name": "Port-Channel1", "link_percentage": None},
+                "not a number",
+            ),
+            (
+                {"port_channel_name": "Port-Channel9", "link_percentage": "0.5"},
+                "no aggregate port",
+            ),
+        ):
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(PatcherError, message),
+            ):
+                OssPatchApplier().set_port_channel_min_link_capacity(
+                    self._config(), "agent", args
+                )
 
 
 class ChangePortAdminStateTest(unittest.TestCase):

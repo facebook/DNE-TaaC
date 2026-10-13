@@ -46,6 +46,7 @@ from neteng.fboss.agent_config.thrift_types import AgentConfig
 from neteng.fboss.bgp_attr.thrift_types import AddPath
 from neteng.fboss.switch_config.thrift_types import (
     Interface,
+    MinimumCapacity,
     Port,
     PortProfileID,
     PortSpeed,
@@ -82,6 +83,7 @@ PATCHER_CONFIG_TYPES: t.Dict[str, type] = {
     "add_bgp_policy_statement": BgpConfig,
     "add_bgp_policy_match_prefix_to_propagate_routes": BgpConfig,
     "drain_interface": BgpConfig,
+    "set_port_channel_min_link_capacity": AgentConfig,
 }
 
 # Hardware whose /1 and /5 subports share a cage and so constrain each other's
@@ -1176,3 +1178,38 @@ class OssPatchApplier:
             peers=peers,
             drained_interfaces=_merge(config.drained_interfaces, [target]),
         )
+
+    def set_port_channel_min_link_capacity(
+        self, config: AgentConfig, config_name: str, my_args: t.Dict[str, t.Any]
+    ) -> AgentConfig:
+        """COOP's set_port_channel_min_link_capacity: the ``port_channel_name``
+        aggregate port stays up while ``link_percentage`` of its members are up,
+        and with ``link_up_percentage`` (optional) comes up once that many are."""
+        name = my_args.get("port_channel_name")
+        if not name or "link_percentage" not in my_args:
+            raise PatcherError(
+                "set_port_channel_min_link_capacity needs port_channel_name and "
+                "link_percentage"
+            )
+        try:
+            down = float(my_args["link_percentage"])
+            up = (
+                float(my_args["link_up_percentage"])
+                if "link_up_percentage" in my_args
+                else None
+            )
+        except (TypeError, ValueError) as exc:
+            raise PatcherError(
+                f"set_port_channel_min_link_capacity: not a number: {exc}"
+            ) from exc
+        ports = list(config.sw.aggregatePorts)
+        index = next((i for i, a in enumerate(ports) if a.name == name), None)
+        if index is None:
+            raise PatcherError(
+                f"set_port_channel_min_link_capacity: no aggregate port {name}"
+            )
+        port = ports[index](minimumCapacity=MinimumCapacity(linkPercentage=down))
+        if up is not None:
+            port = port(minimumCapacityToUp=MinimumCapacity(linkPercentage=up))
+        ports[index] = port
+        return config(sw=config.sw(aggregatePorts=ports))

@@ -11409,16 +11409,35 @@ class RegisterPatcherStep(StepBase[taac_types.RegisterPatcherInput]):
                 config_name=input.config_name,
                 patcher_name=input.name,
             )
+        await self._install_oss_configs()
+
+    async def _install_oss_configs(self) -> None:
+        """COOP renders a config on register and unregister, and a later step
+        restarts the daemon onto it. The OSS patcher stages configs on the
+        devserver, so install them now; activation is left to that step."""
+        if oss_config_patcher_enabled():
+            # pyre-fixme[16]
+            await self.driver.async_apply_patchers(restart_services=False)
 
     async def cleanUp(
         self, input: taac_types.RegisterPatcherInput, params: t.Dict[str, t.Any]
     ) -> None:
-        if self.registered_patcher_name:
-            await async_unregister_patcher(
-                self.hostname,
-                input.config_name,
-                self.registered_patcher_name,
+        if not self.registered_patcher_name:
+            return
+        if oss_config_patcher_enabled():
+            # The coop_utils helper is Meta-internal.
+            # pyre-fixme[16]
+            await self.driver.async_unregister_python_patcher(
+                config_name=input.config_name,
+                patcher_name=self.registered_patcher_name,
             )
+            await self._install_oss_configs()
+            return
+        await async_unregister_patcher(
+            self.hostname,
+            input.config_name,
+            self.registered_patcher_name,
+        )
 
 
 class AllocateCgroupSliceMemory(StepBase[taac_types.BaseInput]):
@@ -12040,7 +12059,7 @@ class RegisterPortChannelMinLinkPercentagePatchers(StepBase[taac_types.BaseInput
             "port_channel_name": port_channel_name,
         }
         if min_link_up_percentage is not None:
-            patcher_args["min_link_up_percentage"] = str(min_link_up_percentage)
+            patcher_args["link_up_percentage"] = str(min_link_up_percentage)
         return patcher_args
 
     async def _register_and_apply_port_channel_min_link_percentage_patcher(
@@ -12066,6 +12085,12 @@ class RegisterPortChannelMinLinkPercentagePatchers(StepBase[taac_types.BaseInput
             )
         else:
             await driver.async_unregister_python_patcher(patcher_name, AGENT_CONFIG)
+        if oss_config_patcher_enabled():
+            # COOP renders the config at register time, so the restart below
+            # picks it up; the OSS patcher stages it, and the apply installs it
+            # and cold boots the agent.
+            await driver.async_apply_patchers(coldboot=True)
+            return
         await driver.async_create_cold_boot_file()
         await driver.async_restart_service(FbossSystemctlServiceName.AGENT)
         await driver.async_wait_for_agent_configured()
