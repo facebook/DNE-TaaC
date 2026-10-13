@@ -90,10 +90,27 @@ W100S_DUT_MAC = "02:90:fb:76:83:a7"
 # ixia01.netcastle.snc1 -- shared with other users; never clear its sessions.
 W100S_IXIA_CHASSIS_IP = "2401:db00:116:3006:21a:c5ff:fe01:314c"
 
+P001_W400C_TEST_CONFIG_NAME = "QZD1_P001_W400C_HATCH_STABLE_STATE"
+P001_W400C_PLAYBOOK_NAME = "test_p001_w400c_stable_state_acl_traffic_matrix"
+P001_W400C_CHAOS_PLAYBOOK_NAME = "test_p001_w400c_hatch_chaos_soak"
+
+P001_W400C_DUT = "rsw001.p001.f01.qzd1"
+P001_W400C_DUT_MAC = "76:d4:dd:40:0e:b8"
+
 FBOSS10_IPV6_BY_DUT: dict[str, str] = {
     DUT: "2401:db00:e501:f105::",
     W400_DUT: "2401:db00:e501:f104:1::",
     W100S_DUT: "2401:db00:e501:f102:3::",
+    P001_W400C_DUT: "2401:db00:e501:f100::",
+}
+
+# The establish check asserts an exact count.  p001 has two live links to each
+# of fsw002/003/004; its fsw001 links are down.
+BGP_SESSIONS_BY_DUT: dict[str, int] = {
+    DUT: 4,
+    W400_DUT: 4,
+    W100S_DUT: 4,
+    P001_W400C_DUT: 6,
 }
 
 # QZD1 (rsw001) port roles: A restricted, B blocked, C unconstrained.
@@ -116,6 +133,15 @@ W400_PORT_C = "eth1/10/1"
 W100S_PORT_A = "eth1/1/1"  # Restricted, IXIA 6/3
 W100S_PORT_B = "eth1/31/1"  # Blocked, IXIA 10/1
 W100S_PORT_C = "eth1/2/1"  # Unconstrained, IXIA 6/6
+
+# p001 W400C (rsw001.p001) roles, cabled to ixia01.
+P001_W400C_PORT_A = "eth1/17/1"
+P001_W400C_PORT_B = "eth1/18/1"
+P001_W400C_PORT_C = "eth1/25/1"
+# Empty copper cage: carries no BGP adjacency, so the 200G flip leaves all
+# sessions up (rsw001.p006's eth1/9/1 is an uplink and drops one).
+P001_W400C_SPEED_FLIP_PORT = "eth1/19/1"
+P001_W400C_UNRELATED_LINK_DRAIN_PORTS = ("eth1/3/1", "eth1/5/1")
 
 # --------------------------------------------------------------------------
 # Chaos-soak wiring (overnight warmboot x policy-transition overlap campaign)
@@ -183,9 +209,54 @@ W400C_CHAOS_PORTS = ChaosPorts(
     unconstrained=("eth1/32/1", "eth1/33/1"),
 )
 
+# Also verified empty cages on rsw001.p001.
+P001_W400C_CHAOS_PORTS = ChaosPorts(
+    restricted=("eth1/30/1", "eth1/31/1"),
+    unconstrained=("eth1/32/1", "eth1/33/1"),
+)
+
 # fsw004 on both pods is chronically unstable (restart loop; links flap on their
 # own).  Its peers must not be allowed to fail the BGP snapshot check.
 BGP_PEER_PREFIXES_TO_IGNORE = ["2401:db00:e50e:1104::", "2401:db00:e50e:1004::"]
+
+# Retained from the W400/W400C exploratory runs because their observed
+# forwarding differs from the V4 ACL intent. Each tuple is
+# (name, extension bytes, actual TCP flags, injected extension byte, blocked).
+W400_ADVERSARIAL_TCP_PROBES = [
+    ("EXTHDR_DESTOPT64B_0x10_ACK", 64, 0x10, None, False),
+    ("EXTHDR_DESTOPT64B_0x12_SYN_ACK", 64, 0x12, None, False),
+    ("EXTHDR_FAKEFLAG64B_ACTUAL_ACK_FAKE_SYN", 64, 0x10, 0x02, False),
+    ("EXTHDR_FAKEFLAG128B_ACTUAL_ACK_FAKE_SYN", 128, 0x10, 0x02, False),
+    ("EXTHDR_DESTOPT72B_0x10_ACK", 72, 0x10, None, False),
+    ("EXTHDR_DESTOPT72B_0x12_SYN_ACK", 72, 0x12, None, False),
+    ("EXTHDR_DESTOPT80B_0x10_ACK", 80, 0x10, None, False),
+    ("EXTHDR_DESTOPT80B_0x12_SYN_ACK", 80, 0x12, None, False),
+    ("EXTHDR_DESTOPT120B_0x10_ACK", 120, 0x10, None, False),
+    ("EXTHDR_DESTOPT120B_0x12_SYN_ACK", 120, 0x12, None, False),
+    ("EXTHDR_DESTOPT128B_0x10_ACK", 128, 0x10, None, False),
+    ("EXTHDR_DESTOPT128B_0x12_SYN_ACK", 128, 0x12, None, False),
+]
+
+W400C_ADVERSARIAL_TCP_PROBES = [
+    ("EXTHDR_DESTOPT40B_0x02_SYN", 40, 0x02, None, True),
+    ("EXTHDR_FAKEFLAG64B_ACTUAL_ACK_FAKE_SYN", 64, 0x10, 0x02, False),
+    ("EXTHDR_FAKEFLAG64B_ACTUAL_SYN_FAKE_ACK", 64, 0x02, 0x10, True),
+    ("EXTHDR_FAKEFLAG64B_ACTUAL_SYN_FAKE_RST", 64, 0x02, 0x04, True),
+    ("EXTHDR_FAKEFLAG128B_ACTUAL_ACK_FAKE_SYN", 128, 0x10, 0x02, False),
+    ("EXTHDR_FAKEFLAG128B_ACTUAL_SYN_FAKE_ACK", 128, 0x02, 0x10, True),
+    ("EXTHDR_FAKEFLAG128B_ACTUAL_SYN_FAKE_RST", 128, 0x02, 0x04, True),
+]
+
+TCP_FLAG_FIELDS = {
+    0x01: "FIN",
+    0x02: "SYN",
+    0x04: "RST",
+    0x08: "PSH",
+    0x10: "ACK",
+    0x20: "URG",
+    0x40: "ECN-Echo",
+    0x80: "CWR",
+}
 
 
 def _traffic_items(port_a, port_b, port_c):
@@ -419,7 +490,7 @@ SPLIT_AGENT_CRITICAL_SERVICES = [
 ]
 # DUTs running fboss_sw_agent + fboss_hw_agent@0 (rsw004 also keeps a
 # wedge_agent wrapper unit, but the agents themselves are split).
-SPLIT_AGENT_DUTS = frozenset({W400C_DUT, W100S_DUT})
+SPLIT_AGENT_DUTS = frozenset({W400C_DUT, W100S_DUT, P001_W400C_DUT})
 MONOLITHIC_AGENT_CRITICAL_SERVICES = [
     "wedge_agent",
     "bgpd",
@@ -637,6 +708,133 @@ def _raw_tcp_syn_headers(
     ]
 
 
+def _destination_options_header_hex(extension_bytes, injected_byte=None):
+    data = bytearray.fromhex(
+        "06"
+        + f"{extension_bytes // 8 - 1:02x}"
+        + "1e"
+        + f"{extension_bytes - 4:02x}"
+        + "00" * (extension_bytes - 4)
+    )
+    if injected_byte is not None:
+        data[13] = injected_byte
+    return data.hex()
+
+
+def _raw_tcp_extension_headers(
+    destination_port,
+    source_port,
+    dut_mac,
+    extension_bytes,
+    tcp_flags,
+    injected_byte=None,
+):
+    headers = _raw_tcp_syn_headers(
+        destination_port=destination_port,
+        source_port=source_port,
+        dut_mac=dut_mac,
+    )[:-1]
+    return headers + [
+        taac_thrift.PacketHeader(
+            query=ixia_thrift.Query(
+                regex="^ipv6$",
+                query_type=ixia_thrift.QueryType.STACK_TYPE_ID,
+            ),
+            fields=[
+                taac_thrift.Field(
+                    query=ixia_thrift.Query(regex="Next Header"),
+                    attrs_json=json.dumps(
+                        {
+                            "Auto": False,
+                            "ValueType": "singleValue",
+                            "SingleValue": 60,
+                        }
+                    ),
+                )
+            ],
+        ),
+        taac_thrift.PacketHeader(
+            query=ixia_thrift.Query(
+                regex="^custom$",
+                query_type=ixia_thrift.QueryType.STACK_TYPE_ID,
+            ),
+            append_to_query=ixia_thrift.Query(
+                regex="^ipv6$",
+                query_type=ixia_thrift.QueryType.STACK_TYPE_ID,
+            ),
+            fields=[
+                taac_thrift.Field(
+                    query=ixia_thrift.Query(regex="^Length$"),
+                    attrs_json=json.dumps(
+                        {
+                            "Auto": False,
+                            "ValueType": "singleValue",
+                            "SingleValue": extension_bytes * 8,
+                        }
+                    ),
+                ),
+                taac_thrift.Field(
+                    query=ixia_thrift.Query(regex="^Data$"),
+                    attrs_json=json.dumps(
+                        {
+                            "Auto": False,
+                            "ValueType": "singleValue",
+                            "SingleValue": _destination_options_header_hex(
+                                extension_bytes, injected_byte
+                            ),
+                        }
+                    ),
+                ),
+            ],
+        ),
+        taac_thrift.PacketHeader(
+            query=ixia_thrift.Query(
+                regex="^tcp$",
+                query_type=ixia_thrift.QueryType.STACK_TYPE_ID,
+            ),
+            append_to_query=ixia_thrift.Query(
+                regex="^custom$",
+                query_type=ixia_thrift.QueryType.STACK_TYPE_ID,
+            ),
+            fields=[
+                taac_thrift.Field(
+                    query=ixia_thrift.Query(regex="TCP-Source-Port"),
+                    attrs_json=json.dumps(
+                        {
+                            "Auto": False,
+                            "ValueType": "singleValue",
+                            "SingleValue": source_port,
+                        }
+                    ),
+                ),
+                taac_thrift.Field(
+                    query=ixia_thrift.Query(regex="TCP-Dest-Port"),
+                    attrs_json=json.dumps(
+                        {
+                            "Auto": False,
+                            "ValueType": "singleValue",
+                            "SingleValue": destination_port,
+                        }
+                    ),
+                ),
+                *[
+                    taac_thrift.Field(
+                        query=ixia_thrift.Query(regex=f"^{field_name}$"),
+                        attrs_json=json.dumps(
+                            {
+                                "Auto": False,
+                                "ValueType": "singleValue",
+                                "SingleValue": int(bool(tcp_flags & bit)),
+                            }
+                        ),
+                    )
+                    for bit, field_name in TCP_FLAG_FIELDS.items()
+                ],
+            ],
+        ),
+    ]
+
+
 def _raw_udp_headers(
     destination_port,
     source_port,
@@ -830,7 +1028,7 @@ def _stable_check_id(prefix, values):
     return f"{prefix}_{summary[:48]}_{digest}"
 
 
-def _unclean_exit_check(dut=W400C_DUT, exclude_services=None):
+def _unclean_exit_check(dut, exclude_services=None):
     excluded = set(exclude_services or [])
     critical_services = (
         SPLIT_AGENT_CRITICAL_SERVICES
@@ -912,10 +1110,12 @@ def _access_policy_hardware_check_step(
 
 
 def _bgp_established_check(
-    restarted=False, expected_sessions=4, max_session_uptime_sec=600
+    dut, restarted=False, expected_sessions=None, max_session_uptime_sec=600
 ):
     return create_bgp_session_establish_check(
-        expected_established_sessions=expected_sessions,
+        expected_established_sessions=(
+            BGP_SESSIONS_BY_DUT[dut] if expected_sessions is None else expected_sessions
+        ),
         max_session_uptime_sec=max_session_uptime_sec if restarted else None,
         retry_count=12,
         retry_delay_seconds=10,
@@ -926,14 +1126,15 @@ def _bgp_established_check(
 def _common_postchecks(
     *,
     traffic_check,
-    dut=W400C_DUT,
+    dut,
     restarted=False,
-    expected_bgp_sessions=4,
+    expected_bgp_sessions=None,
     max_session_uptime_sec=600,
 ):
     return [
         traffic_check,
         _bgp_established_check(
+            dut,
             restarted=restarted,
             expected_sessions=expected_bgp_sessions,
             max_session_uptime_sec=max_session_uptime_sec,
@@ -951,7 +1152,7 @@ def _snapshot_checks(dut, restarted=False):
             assert_reconvergence=True,
             max_convergence_sec=120,
             convergence_service=(
-                "fboss_sw_agent" if dut == W400C_DUT else "wedge_agent"
+                "fboss_sw_agent" if dut in SPLIT_AGENT_DUTS else "wedge_agent"
             ),
             reconvergence_hosts=[dut],
         )
@@ -1034,8 +1235,8 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
             description="Transition R from Unconstrained to Restricted and validate forwarding and control-plane stability.",
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
-            postchecks=_common_postchecks(traffic_check=restricted_traffic),
+            prechecks=[_bgp_established_check(dut)],
+            postchecks=_common_postchecks(dut=dut, traffic_check=restricted_traffic),
             snapshot_checks=_snapshot_checks(dut),
             cleanup_steps=cleanup_steps,
             stages=[
@@ -1061,8 +1262,8 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
             description="Validate Restricted traffic mid-test, transition R to Unconstrained, and validate all R-U traffic lossless.",
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
-            postchecks=_common_postchecks(traffic_check=unconstrained_traffic),
+            prechecks=[_bgp_established_check(dut)],
+            postchecks=_common_postchecks(dut=dut, traffic_check=unconstrained_traffic),
             snapshot_checks=_snapshot_checks(dut),
             cleanup_steps=cleanup_steps,
             stages=[
@@ -1102,8 +1303,8 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
             ),
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
-            postchecks=_common_postchecks(traffic_check=restricted_traffic),
+            prechecks=[_bgp_established_check(dut)],
+            postchecks=_common_postchecks(dut=dut, traffic_check=restricted_traffic),
             snapshot_checks=_snapshot_checks(dut),
             cleanup_steps=cleanup_steps,
             stages=[
@@ -1133,7 +1334,7 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
                             device_regexes=[dut],
                         ),
                         create_validation_step(
-                            point_in_time_checks=[_bgp_established_check()],
+                            point_in_time_checks=[_bgp_established_check(dut)],
                             description=(
                                 "Mid-test: validate BGP remains stable while R is "
                                 "Blocked"
@@ -1169,8 +1370,8 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
             ),
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
-            postchecks=_common_postchecks(traffic_check=unconstrained_traffic),
+            prechecks=[_bgp_established_check(dut)],
+            postchecks=_common_postchecks(dut=dut, traffic_check=unconstrained_traffic),
             snapshot_checks=_snapshot_checks(dut),
             cleanup_steps=cleanup_steps,
             stages=[
@@ -1196,7 +1397,7 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
                             device_regexes=[dut],
                         ),
                         create_validation_step(
-                            point_in_time_checks=[_bgp_established_check()],
+                            point_in_time_checks=[_bgp_established_check(dut)],
                             description=(
                                 "Mid-test: validate BGP remains stable while R is "
                                 "Blocked"
@@ -1228,9 +1429,9 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
             description="Transition R to Restricted, warmboot Agent, and validate policy stickiness.",
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
+            prechecks=[_bgp_established_check(dut)],
             postchecks=_common_postchecks(
-                traffic_check=restricted_traffic, restarted=True
+                dut=dut, traffic_check=restricted_traffic, restarted=True
             ),
             snapshot_checks=_snapshot_checks(dut, restarted=True),
             cleanup_steps=cleanup_steps,
@@ -1272,8 +1473,9 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
             ),
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
+            prechecks=[_bgp_established_check(dut)],
             postchecks=_common_postchecks(
+                dut=dut,
                 traffic_check=restricted_traffic,
                 restarted=True,
                 max_session_uptime_sec=600,
@@ -1344,8 +1546,9 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
             ),
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
+            prechecks=[_bgp_established_check(dut)],
             postchecks=_common_postchecks(
+                dut=dut,
                 traffic_check=restricted_traffic,
                 restarted=True,
                 max_session_uptime_sec=600,
@@ -1410,9 +1613,9 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
             description="Transition R to Unconstrained, warmboot Agent, and validate policy removal stickiness.",
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
+            prechecks=[_bgp_established_check(dut)],
             postchecks=_common_postchecks(
-                traffic_check=unconstrained_traffic, restarted=True
+                dut=dut, traffic_check=unconstrained_traffic, restarted=True
             ),
             snapshot_checks=_snapshot_checks(dut, restarted=True),
             cleanup_steps=cleanup_steps,
@@ -1466,9 +1669,9 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
             ),
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
+            prechecks=[_bgp_established_check(dut)],
             postchecks=_common_postchecks(
-                traffic_check=unconstrained_traffic, restarted=True
+                dut=dut, traffic_check=unconstrained_traffic, restarted=True
             ),
             snapshot_checks=_snapshot_checks(dut, restarted=True),
             cleanup_steps=cleanup_steps,
@@ -1535,9 +1738,9 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
             ),
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
+            prechecks=[_bgp_established_check(dut)],
             postchecks=_common_postchecks(
-                traffic_check=restricted_traffic, restarted=True
+                dut=dut, traffic_check=restricted_traffic, restarted=True
             ),
             snapshot_checks=_snapshot_checks(dut, restarted=True),
             cleanup_steps=cleanup_steps,
@@ -1604,10 +1807,10 @@ def _transition_playbooks(dut, port_a, port_b, port_c):
             ),
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
+            prechecks=[_bgp_established_check(dut)],
             postchecks=[
                 restricted_traffic,
-                _bgp_established_check(restarted=True),
+                _bgp_established_check(dut, restarted=True),
                 _unclean_exit_check(
                     dut,
                     exclude_services=[
@@ -1749,7 +1952,7 @@ def _restricted_port_flap_playbooks(dut, port_a, port_b, port_c):
                 start_traffic=False,
             ),
             create_validation_step(
-                point_in_time_checks=[_bgp_established_check()],
+                point_in_time_checks=[_bgp_established_check(dut)],
                 stage=taac_thrift.ValidationStage.PRE_TEST,
                 description="Validate four-session BGP baseline",
                 start_traffic=False,
@@ -1823,7 +2026,7 @@ def _restricted_port_flap_playbooks(dut, port_a, port_b, port_c):
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
             prechecks=[],
-            postchecks=_common_postchecks(traffic_check=restricted_traffic),
+            postchecks=_common_postchecks(dut=dut, traffic_check=restricted_traffic),
             snapshot_checks=_snapshot_checks(dut),
             cleanup_steps=cleanup_steps,
             stages=[
@@ -1865,7 +2068,7 @@ def _restricted_port_flap_playbooks(dut, port_a, port_b, port_c):
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
             prechecks=[],
-            postchecks=_common_postchecks(traffic_check=restricted_traffic),
+            postchecks=_common_postchecks(dut=dut, traffic_check=restricted_traffic),
             snapshot_checks=_snapshot_checks(dut),
             cleanup_steps=cleanup_steps,
             stages=[
@@ -1897,6 +2100,7 @@ def _restricted_port_flap_playbooks(dut, port_a, port_b, port_c):
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
             prechecks=[],
             postchecks=_common_postchecks(
+                dut=dut,
                 traffic_check=restricted_traffic,
                 restarted=True,
                 max_session_uptime_sec=1800,
@@ -1973,8 +2177,15 @@ def _restricted_port_flap_playbooks(dut, port_a, port_b, port_c):
     ]
 
 
-def _speed_flip_playbooks(dut, port_a, port_b, port_c, speed_flip_port):
-    """Validate access-policy programming across a non-IXIA port speed flip."""
+def _speed_flip_playbooks(
+    dut, port_a, port_b, port_c, speed_flip_port, bgp_sessions_lost
+):
+    """Validate access-policy programming across a non-IXIA port speed flip.
+
+    Args:
+        bgp_sessions_lost: BGP adjacencies carried by `speed_flip_port`, which
+            stay down while it runs at 200G.
+    """
     all_unconstrained = {
         port_a: "UNCONSTRAINED",
         port_b: "UNCONSTRAINED",
@@ -2128,13 +2339,14 @@ def _speed_flip_playbooks(dut, port_a, port_b, port_c, speed_flip_port):
             ),
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
+            prechecks=[_bgp_established_check(dut)],
             postchecks=_common_postchecks(
+                dut=dut,
                 traffic_check=restricted_traffic,
                 restarted=True,
-                expected_bgp_sessions=3,
+                expected_bgp_sessions=BGP_SESSIONS_BY_DUT[dut] - bgp_sessions_lost,
             ),
-            # The 100G -> 200G speed change intentionally removes one BGP
+            # The 100G -> 200G speed change can remove the flip port's BGP
             # adjacency. Core-dump comparison remains valid, but a BGP
             # before/after identity comparison does not.
             snapshot_checks=[create_core_dumps_snapshot_check()],
@@ -2186,14 +2398,14 @@ def _speed_flip_playbooks(dut, port_a, port_b, port_c, speed_flip_port):
             ),
             device_regexes=[dut],
             traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-            prechecks=[_bgp_established_check()],
+            prechecks=[_bgp_established_check(dut)],
             postchecks=_common_postchecks(
-                traffic_check=restricted_traffic, restarted=True
+                dut=dut, traffic_check=restricted_traffic, restarted=True
             ),
             # The setup intentionally transitions the link 100G -> 200G before
             # restoring it to 100G, so original BGP-session identity is not a
-            # valid lifecycle invariant. The postcheck still requires all four
-            # sessions to recover after the final warmboot.
+            # valid lifecycle invariant. The postcheck still requires every
+            # session to recover after the final warmboot.
             snapshot_checks=[create_core_dumps_snapshot_check()],
             cleanup_steps=restore_speed_and_policy_steps(),
             stages=[
@@ -2278,8 +2490,8 @@ def _link_down_policy_transition_playbook(dut, port_a, port_b, port_c):
         ),
         device_regexes=[dut],
         traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-        prechecks=[_bgp_established_check()],
-        postchecks=_common_postchecks(traffic_check=restricted_traffic),
+        prechecks=[_bgp_established_check(dut)],
+        postchecks=_common_postchecks(dut=dut, traffic_check=restricted_traffic),
         snapshot_checks=_snapshot_checks(dut),
         cleanup_steps=[
             create_interface_flap_step(
@@ -3020,7 +3232,7 @@ def _unrelated_link_drain_playbook(
     def stable_state_checks(*, restarted=False):
         return [
             restricted_traffic,
-            _bgp_established_check(restarted=restarted),
+            _bgp_established_check(dut, restarted=restarted),
             _unclean_exit_check(dut),
             create_device_core_dumps_check(),
         ]
@@ -3034,7 +3246,7 @@ def _unrelated_link_drain_playbook(
         ),
         device_regexes=[dut],
         traffic_items_to_start=R_U_DATA_PLANE_TRAFFIC_ITEMS,
-        prechecks=[_bgp_established_check()],
+        prechecks=[_bgp_established_check(dut)],
         postchecks=stable_state_checks(),
         # A hard interface drain must not restart BGP. Compare cores and retain
         # the original session-uptime baseline across both drain transitions.
@@ -3187,7 +3399,7 @@ def _cpu_stress_playbooks(dut, port_a, port_b, port_c):
                 start_traffic=False,
             ),
             create_validation_step(
-                point_in_time_checks=[_bgp_established_check()],
+                point_in_time_checks=[_bgp_established_check(dut)],
                 stage=taac_thrift.ValidationStage.PRE_TEST,
                 description="Validate BGP baseline before CPU stress",
                 start_traffic=False,
@@ -3294,7 +3506,7 @@ def _cpu_stress_playbooks(dut, port_a, port_b, port_c):
                     if expects_bgp_flap
                     else [
                         tx_rate_check,
-                        _bgp_established_check(),
+                        _bgp_established_check(dut),
                         _unclean_exit_check(dut),
                         create_device_core_dumps_check(),
                         *(
@@ -3339,6 +3551,58 @@ def _cpu_stress_playbooks(dut, port_a, port_b, port_c):
     return playbooks
 
 
+def _adversarial_tcp_extension_playbook(
+    dut, port_a, port_b, port_c, adversarial_tcp_probes
+):
+    allowed = [probe[0] for probe in adversarial_tcp_probes if not probe[4]]
+    blocked = [probe[0] for probe in adversarial_tcp_probes if probe[4]]
+    return create_access_policy_playbook(
+        name="test_access_policy_adversarial_tcp_extension_headers",
+        description=(
+            "Assert intended V4 ACL behavior for the retained IPv6 extension-"
+            "header probes that exposed platform forwarding mismatches."
+        ),
+        device_regexes=[dut],
+        traffic_items_to_start=[probe[0] for probe in adversarial_tcp_probes],
+        prechecks=[_bgp_established_check(dut)],
+        postchecks=_common_postchecks(
+            dut=dut,
+            traffic_check=_traffic_loss_check(allowed, blocked),
+        ),
+        snapshot_checks=_snapshot_checks(dut),
+        cleanup_steps=_policy_cleanup_steps(dut, port_a, port_b, port_c),
+        stages=[
+            create_steps_stage(
+                steps=[
+                    _set_access_policy_step(
+                        dut,
+                        {
+                            port_a: "UNCONSTRAINED",
+                            port_b: "UNCONSTRAINED",
+                            port_c: "UNCONSTRAINED",
+                        },
+                        "Prepare all IXIA-facing ports as Unconstrained",
+                    ),
+                    _set_access_policy_step(
+                        dut,
+                        {port_a: "RESTRICTED"},
+                        "Apply Restricted policy to the adversarial probe ingress",
+                    ),
+                    create_longevity_step(
+                        duration=30,
+                        description="Measure the adversarial TCP extension probes",
+                    ),
+                    _access_policy_hardware_check_step(
+                        dut,
+                        {port_a: "restricted"},
+                        "Validate Restricted Agent and hardware state",
+                    ),
+                ]
+            )
+        ],
+    )
+
+
 def _build_test_config(
     name,
     dut,
@@ -3352,6 +3616,10 @@ def _build_test_config(
     chaos_ports=None,
     chaos_playbook_name=None,
     is_derive_ixia_src_mac_address_dynamic=False,
+    bgp_peer_prefixes_to_ignore=(),
+    speed_flip_port=None,
+    speed_flip_bgp_sessions_lost=0,
+    unrelated_link_drain_ports=(),
 ):
     """Assemble one stable-state access-policy TestConfig.
 
@@ -3364,24 +3632,25 @@ def _build_test_config(
             MAC after IXIA setup. Needed where the DUT drops RAW frames whose
             source MAC was not learned on the ingress port. Off by default so
             other configs keep their packet-header source MACs.
+        speed_flip_port, speed_flip_bgp_sessions_lost, unrelated_link_drain_ports:
+            used only by the W400C-only disruption playbooks.
     """
     port_a, port_b, port_c = ports
     fboss10_ipv6 = FBOSS10_IPV6_BY_DUT[dut]
+    adversarial_tcp_probes = {
+        "W400": W400_ADVERSARIAL_TCP_PROBES,
+        "W400C": W400C_ADVERSARIAL_TCP_PROBES,
+    }.get(platform, [])
     traffic_items = _traffic_items(port_a, port_b, port_c)
     raw_tcp_syn_items = _raw_tcp_syn_traffic_items(port_a, port_b, port_c)
     udp_items = _udp_traffic_items(port_a, port_b, port_c)
     arp_items = _disabled_arp_traffic_items(port_a, port_b, port_c)
-    blocked = (
-        BLOCKED_TCP_TRAFFIC_ITEMS
-        + [item[0] for item in udp_items]
-        + [item[0] for item in raw_tcp_syn_items]
-    )
     traffic_to_start = (
         [item[0] for item in traffic_items]
         + [item[0] for item in udp_items]
         + [item[0] for item in raw_tcp_syn_items]
     )
-    is_w400c = dut == W400C_DUT
+    is_w400c = platform == "W400C"
     stable_allowed = R_U_DATA_PLANE_TRAFFIC_ITEMS
     stable_blocked = []
     return taac_thrift.TestConfig(
@@ -3464,6 +3733,32 @@ def _build_test_config(
                 dut,
             )
             for item_name, source, destination, source_tcp_port in raw_tcp_syn_items
+        ]
+        + [
+            _raw_traffic_item(
+                item_name,
+                port_a,
+                port_c,
+                _raw_tcp_extension_headers(
+                    destination_port=22,
+                    source_port=41000 + index,
+                    dut_mac=dut_mac,
+                    extension_bytes=extension_bytes,
+                    tcp_flags=tcp_flags,
+                    injected_byte=injected_byte,
+                ),
+                1,
+                False,
+                400,
+                dut,
+            )
+            for index, (
+                item_name,
+                extension_bytes,
+                tcp_flags,
+                injected_byte,
+                _blocked,
+            ) in enumerate(adversarial_tcp_probes)
         ]
         + [
             _raw_traffic_item(
@@ -3591,7 +3886,7 @@ def _build_test_config(
                         _chaos_stop_stage(dut),
                     ],
                     prechecks=[
-                        _unclean_exit_check(),
+                        _unclean_exit_check(dut),
                         # NOT the stable-state 3/14 split -- see
                         # CHAOS_*_TRAFFIC_ITEMS: the soak holds Port B
                         # Unconstrained, so the static expectation is 5/12.
@@ -3600,7 +3895,7 @@ def _build_test_config(
                         ),
                     ],
                     postchecks=[
-                        _unclean_exit_check(),
+                        _unclean_exit_check(dut),
                         _traffic_loss_check(
                             CHAOS_ALLOWED_TRAFFIC_ITEMS, CHAOS_BLOCKED_TRAFFIC_ITEMS
                         ),
@@ -3613,7 +3908,7 @@ def _build_test_config(
                         # Flap/uptime signals do not apply either -- the daemon
                         # restarts the agent ~190 times.
                         create_bgp_session_snapshot_check(
-                            parent_prefixes_to_ignore=BGP_PEER_PREFIXES_TO_IGNORE,
+                            parent_prefixes_to_ignore=list(bgp_peer_prefixes_to_ignore),
                             skip_flap_check=True,
                             skip_uptime_check=True,
                         ),
@@ -3624,9 +3919,29 @@ def _build_test_config(
             else []
         )
         + (
+            [
+                _adversarial_tcp_extension_playbook(
+                    dut,
+                    port_a,
+                    port_b,
+                    port_c,
+                    adversarial_tcp_probes,
+                )
+            ]
+            if adversarial_tcp_probes
+            else []
+        )
+        + (
             _transition_playbooks(dut, port_a, port_b, port_c)
             + _restricted_port_flap_playbooks(dut, port_a, port_b, port_c)
-            + _speed_flip_playbooks(dut, port_a, port_b, port_c, SPEED_FLIP_PORT)
+            + _speed_flip_playbooks(
+                dut,
+                port_a,
+                port_b,
+                port_c,
+                speed_flip_port,
+                speed_flip_bgp_sessions_lost,
+            )
             + [_link_down_policy_transition_playbook(dut, port_a, port_b, port_c)]
             + [
                 _unrelated_link_drain_playbook(
@@ -3634,7 +3949,7 @@ def _build_test_config(
                     port_a,
                     port_b,
                     port_c,
-                    UNRELATED_LINK_DRAIN_PORTS,
+                    unrelated_link_drain_ports,
                 )
             ]
             + _cpu_stress_playbooks(dut, port_a, port_b, port_c)
@@ -3661,6 +3976,10 @@ test_config = _build_test_config(
     chaos_ports=W400C_CHAOS_PORTS,
     chaos_playbook_name=CHAOS_PLAYBOOK_NAME,
     is_derive_ixia_src_mac_address_dynamic=True,
+    bgp_peer_prefixes_to_ignore=BGP_PEER_PREFIXES_TO_IGNORE,
+    speed_flip_port=SPEED_FLIP_PORT,
+    speed_flip_bgp_sessions_lost=1,
+    unrelated_link_drain_ports=UNRELATED_LINK_DRAIN_PORTS,
 )
 
 w400_test_config = _build_test_config(
@@ -3681,6 +4000,29 @@ w400_test_config = _build_test_config(
     platform="W400",
     chaos_ports=W400_CHAOS_PORTS,
     chaos_playbook_name=W400_CHAOS_PLAYBOOK_NAME,
+    bgp_peer_prefixes_to_ignore=BGP_PEER_PREFIXES_TO_IGNORE,
+)
+
+p001_w400c_test_config = _build_test_config(
+    name=P001_W400C_TEST_CONFIG_NAME,
+    dut=P001_W400C_DUT,
+    dut_mac=P001_W400C_DUT_MAC,
+    chassis_ip=W100S_IXIA_CHASSIS_IP,
+    ports=(P001_W400C_PORT_A, P001_W400C_PORT_B, P001_W400C_PORT_C),
+    ixia_ports=("11/8", "12/6", "8/8"),
+    # Like W400, all three IXIA ports share vlan 2000's /64 and gateway.
+    addressing=(
+        ("2401:db00:501c::2", "2401:db00:501c::a", 64),
+        ("2401:db00:501c::3", "2401:db00:501c::a", 64),
+        ("2401:db00:501c::1", "2401:db00:501c::a", 64),
+    ),
+    playbook_name=P001_W400C_PLAYBOOK_NAME,
+    platform="W400C",
+    chaos_ports=P001_W400C_CHAOS_PORTS,
+    chaos_playbook_name=P001_W400C_CHAOS_PLAYBOOK_NAME,
+    is_derive_ixia_src_mac_address_dynamic=True,
+    speed_flip_port=P001_W400C_SPEED_FLIP_PORT,
+    unrelated_link_drain_ports=P001_W400C_UNRELATED_LINK_DRAIN_PORTS,
 )
 
 w100s_test_config = _build_test_config(
