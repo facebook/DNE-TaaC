@@ -12399,11 +12399,12 @@ class SystemRebootStep(StepBase[taac_types.SystemRebootInput]):
             input.trigger == taac_types.SystemRebootTrigger.BMC_POWER_RESET
             and self.is_fboss
         ):
-            wedge_power_reset = f"{_WEDGE_POWER_CMD} reset"
+            # `reset -s` power-cycles the whole chassis; bare `reset` is microserver-only.
+            wedge_power_system_reset = f"{_WEDGE_POWER_CMD} reset -s"
             try:
-                run_bmc_cmd_hwcontrol(self.device.name, wedge_power_reset)
+                run_bmc_cmd_hwcontrol(self.device.name, wedge_power_system_reset)
                 self.logger.info(
-                    f"Successfully initiated the system reboot via the BMC command: {wedge_power_reset}"
+                    f"Successfully initiated the system reboot via the BMC command: {wedge_power_system_reset}"
                 )
             except (
                 EOFError,
@@ -12412,14 +12413,14 @@ class SystemRebootStep(StepBase[taac_types.SystemRebootInput]):
                 RuntimeError,
             ) as e:
                 self.logger.info(
-                    f"BMC command {wedge_power_reset!r} raised {type(e).__name__} "
+                    f"BMC command {wedge_power_system_reset!r} raised {type(e).__name__} "
                     f"(expected post-reboot disconnect): {e}"
                 )
         elif (
             input.trigger == taac_types.SystemRebootTrigger.BMC_MICROSERVER_ONLY_RESET
             and self.is_fboss
         ):
-            wedge_power_microserver_reset = f"{_WEDGE_POWER_CMD} reset -s"
+            wedge_power_microserver_reset = f"{_WEDGE_POWER_CMD} reset"
             try:
                 run_bmc_cmd_hwcontrol(self.device.name, wedge_power_microserver_reset)
                 self.logger.info(
