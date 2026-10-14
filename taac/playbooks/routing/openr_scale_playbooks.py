@@ -10,6 +10,7 @@ contract.
 import typing as t
 
 from taac.health_checks.healthcheck_definitions import (
+    create_core_dumps_snapshot_check,
     create_openr_spark_neighbor_check,
     create_port_channel_expected_state_check,
 )
@@ -17,22 +18,29 @@ from taac.stages.stage_definitions import create_steps_stage
 from taac.steps.step_definitions import (
     create_interface_flap_step,
     create_longevity_step,
+    create_openr_scale_cold_boot_step,
     create_openr_scale_injection_step,
     create_openr_scale_kvstore_state_cleanup_step,
     create_openr_scale_kvstore_state_step,
     create_openr_scale_performance_cleanup_step,
     create_openr_scale_performance_step,
+    create_system_reboot_step,
     create_validation_step,
+)
+from taac.task_definitions import (
+    create_openr_scale_cold_boot_monitor_task,
 )
 from openr.tests.scale.scripts.scale_key_names import (
     bbf_simple_node_names,
     expected_key_set,
 )
 from taac.health_check.health_check import types as hc_types
+from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Playbook
 
 
 __all__ = [
+    "get_openr_scale_dut_cold_boot_playbook",
     "get_openr_scale_kvstore_injection_playbook",
     "get_openr_scale_kvstore_merge_playbook",
     "get_openr_scale_physical_link_flap_playbook",
@@ -554,5 +562,202 @@ def get_openr_scale_physical_link_flap_playbook(
                 phase="link_down",
                 state_key="openr_scale_test_4_performance",
             ),
+        ],
+    )
+
+
+def get_openr_scale_dut_cold_boot_playbook(
+    *,
+    helper_name: str,
+    dut_name: str,
+    dut_inband_address: str,
+    num_spines: int = 64,
+    num_leaves: int = 256,
+    num_control_nodes: int = 0,
+    num_sites: int = 20,
+    ecmp_width: int = 8,
+    prefixes_per_node: int = 11,
+    prefix_seed: int = 20250903,
+    area: str = "0",
+    dut_role: t.Literal["leaf", "spine"] = "leaf",
+    interface: str = "po1910",
+    start_vlan: int = 100,
+    dut_mgmt_addresses: t.Optional[t.List[str]] = None,
+    dut_port: int = 2018,
+    scale_tester_remote_path: str = "/mnt/flash/scale_test_server",
+    scale_tester_log_path: str = "/mnt/flash/openr_scale_dut_cold_boot.log",
+    injector_watchdog_seconds: int = 1800,
+    injector_ready_timeout_seconds: int = 120,
+    stable_seconds: int = 60,
+    state_key: str = "openr_scale_dut_cold_boot",
+    profile: str = "cold_boot_64_256_leaf",
+) -> Playbook:
+    """Reboot only the DUT under a persistent full-fabric Open/R session."""
+
+    injector_jq_var_prefix = "openr_scale_cold_boot"
+    if dut_role == "leaf":
+        synthetic_neighbors = [
+            *(f"spine-{index}" for index in range(num_spines)),
+            *(["eb-site-0"] if num_sites else []),
+        ]
+    else:
+        synthetic_neighbors = [
+            *(f"leaf-{index}" for index in range(num_leaves)),
+            *(f"control-{index}" for index in range(num_control_nodes)),
+        ]
+    num_subinterfaces = len(synthetic_neighbors) - 1
+    if num_subinterfaces <= 0:
+        raise ValueError("cold-boot scale requires at least two synthetic neighbors")
+    if start_vlan <= 0 or start_vlan + num_subinterfaces - 1 > 4094:
+        raise ValueError("cold-boot subinterface VLAN range must be within 1..4094")
+    # Keep the deterministic route probe (spine-0) on the physical LAG so
+    # FibAgent can program its next hop into EOS. Give every remaining fake
+    # neighbor a unique subinterface; concentrating all of them on one Spark
+    # interface can leave one adjacency absent at this scale.
+    scale_interfaces = [
+        interface,
+        *(f"{interface}.{start_vlan + index}" for index in range(num_subinterfaces)),
+    ]
+    common_state = {
+        "dut_name": dut_name,
+        "helper_name": helper_name,
+        "num_spines": num_spines,
+        "num_leaves": num_leaves,
+        "num_control_nodes": num_control_nodes,
+        "num_sites": num_sites,
+        "prefixes_per_node": prefixes_per_node,
+        "prefix_seed": prefix_seed,
+        "dut_role": dut_role,
+        "area": area,
+        "interface": interface,
+        "scale_interfaces": scale_interfaces,
+        "injector_jq_var_prefix": injector_jq_var_prefix,
+        "state_key": state_key,
+        "profile": profile,
+    }
+    dut_neighbor_interfaces = dict(
+        zip(synthetic_neighbors, scale_interfaces, strict=True)
+    )
+    return Playbook(
+        name="openr_scale_dut_cold_boot_playbook",
+        prechecks=[],
+        postchecks=[],
+        # This lab image enables fb-config.service without provisioning its
+        # required fb_config_agent.conf, so FbConfigAgent aborts during every
+        # boot. Keep every other newly created core blocking.
+        snapshot_checks=[
+            create_core_dumps_snapshot_check(core_dumps_to_ignore=["FbConfigAgent"])
+        ],
+        periodic_tasks=[
+            create_openr_scale_cold_boot_monitor_task(
+                device_name=dut_name,
+                profile=profile,
+            )
+        ],
+        stages=[
+            create_steps_stage(
+                stage_id="openr_scale_dut_cold_boot",
+                description=(
+                    f"Cold reboot {dut_name} under a persistent "
+                    f"{num_spines}-spine/{num_leaves}-leaf Open/R fabric"
+                ),
+                steps=[
+                    create_openr_scale_injection_step(
+                        helper_name=helper_name,
+                        dut_name=dut_name,
+                        dut_host=dut_inband_address,
+                        forbidden_dut_hosts=dut_mgmt_addresses,
+                        num_spines=num_spines,
+                        num_leaves=num_leaves,
+                        num_prefixes_per_node=prefixes_per_node,
+                        num_sites=num_sites,
+                        num_super_spines=num_control_nodes,
+                        prefix_seed=prefix_seed,
+                        extra_flags=[
+                            f"--num_pods={ecmp_width}",
+                            "--num_fake_keys_per_node=0",
+                            "--fake_key_version_bump_interval_sec=0",
+                        ],
+                        dut_role=dut_role,
+                        area=area,
+                        dut_port=dut_port,
+                        simulate_neighbors=True,
+                        # Route/FIB correctness is validated below from the DUT's
+                        # Thrift state and the complete EOS RIB. The injector's
+                        # verify flag only sleeps and logs counts, so enabling it
+                        # adds delay without a gate.
+                        verify_routes=False,
+                        interfaces=scale_interfaces,
+                        remote_path=scale_tester_remote_path,
+                        run_duration_sec=injector_watchdog_seconds,
+                        background=True,
+                        background_log_path=scale_tester_log_path,
+                        background_ready_timeout_sec=injector_ready_timeout_seconds,
+                        jq_var_prefix=injector_jq_var_prefix,
+                    ),
+                    create_openr_scale_kvstore_state_step(
+                        dut_name=dut_name,
+                        seeds=[prefix_seed],
+                        num_spines=num_spines,
+                        num_leaves=num_leaves,
+                        num_control_nodes=num_control_nodes,
+                        num_sites=num_sites,
+                        ecmp_width=ecmp_width,
+                        prefixes_per_node=prefixes_per_node,
+                        dut_role=dut_role,
+                        area=area,
+                        dut_neighbor_interfaces=dut_neighbor_interfaces,
+                    ),
+                    create_openr_scale_cold_boot_step(
+                        action="baseline",
+                        **common_state,
+                    ),
+                    create_openr_scale_cold_boot_step(
+                        action="mark_reboot",
+                        **common_state,
+                    ),
+                    create_system_reboot_step(
+                        trigger=taac_types.SystemRebootTrigger.FULL_SYSTEM_REBOOT,
+                        device_regexes=[dut_name],
+                        description=f"Cold reboot only {dut_name}",
+                    ),
+                    create_openr_scale_cold_boot_step(
+                        action="activate",
+                        **common_state,
+                    ),
+                    create_openr_scale_cold_boot_step(
+                        action="recover",
+                        **common_state,
+                    ),
+                    create_longevity_step(
+                        duration=stable_seconds,
+                        start_traffic=False,
+                        description=(
+                            f"Require {stable_seconds}s of stable post-boot "
+                            "Open/R telemetry"
+                        ),
+                    ),
+                    create_openr_scale_kvstore_state_step(
+                        dut_name=dut_name,
+                        seeds=[prefix_seed],
+                        num_spines=num_spines,
+                        num_leaves=num_leaves,
+                        num_control_nodes=num_control_nodes,
+                        num_sites=num_sites,
+                        ecmp_width=ecmp_width,
+                        prefixes_per_node=prefixes_per_node,
+                        dut_role=dut_role,
+                        area=area,
+                        dut_neighbor_interfaces=dut_neighbor_interfaces,
+                    ),
+                    create_openr_scale_cold_boot_step(
+                        action="finalize",
+                        **common_state,
+                    ),
+                ],
+            )
+        ],
+        cleanup_steps=[
+            create_openr_scale_cold_boot_step(action="cleanup", **common_state),
         ],
     )

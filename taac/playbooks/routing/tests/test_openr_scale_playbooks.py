@@ -6,6 +6,7 @@ import typing as t
 import unittest
 
 from taac.playbooks.routing.openr_scale_playbooks import (
+    get_openr_scale_dut_cold_boot_playbook,
     get_openr_scale_kvstore_injection_playbook,
     get_openr_scale_kvstore_merge_playbook,
 )
@@ -13,6 +14,7 @@ from openr.tests.scale.scripts.scale_key_names import (
     bbf_simple_node_names,
     expected_key_set,
 )
+from taac.test_as_a_config import types as taac_types
 
 
 def _step_params(step: object) -> dict[str, t.Any]:
@@ -320,3 +322,51 @@ class OpenRScaleKvStoreMergePlaybookTest(unittest.TestCase):
             ],
             [_params(step) for step in cleanup_steps],
         )
+
+
+class OpenRScaleColdBootPlaybookTest(unittest.TestCase):
+    def test_full_fabric_injection_and_exact_dut_reboot_scope(self) -> None:
+        playbook = get_openr_scale_dut_cold_boot_playbook(
+            helper_name="eb02.lab.ash6",
+            dut_name="eb04.lab.ash6",
+            dut_inband_address="2001:db8::1",
+        )
+        steps = list(playbook.stages[0].steps)
+        injection = _step_params(steps[0])
+        self.assertEqual(64, injection["num_spines"])
+        self.assertEqual(256, injection["num_leaves"])
+        self.assertEqual(20250903, injection["prefix_seed"])
+        self.assertEqual(
+            ["po1910", *(f"po1910.{vlan}" for vlan in range(100, 164))],
+            injection["interfaces"],
+        )
+        self.assertTrue(injection["simulate_neighbors"])
+        self.assertFalse(injection["verify_routes"])
+        self.assertTrue(injection["background"])
+        self.assertEqual(1800, injection["run_duration_sec"])
+        self.assertIn(
+            "--fake_key_version_bump_interval_sec=0", injection["extra_flags"]
+        )
+        semantic = _step_params(steps[1])
+        self.assertEqual(65, len(semantic["dut_neighbor_interfaces"]))
+        self.assertEqual("po1910", semantic["dut_neighbor_interfaces"]["spine-0"])
+        self.assertEqual("po1910.163", semantic["dut_neighbor_interfaces"]["eb-site-0"])
+
+        reboot = steps[4]
+        self.assertEqual(taac_types.StepName.SYSTEM_REBOOT_STEP, reboot.name)
+        self.assertEqual(["eb04.lab.ash6"], list(reboot.device_regexes or ()))
+        reboot_input_json = reboot.input_json
+        assert reboot_input_json is not None
+        reboot_input = json.loads(reboot_input_json)
+        self.assertEqual(
+            int(taac_types.SystemRebootTrigger.FULL_SYSTEM_REBOOT),
+            reboot_input["trigger"],
+        )
+        periodic_tasks = playbook.periodic_tasks
+        assert periodic_tasks is not None
+        self.assertEqual(1, len(periodic_tasks))
+        self.assertEqual(
+            "openr_scale_cold_boot_monitor",
+            periodic_tasks[0].name,
+        )
+        self.assertEqual(1, len(playbook.snapshot_checks or ()))

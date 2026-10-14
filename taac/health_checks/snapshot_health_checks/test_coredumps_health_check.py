@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from neteng.netcastle.logger import ConsoleFileLogger
 from taac.constants import TestDevice
+from taac.health_checks.constants import Snapshot
 from taac.health_checks.snapshot_health_checks.coredumps_health_check import (
     _format_core_dump_details,
     _parse_eos_core_dump_timestamp,
@@ -108,6 +109,45 @@ class TestCoreDumpsHealthCheck(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
         self.assertIn("core", result.message.lower())
+
+    async def test_ignored_process_core_does_not_hide_other_new_cores(self):
+        pre = Snapshot(data={}, timestamp=self.timestamp)
+        post = Snapshot(
+            data={
+                "core.2375.1700000000.FbConfigAgent.gz": 1700000000,
+                "core.999.1700000001.openr.gz": 1700000001,
+            },
+            timestamp=self.timestamp + 100,
+        )
+
+        result = await self.health_check.compare_snapshots(
+            self.device,
+            self.input,
+            {"core_dumps_to_ignore": ["FbConfigAgent"]},
+            pre,
+            post,
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertNotIn("FbConfigAgent", result.message or "")
+        self.assertIn("openr", result.message or "")
+
+    async def test_json_encoded_ignored_process_remains_supported(self):
+        pre = Snapshot(data={}, timestamp=self.timestamp)
+        post = Snapshot(
+            data={"core.2375.1700000000.FbConfigAgent.gz": 1700000000},
+            timestamp=self.timestamp + 100,
+        )
+
+        result = await self.health_check.compare_snapshots(
+            self.device,
+            self.input,
+            {"core_dumps_to_ignore": '["FbConfigAgent"]'},
+            pre,
+            post,
+        )
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
 
 
 class EosCoreDumpSymlinkListingTest(unittest.IsolatedAsyncioTestCase):

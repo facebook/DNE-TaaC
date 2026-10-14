@@ -693,7 +693,9 @@ def create_ixia_packet_loss_check(
     )
 
 
-def create_core_dumps_snapshot_check() -> SnapshotHealthCheck:
+def create_core_dumps_snapshot_check(
+    core_dumps_to_ignore: t.Optional[t.List[str]] = None,
+) -> SnapshotHealthCheck:
     """Create a snapshot check that no new core dumps appeared during the playbook.
 
     Captures the set of core dump files at the pre-snapshot checkpoint and
@@ -701,10 +703,20 @@ def create_core_dumps_snapshot_check() -> SnapshotHealthCheck:
     blanket guard around disruptive stages (warmboot, BGP restart, service
     churn) to catch unexpected daemon crashes.
 
-    Returns:
-        A bare `SnapshotHealthCheck` with `name=CORE_DUMPS_CHECK` (no params).
+    Args:
+        core_dumps_to_ignore: Core filenames or process names whose dumps do not
+            fail this check. All other new cores remain blocking.
     """
-    return SnapshotHealthCheck(name=hc_types.CheckName.CORE_DUMPS_CHECK)
+    return SnapshotHealthCheck(
+        name=hc_types.CheckName.CORE_DUMPS_CHECK,
+        check_params=(
+            Params(
+                json_params=json.dumps({"core_dumps_to_ignore": core_dumps_to_ignore})
+            )
+            if core_dumps_to_ignore is not None
+            else None
+        ),
+    )
 
 
 def _build_threshold_check(

@@ -53,6 +53,13 @@ def _format_core_dump_details(core_dumps: t.Dict[str, int]) -> str:
     return "\n".join(details)
 
 
+def _core_dump_is_ignored(filename: str, ignored: t.Collection[str]) -> bool:
+    if filename in ignored:
+        return True
+    match = EOS_CORE_DUMP_FILENAME_REGEX.match(filename)
+    return bool(match and match.group("exec_name") in ignored)
+
+
 class CoreDumpsHealthCheck(
     AbstractDeviceSnapshotHealthCheck[hc_types.BaseHealthCheckIn],
 ):
@@ -163,13 +170,18 @@ class CoreDumpsHealthCheck(
         pre_snapshot: Snapshot,
         post_snapshot: Snapshot,
     ) -> hc_types.HealthCheckResult:
-        core_dumps_to_ignore = json.loads(
-            check_params.get("core_dumps_to_ignore", "[]")
+        raw_core_dumps_to_ignore = check_params.get("core_dumps_to_ignore", [])
+        # ParameterEvaluator normally decodes json_params before invoking the
+        # check, while a few legacy callers still pass the encoded JSON string.
+        core_dumps_to_ignore = (
+            json.loads(raw_core_dumps_to_ignore)
+            if isinstance(raw_core_dumps_to_ignore, str)
+            else raw_core_dumps_to_ignore
         )
         new_core_dumps = {
             k: post_snapshot.data[k]
             for k in set(post_snapshot.data) - set(pre_snapshot.data)
-            if k not in core_dumps_to_ignore
+            if not _core_dump_is_ignored(k, core_dumps_to_ignore)
         }
         if new_core_dumps:
             details = _format_core_dump_details(new_core_dumps)

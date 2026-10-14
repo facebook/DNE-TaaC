@@ -45,6 +45,9 @@ References
 from taac.testconfigs.routing.openr.openr_portchannel_subif_test_config import (
     OPENR_PORTCHANNEL_SUBIF_SCALE_TEST_CONFIG,
 )
+from taac.testconfigs.routing.openr.openr_scale_dut_cold_boot_test_config import (
+    OPENR_SCALE_DUT_COLD_BOOT,
+)
 from taac.testconfigs.routing.openr.openr_scale_kvstore_merge_test_config import (
     OPENR_SCALE_KVSTORE_MERGE_TEST_CONFIG,
 )
@@ -57,6 +60,7 @@ from taac.testconfigs.routing.openr.openr_scale_test_config import (
 
 __all__ = [
     "OPENR_PORTCHANNEL_SUBIF_SCALE_TEST_CONFIG",
+    "OPENR_SCALE_DUT_COLD_BOOT",
     "OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG",
     "OPENR_SCALE_KVSTORE_MERGE_TEST_CONFIG",
     "OPENR_SCALE_PHYSICAL_LINK_FLAP_TEST_CONFIG",

@@ -25,6 +25,8 @@ from taac.test_as_a_config import types as taac_types
 _MANAGER_INIT_RETRY_COUNT: int = 3
 _MANAGER_INIT_RETRY_BACKOFF_S: float = 2.0
 _LOG_FILE_KEY: str = "log_file"
+_LOG_URL_KEY: str = "log_url"
+_LOG_UPLOAD_ERROR_KEY: str = "log_upload_error"
 
 
 def _make_sync_manager(
@@ -61,11 +63,24 @@ def _create_worker_logger(name: str, shared_state: t.Any) -> ConsoleFileLogger:
     return logger
 
 
-def _get_worker_log_file(logger: ConsoleFileLogger) -> str:
+def _get_worker_log_file(logger: logging.Logger) -> str:
     logger_with_file = t.cast(t.Any, logger)
     if hasattr(logger_with_file, "get_log_file"):
         return logger_with_file.get_log_file()
     return logger_with_file.log_file
+
+
+async def _publish_worker_log(logger: logging.Logger, shared_state: t.Any) -> None:
+    """Publish a process-owned log before its private filesystem disappears."""
+    log_file = _get_worker_log_file(logger)
+    try:
+        shared_state[_LOG_URL_KEY] = await async_everpaste_file(
+            log_file,
+            logger=logger,
+        )
+    except Exception as error:
+        shared_state[_LOG_UPLOAD_ERROR_KEY] = f"{type(error).__name__}: {error}"
+        logger.warning(f"Failed to publish periodic task log {log_file}: {error!r}")
 
 
 def _run_periodic_task_loop(
@@ -158,6 +173,9 @@ def run_periodic_task_process(
             )
         except Exception:
             pass
+    finally:
+        if logger is not None:
+            asyncio.run(_publish_worker_log(logger, shared_state))
 
 
 class PeriodicTaskWorker:
@@ -242,6 +260,15 @@ class PeriodicTaskWorker:
 
     async def teardown(self) -> str:
         """Upload the child or thread worker log to Everpaste."""
+        log_url = self.shared_state.get(_LOG_URL_KEY)
+        if log_url:
+            self._log_everpaste_url = log_url
+            self.main_logger.info(
+                f"Log for periodic task {self.periodic_task.name} was published "
+                f"by its worker: {log_url}"
+            )
+            return log_url
+
         log_file = self.shared_state.get(_LOG_FILE_KEY)
         if not log_file:
             self.main_logger.warning(
@@ -249,7 +276,16 @@ class PeriodicTaskWorker:
             )
             return ""
 
-        everpaste_url = await async_everpaste_file(log_file)
+        try:
+            everpaste_url = await async_everpaste_file(log_file)
+        except Exception as error:
+            upload_error = self.shared_state.get(_LOG_UPLOAD_ERROR_KEY)
+            detail = f"; worker upload failed: {upload_error}" if upload_error else ""
+            self.main_logger.warning(
+                f"Could not publish periodic task log {log_file} from the parent "
+                f"process: {error!r}{detail}"
+            )
+            return ""
         self.main_logger.info(
             f"Log for periodic task {self.periodic_task.name} has been everpasted "
             f"to: {everpaste_url}"

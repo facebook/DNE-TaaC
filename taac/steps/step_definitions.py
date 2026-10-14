@@ -1468,6 +1468,7 @@ def create_openr_scale_injection_step(
     background: bool = False,
     background_log_path: t.Optional[str] = None,
     background_ready_timeout_sec: t.Optional[int] = None,
+    interfaces: t.Optional[t.Sequence[str]] = None,
     description: t.Optional[str] = None,
 ) -> Step:
     """Run the Open/R ``scale_test_server`` injector on ``helper_name``.
@@ -1557,6 +1558,8 @@ def create_openr_scale_injection_step(
         background_log_path: absolute helper path used to capture detached injector
             output. Required when ``background`` is true.
         background_ready_timeout_sec: readiness budget for the detached injector.
+        interfaces: EOS interfaces used by SparkFaker. Required when
+            simulate_neighbors is true.
     """
     if num_spines <= 0 or num_leaves <= 0:
         raise ValueError(
@@ -1580,6 +1583,10 @@ def create_openr_scale_injection_step(
         and background_ready_timeout_sec <= 0
     ):
         raise ValueError("background_ready_timeout_sec must be positive")
+    if simulate_neighbors and not interfaces:
+        raise ValueError("interfaces is required when simulate_neighbors is true")
+    if interfaces is not None and any(not interface for interface in interfaces):
+        raise ValueError("interfaces must contain only nonempty names")
 
     params: t.Dict[str, t.Any] = {
         "custom_step_name": "openr_scale_injection",
@@ -1616,6 +1623,7 @@ def create_openr_scale_injection_step(
         ("areas", areas),
         ("background_log_path", background_log_path),
         ("background_ready_timeout_sec", background_ready_timeout_sec),
+        ("interfaces", list(interfaces) if interfaces is not None else None),
     ):
         if value is not None:
             params[key] = value
@@ -1677,6 +1685,90 @@ def create_openr_scale_performance_cleanup_step(
     )
 
 
+
+def create_openr_scale_cold_boot_step(
+    *,
+    action: t.Literal[
+        "baseline", "mark_reboot", "activate", "recover", "finalize", "cleanup"
+    ],
+    dut_name: str,
+    helper_name: str,
+    num_spines: int,
+    num_leaves: int,
+    num_control_nodes: int,
+    num_sites: int,
+    prefixes_per_node: int,
+    prefix_seed: int,
+    dut_role: t.Literal["leaf", "spine"],
+    area: str,
+    interface: str,
+    scale_interfaces: t.Sequence[str],
+    injector_jq_var_prefix: str = "openr_scale",
+    state_key: str = "openr_scale_dut_cold_boot",
+    profile: str = "cold_boot_64_256_leaf",
+    poll_interval_seconds: float = 1.0,
+    baseline_timeout_seconds: float = 120.0,
+) -> Step:
+    """Create one phase of full-fabric DUT cold-boot validation."""
+    if action not in {
+        "baseline",
+        "mark_reboot",
+        "activate",
+        "recover",
+        "finalize",
+        "cleanup",
+    }:
+        raise ValueError(f"unsupported cold-boot action {action!r}")
+    if not all(
+        (
+            dut_name,
+            helper_name,
+            area,
+            interface,
+            injector_jq_var_prefix,
+            state_key,
+            profile,
+        )
+    ):
+        raise ValueError("cold-boot step names, area, state key, and profile are required")
+    if not scale_interfaces or any(not interface for interface in scale_interfaces):
+        raise ValueError("cold-boot scale interfaces must be nonempty")
+    if dut_role not in {"leaf", "spine"}:
+        raise ValueError(f"unsupported DUT role {dut_role!r}")
+    if min(num_spines, num_leaves, prefixes_per_node, prefix_seed) <= 0:
+        raise ValueError("cold-boot topology counts and prefix seed must be positive")
+    if min(num_control_nodes, num_sites) < 0:
+        raise ValueError("cold-boot topology counts must be nonnegative")
+    if poll_interval_seconds <= 0:
+        raise ValueError("poll_interval_seconds must be positive")
+    if baseline_timeout_seconds <= 0:
+        raise ValueError("baseline_timeout_seconds must be positive")
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "openr_scale_cold_boot",
+            "action": action,
+            "dut_name": dut_name,
+            "helper_name": helper_name,
+            "num_spines": num_spines,
+            "num_leaves": num_leaves,
+            "num_control_nodes": num_control_nodes,
+            "num_sites": num_sites,
+            "prefixes_per_node": prefixes_per_node,
+            "prefix_seed": prefix_seed,
+            "dut_role": dut_role,
+            "area": area,
+            "interface": interface,
+            "scale_interfaces": list(scale_interfaces),
+            "injector_jq_var_prefix": injector_jq_var_prefix,
+            "state_key": state_key,
+            "profile": profile,
+            "poll_interval_seconds": poll_interval_seconds,
+            "baseline_timeout_seconds": baseline_timeout_seconds,
+        },
+        description=f"{action.title()} Open/R full-fabric DUT cold boot on {dut_name}",
+    )
+
+
 def create_openr_scale_kvstore_state_step(  # noqa: C901
     dut_name: str,
     seeds: t.Sequence[int],
@@ -1695,6 +1787,7 @@ def create_openr_scale_kvstore_state_step(  # noqa: C901
     adjacency_batch_size: int = 16,
     prefix_batch_size: int = 500,
     enforce_production_counts: bool = True,
+    dut_neighbor_interfaces: t.Mapping[str, str] | None = None,
 ) -> Step:
     """Create a semantic KvStore validation barrier for one or two injections."""
     expected_seed_count = {"single": 1, "after_a": 1, "after_b": 2}.get(checkpoint)
@@ -1731,6 +1824,19 @@ def create_openr_scale_kvstore_state_step(  # noqa: C901
         raise ValueError("counts and retry_count must be nonnegative")
     if retry_delay_seconds < 0:
         raise ValueError("retry_delay_seconds must be nonnegative")
+    if dut_neighbor_interfaces is not None and (
+        not dut_neighbor_interfaces
+        or any(
+            not isinstance(node, str)
+            or not node
+            or not isinstance(interface, str)
+            or not interface
+            for node, interface in dut_neighbor_interfaces.items()
+        )
+    ):
+        raise ValueError(
+            "dut_neighbor_interfaces must be a nonempty string mapping"
+        )
 
     params: dict[str, t.Any] = {
         "custom_step_name": "openr_scale_kvstore_state",
@@ -1756,6 +1862,8 @@ def create_openr_scale_kvstore_state_step(  # noqa: C901
             state_key=state_key,
             enforce_production_counts=enforce_production_counts,
         )
+    if dut_neighbor_interfaces is not None:
+        params["dut_neighbor_interfaces"] = dict(dut_neighbor_interfaces)
     return create_custom_step(
         params_dict=params,
         description=f"Validate Open/R scale KvStore state {checkpoint} on {dut_name}",

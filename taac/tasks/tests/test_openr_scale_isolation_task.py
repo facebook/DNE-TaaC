@@ -104,6 +104,9 @@ class OpenRScaleIsolationTaskTest(TestCase):
 
         async def stop(command: str) -> str:
             events.append(f"stop:{command}")
+            if "pgrep -f --" in command:
+                pgrep_calls = sum("pgrep -f --" in event for event in events)
+                return f"{command}\n4321\n" if pgrep_calls == 1 else f"{command}\n"
             return ""
 
         async def cleanup(*args: object, **kwargs: object) -> CleanupSummary:
@@ -127,11 +130,10 @@ class OpenRScaleIsolationTaskTest(TestCase):
             await _task().run(dict(_PARAMS))
 
         self.assertEqual("cleanup", events[-1])
-        self.assertIn("pkill -INT -f --", events[0])
-        self.assertIn("status=$?", events[0])
-        self.assertIn('"$status" -ne 1', events[0])
         self.assertIn("[/]mnt/flash/scale_test_server", events[0])
-        self.assertIn("pgrep -f --", events[1])
+        self.assertIn("pgrep -f --", events[0])
+        self.assertEqual("stop:bash kill -KILL 4321", events[1])
+        self.assertEqual(events[0], events[2])
 
     async def test_waits_until_helper_process_is_gone_before_cleanup(self) -> None:
         commands: list[str] = []
@@ -159,9 +161,33 @@ class OpenRScaleIsolationTaskTest(TestCase):
             await _task().run(dict(_PARAMS))
 
         self.assertTrue(cleanup_started.is_set())
-        self.assertIn("pkill -INT -f --", commands[0])
-        self.assertTrue(commands[1].startswith("bash pgrep -f -- "))
-        self.assertEqual(commands[1], commands[2])
+        self.assertTrue(commands[0].startswith("bash pgrep -f -- "))
+        self.assertEqual("bash kill -KILL 4321", commands[1])
+        self.assertEqual(commands[0], commands[2])
+
+    async def test_force_kills_helper_that_ignores_graceful_stop(self) -> None:
+        commands: list[str] = []
+        driver = MagicMock()
+
+        async def shell(command: str) -> str:
+            commands.append(command)
+            if "pgrep -f --" in command:
+                kill_sent = any("kill -KILL 4321" in item for item in commands)
+                return f"{command}\n" if kill_sent else f"{command}\n4321\n"
+            return ""
+
+        driver.async_run_cmd_on_shell = AsyncMock(side_effect=shell)
+        cleanup = AsyncMock(return_value=CleanupSummary({}, {}, {}))
+        with (
+            patch(f"{_MODULE}.async_get_device_driver", AsyncMock(return_value=driver)),
+            patch(f"{_MODULE}.expire_scale_keys_and_verify", cleanup),
+            patch(f"{_MODULE}.asyncio.sleep", AsyncMock()),
+        ):
+            await _task().run(dict(_PARAMS))
+
+        self.assertTrue(commands[0].startswith("bash pgrep -f -- "))
+        self.assertIn("bash kill -KILL 4321", commands)
+        cleanup.assert_awaited_once()
 
     async def test_echo_only_pgrep_output_allows_cleanup(self) -> None:
         driver = MagicMock()
@@ -217,8 +243,9 @@ class OpenRScaleIsolationTaskTest(TestCase):
         ):
             await _task().run(dict(_PARAMS))
 
-        self.assertIn("pkill -INT -f --", commands[0])
-        self.assertTrue(commands[1].startswith("bash pgrep -f -- "))
+        self.assertTrue(commands[0].startswith("bash pgrep -f -- "))
+        self.assertEqual("bash kill -KILL 4321", commands[1])
+        self.assertEqual(commands[0], commands[2])
         cleanup.assert_awaited_once()
 
     async def test_non_pid_shell_output_allows_cleanup(self) -> None:
@@ -256,9 +283,12 @@ class OpenRScaleIsolationTaskTest(TestCase):
             return driver
 
         async def shell(command: str) -> str:
-            if phase == "pgrep" and "pgrep -f --" in command:
-                return await hang()
-            if phase == "kill" and "pkill -INT -f --" in command:
+            if "pgrep -f --" in command:
+                if phase == "pgrep":
+                    return await hang()
+                if phase == "kill":
+                    return f"{command}\n4321\n"
+            if phase == "kill" and "kill -KILL " in command:
                 return await hang()
             return ""
 
@@ -316,9 +346,12 @@ class OpenRScaleIsolationTaskTest(TestCase):
             return driver
 
         async def shell(command: str) -> str:
-            if phase == "pgrep" and "pgrep -f --" in command:
-                return await hang()
-            if phase == "kill" and "pkill -INT -f --" in command:
+            if "pgrep -f --" in command:
+                if phase == "pgrep":
+                    return await hang()
+                if phase == "kill":
+                    return f"{command}\n4321\n"
+            if phase == "kill" and "kill -KILL " in command:
                 return await hang()
             return ""
 

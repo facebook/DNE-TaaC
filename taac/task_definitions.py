@@ -81,6 +81,64 @@ def create_openr_scale_isolation_task(
     )
 
 
+def create_openr_scale_cold_boot_fixture_task(
+    action: t.Literal["setup", "cleanup"],
+    dut_name: str,
+    helper_name: str,
+    port_channel: str = "Port-Channel1910",
+    num_subinterfaces: int = 64,
+    start_vlan: int = 100,
+    dut_host_octet: int = 2,
+    helper_host_octet: int = 1,
+    wait_attempts: int = 450,
+    wait_interval_seconds: int = 2,
+    setup_timeout_seconds: int = 600,
+) -> Task:
+    """Create the reversible, reboot-persistent cold-boot scale fixture."""
+    if action not in {"setup", "cleanup"}:
+        raise ValueError(f"unsupported fixture action {action!r}")
+    if not dut_name or not helper_name or dut_name == helper_name:
+        raise ValueError("cold-boot fixture requires distinct DUT and helper names")
+    if not port_channel:
+        raise ValueError("port_channel must be nonempty")
+    for name, value in (
+        ("num_subinterfaces", num_subinterfaces),
+        ("start_vlan", start_vlan),
+        ("dut_host_octet", dut_host_octet),
+        ("helper_host_octet", helper_host_octet),
+        ("wait_attempts", wait_attempts),
+        ("wait_interval_seconds", wait_interval_seconds),
+        ("setup_timeout_seconds", setup_timeout_seconds),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if start_vlan + num_subinterfaces - 1 > 4094:
+        raise ValueError("subinterface VLAN range must end at or below 4094")
+    if max(dut_host_octet, helper_host_octet) > 254:
+        raise ValueError("fixture host octets must be at most 254")
+    return Task(
+        task_name="openr_scale_cold_boot_fixture",
+        description=f"{action.title()} reboot-persistent Open/R scale fixture",
+        params=Params(
+            json_params=json.dumps(
+                {
+                    "action": action,
+                    "dut_name": dut_name,
+                    "helper_name": helper_name,
+                    "port_channel": port_channel,
+                    "num_subinterfaces": num_subinterfaces,
+                    "start_vlan": start_vlan,
+                    "dut_host_octet": dut_host_octet,
+                    "helper_host_octet": helper_host_octet,
+                    "wait_attempts": wait_attempts,
+                    "wait_interval_seconds": wait_interval_seconds,
+                    "setup_timeout_seconds": setup_timeout_seconds,
+                }
+            )
+        ),
+    )
+
+
 def create_openr_scale_link_fixture_task(
     action: t.Literal["setup", "cleanup"],
     ipv4_cidrs_by_device: t.Mapping[str, str],
@@ -3611,6 +3669,30 @@ def create_vip_injectors_task(
                 }
             )
         ),
+    )
+
+
+def create_openr_scale_cold_boot_monitor_task(
+    device_name: str,
+    profile: str = "cold_boot_64_256_leaf",
+    interval: int = 1,
+) -> PeriodicTask:
+    """Sample and fail closed on Open/R cold-boot resource telemetry."""
+    if not device_name or not profile:
+        raise ValueError("cold-boot monitor requires a device and profile")
+    if interval != 1:
+        raise ValueError("cold-boot monitor must sample once per second")
+    return PeriodicTask(
+        name="openr_scale_cold_boot_monitor",
+        interval=interval,
+        task=Task(task_name="openr_scale_cold_boot_monitor"),
+        retryable=False,
+        terminate_on_error=False,
+        params_list=[
+            Params(
+                json_params=json.dumps({"hostname": device_name, "profile": profile})
+            )
+        ],
     )
 
 

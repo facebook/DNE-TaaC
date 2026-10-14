@@ -63,6 +63,12 @@ if t.TYPE_CHECKING or not TAAC_OSS:
     from taac.internal.tasks.openr_route_action_task import (
         OpenRRouteActionTask,
     )
+    from taac.internal.tasks.openr_scale_cold_boot_fixture_task import (
+        OpenRScaleColdBootFixtureTask,
+    )
+    from taac.internal.tasks.openr_scale_cold_boot_monitor import (
+        OpenRScaleColdBootMonitor,
+    )
     from taac.internal.tasks.openr_scale_isolation_task import (
         OpenRScaleIsolationTask,
     )
@@ -233,6 +239,8 @@ if not TAAC_OSS:
     TASK_REGISTRY.extend(
         [
             OpenRRouteActionTask,
+            OpenRScaleColdBootFixtureTask,
+            OpenRScaleColdBootMonitor,
             OpenRScaleIsolationTask,
             OpenRScaleLinkFixtureTask,
             DeviceProvisioningTask,
