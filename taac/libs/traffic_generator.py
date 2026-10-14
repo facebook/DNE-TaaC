@@ -254,7 +254,7 @@ class TrafficGenerator:
         await self.async_update_all_endpoints()
 
         ixia_config = ixia_types.IxiaConfig(
-            api_server_ip=await self.async_get_primary_ixia_chassis_ip(),
+            api_server_ip=await self.async_get_ixia_api_server(),
             port_configs=await self.async_create_ixia_port_configs(),
             traffic_items=await self.async_create_all_traffic_items(),
             ptp_configs=self.ptp_configs,
@@ -278,9 +278,7 @@ class TrafficGenerator:
                 session_id=self.session_id,
                 password=fetch_ixia_password(),
                 chassis_ip=(
-                    await self.async_get_primary_ixia_chassis_ip()
-                    if self.session_id
-                    else None
+                    await self.async_get_ixia_api_server() if self.session_id else None
                 ),
                 override_traffic_items=self.override_traffic_items,
                 skip_advertised_prefixes_check=(
@@ -1256,6 +1254,10 @@ class TrafficGenerator:
                 ixia_types.AsPathPrepend(as_numbers=as_path_prepend_segment_numbers)
             )
         return as_path_prepends
+
+    async def async_get_ixia_api_server(self) -> str:
+        """Return the explicit REST endpoint or the discovered chassis address."""
+        return self.primary_chassis_ip or await self.async_get_primary_ixia_chassis_ip()
 
     @async_memoize_timed(60)
     async def async_get_primary_ixia_chassis_ip(self) -> str:

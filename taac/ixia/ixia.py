@@ -16,6 +16,7 @@ import os
 import pkgutil
 import random
 import re
+import socket
 import threading
 import time
 import typing as t
@@ -87,9 +88,11 @@ from taac.utils.oss_taac_constants import (
     IxiaSessionUnavailableError,
 )
 from taac.utils.oss_taac_lib_utils import (
+    get_ipv6_for_host,
     memoize_forever,
     none_throws,
     retryable,
+    string_is_ip,
     to_fb_uqdn,
 )
 from requests.exceptions import RequestException, Timeout as RequestsTimeout
@@ -8795,7 +8798,12 @@ class Ixia:
         }
         if len(chassis_ips_in_use) <= 1:
             return
-        primary_chassis_ip = ipaddress.ip_address(self.primary_chassis_ip)
+        primary_chassis_address = none_throws(self.primary_chassis_ip)
+        if not string_is_ip(primary_chassis_address):
+            primary_chassis_address = get_ipv6_for_host(
+                primary_chassis_address
+            ) or socket.gethostbyname(primary_chassis_address)  # @nolint PATTERNLINT(python-dns-deps)
+        primary_chassis_ip = ipaddress.ip_address(primary_chassis_address)
         vport = None
         if not any(
             ipaddress.ip_address(port_config.phy_port_config.chassis_ip)
@@ -8809,7 +8817,7 @@ class Ixia:
             portmap_assistant = self.session.PortMapAssistant()
             # attempt to connect to at least one vport on the primary chassis
             vport = portmap_assistant.Map(
-                IpAddress=self.primary_chassis_ip,
+                IpAddress=primary_chassis_address,
                 CardId=1,
                 PortId=100,  # an arbitrary port id
                 Name="DO_NOT_USE",
