@@ -1145,6 +1145,15 @@ def _read_ixia_single_pattern(
         return None, error
 
 
+# IxNetwork FieldTypeId segment of each IPv4 PHB (ipv4.header.priority.ds.phb.<x>).
+_IPV4_PHB_FIELD = {
+    ixia_types.PHBTypes.DEFAULT: "defaultPHB",
+    ixia_types.PHBTypes.CLASSSELECTOR: "classSelectorPHB",
+    ixia_types.PHBTypes.AF: "assuredForwardingPHB",
+    ixia_types.PHBTypes.EF: "expeditedForwardingPHB",
+}
+
+
 class Ixia:
     OPERATION_TIMEOUT_ERROR = IxiaOperationTimeoutError
 
@@ -12543,6 +12552,42 @@ class Ixia:
             field_name,
             dscp_values,
         )
+        if (
+            ip_address_family == ixia_types.IpAddressFamily.IPV4
+            and qos_config.ecn_capability != ixia_types.EcnCapability.ECN_NON_CAPABLE
+        ):
+            self._configure_ipv4_ecn(
+                config_element, qos_config.phb_type, qos_config.ecn_capability
+            )
+
+    def _configure_ipv4_ecn(
+        self,
+        config_element: "ConfigElement",
+        phb_type: ixia_types.PHBTypes,
+        ecn_capability: ixia_types.EcnCapability,
+    ) -> None:
+        """Set the IPv4 ECN bits, which the PHB field above leaves at 0 (Not-ECT).
+
+        IPv6 carries ECN in the raw Traffic Class value; IPv4 keeps it in the
+        PHB's 2-bit ``unused`` sibling. Without it an ECN-capable IPv4 stream is
+        sent Not-ECT, so a queue with ECN marking plus WRED early-drops only the
+        IPv4 packets.
+        """
+        phb = _IPV4_PHB_FIELD[phb_type]
+        stack = config_element.Stack.find(
+            DisplayName=self._get_ip_address_family_str(ixia_types.IpAddressFamily.IPV4)
+        )
+        # By FieldTypeId: every PHB (and the ToS form) has a field named "Unused".
+        ecn_field = stack.Field.find(
+            FieldTypeId=rf"^ipv4\.header\.priority\.ds\.phb\.{phb}\.unused$"
+        )
+        values = [2] if ecn_capability == ixia_types.EcnCapability.ECN_CAPABLE else [2, 0]
+        if len(values) == 1:
+            ecn_field.ValueType = "singleValue"
+            ecn_field.SingleValue = values[0]
+        else:
+            ecn_field.ValueType = "valueList"
+            ecn_field.ValueList = values
 
     def configure_dscp(
         self,
