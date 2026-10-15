@@ -2509,8 +2509,8 @@ class ThriftStressPeriodicTask(PeriodicTask):
     """Sustained high-volume thrift workload against a FBOSS DUT.
 
     Each invocation fires every `ThriftStressCall` in the payload concurrently
-    (with `requests_per_burst` copies per call) via a single
-    `asyncio.gather(...)`. The wrapping `PeriodicTaskWorker` loops `run()`
+    (with `requests_per_burst` copies per call) under one `asyncio.wait(...)`
+    with the burst timeout. The wrapping `PeriodicTaskWorker` loops `run()`
     back-to-back with `time.sleep(interval)` between bursts, which together
     reproduces the `while True: gather(...); sleep(5)` shape of
     `scripts/pavanpatil/thrift_call_disruptive.py:async_thrift_stress_call`.
@@ -2534,12 +2534,12 @@ class ThriftStressPeriodicTask(PeriodicTask):
 
     NAME = "thrift_stress"
     DEFAULT_REQUESTS_PER_API: int = 10000
-    # Burst timeout — if `asyncio.gather(...)` hasn't returned by this many
-    # seconds, we cancel all pending coroutines, log a loud warning, record a
-    # timed-out burst with the count, and return so the worker loop continues
-    # to the next interval. Without this, an unresponsive agent (e.g. when
-    # the storm we're firing pegs `fboss_sw_agent` CPU at 100%) causes
-    # gather() to hang indefinitely — we'd never get a burst result, never
+    # Burst timeout — calls still pending after this many seconds are
+    # cancelled and recorded as timed out (finished calls keep their result),
+    # with a loud warning, and the worker loop continues to the next interval.
+    # Without this, an unresponsive agent (e.g. when the storm we're firing
+    # pegs `fboss_sw_agent` CPU at 100%) hangs the burst indefinitely — we'd
+    # never get a burst result, never
     # write to shared_data, and the test would terminate the worker with
     # `_data entries=0` and no diagnostic. 60s default is generous for
     # ~70K well-behaved concurrent calls (~5-30s normal) but tight enough
@@ -2666,56 +2666,40 @@ class ThriftStressPeriodicTask(PeriodicTask):
             f"(timeout={burst_timeout_s:.0f}s) ({', '.join(scheduled_breakdown)})"
         )
         burst_start = time.time()
+        tasks = [asyncio.ensure_future(c) for c in coros]
+        # Calls still pending at the deadline are cancelled and counted as
+        # timed out; the ones that finished keep their ok/exception result.
         try:
-            results = await asyncio.wait_for(
-                asyncio.gather(*coros, return_exceptions=True),
-                timeout=burst_timeout_s,
-            )
-        except asyncio.TimeoutError:
-            elapsed = time.time() - burst_start
-            # `asyncio.wait_for` cancels the pending gather on timeout,
-            # which cancels each child coroutine. We can't recover partial
-            # results, so we record a fully timed-out burst and continue.
-            # The worker loop's outer `time.sleep(interval)` then fires,
-            # then we try the next burst — if the agent has recovered we
-            # see normal completion; if it's still unresponsive we keep
-            # timing out, but at least we get a diagnostic per burst
-            # instead of an indefinite hang that produces no data.
-            self.logger.warning(
-                f"thrift_stress: burst TIMED OUT after {elapsed:.1f}s "
-                f"(limit {burst_timeout_s}s) — device likely unresponsive; "
-                f"{len(coros)} coros cancelled, no per-call results"
-            )
-            self.add_data(
-                {
-                    "hostname": hostname,
-                    "flap_interfaces": flap_interfaces,
-                    "total": len(coros),
-                    "success": 0,
-                    "failures": 0,
-                    "timed_out": len(coros),
-                    "elapsed_s": elapsed,
-                }
-            )
-            return
+            done, pending = await asyncio.wait(tasks, timeout=burst_timeout_s)
+        finally:
+            for pending_task in tasks:
+                pending_task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
         elapsed = time.time() - burst_start
 
-        success = sum(1 for r in results if not isinstance(r, BaseException))
-        failures = len(results) - success
+        failures = sum(1 for d in done if d.cancelled() or d.exception() is not None)
+        success = len(done) - failures
+        if pending:
+            self.logger.warning(
+                f"thrift_stress: burst TIMED OUT after {elapsed:.1f}s "
+                f"(limit {burst_timeout_s}s); {len(pending)}/{len(tasks)} calls "
+                "still pending were cancelled"
+            )
         self.add_data(
             {
                 "hostname": hostname,
                 "flap_interfaces": flap_interfaces,
-                "total": len(results),
+                "total": len(tasks),
                 "success": success,
                 "failures": failures,
-                "timed_out": 0,
+                "timed_out": len(pending),
                 "elapsed_s": elapsed,
             }
         )
         self.logger.info(
-            f"thrift_stress burst: {success}/{len(results)} ok, "
-            f"{failures} exceptions, elapsed={elapsed:.1f}s"
+            f"thrift_stress burst: {success}/{len(tasks)} ok, "
+            f"{failures} exceptions, {len(pending)} timed out, "
+            f"elapsed={elapsed:.1f}s"
         )
 
     async def run_final_check(self) -> t.Optional[PeriodicCheckResult]:
