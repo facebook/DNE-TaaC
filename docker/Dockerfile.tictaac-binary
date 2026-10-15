@@ -1,0 +1,67 @@
+ARG BASE_IMAGE=run-scripts-build-tictaac-binary-sh-instead
+
+FROM ${BASE_IMAGE} AS builder
+
+ARG NUM_JOBS=8
+ARG GETDEPS_LFS_PATH=
+
+ENV TICTAAC_DOWNLOADS=/opt/tictaac/downloads \
+    TICTAAC_WORK=/opt/tictaac/work \
+    TICTAAC_DEPS=/opt/tictaac/deps \
+    TICTAAC_PYTHON=/opt/tictaac/python \
+    TICTAAC_RUST=/opt/tictaac/rust \
+    TICTAAC_BUILTINS=/opt/tictaac/builtins \
+    TICTAAC_DIST=/opt/tictaac/dist
+
+RUN dnf install -y perl-IPC-Cmd perl-Time-Piece zip && dnf clean all
+
+COPY tictaac_binary/versions.sh tictaac_binary/common.sh tictaac_binary/build_c_deps.sh /taac/tictaac_binary/
+RUN . /opt/rh/gcc-toolset-12/enable && \
+    /taac/tictaac_binary/build_c_deps.sh "$TICTAAC_DOWNLOADS" "$TICTAAC_WORK/c_deps" "$TICTAAC_DEPS" "$NUM_JOBS" && \
+    rm -rf "$TICTAAC_WORK/c_deps"
+
+COPY tictaac_binary/build_cpython.sh tictaac_binary/build-requirements.txt tictaac_binary/build-requirements-source.txt /taac/tictaac_binary/
+RUN . /opt/rh/gcc-toolset-12/enable && \
+    /taac/tictaac_binary/build_cpython.sh "$TICTAAC_DOWNLOADS" "$TICTAAC_WORK/cpython" "$TICTAAC_DEPS" "$TICTAAC_PYTHON" "$NUM_JOBS" && \
+    rm -rf "$TICTAAC_WORK/cpython"
+
+COPY tictaac_binary/build_rust_extensions.sh /taac/tictaac_binary/
+RUN . /opt/rh/gcc-toolset-12/enable && \
+    /taac/tictaac_binary/build_rust_extensions.sh "$TICTAAC_DOWNLOADS" "$TICTAAC_WORK/rust" "$TICTAAC_DEPS" "$TICTAAC_PYTHON" "$TICTAAC_RUST" "$TICTAAC_BUILTINS/rust" && \
+    rm -rf "$TICTAAC_WORK/rust"
+
+COPY scripts/setup_getdeps.sh /taac/scripts/
+COPY getdeps/manifests /taac/getdeps/manifests
+WORKDIR /taac
+RUN /taac/scripts/setup_getdeps.sh
+
+COPY tictaac_binary/build_cpp_stack.sh tictaac_binary/build-requirements-fbthrift.txt /taac/tictaac_binary/
+RUN . /opt/rh/gcc-toolset-12/enable && \
+    /taac/tictaac_binary/build_cpp_stack.sh deps /taac /scratch "$TICTAAC_DEPS" "$TICTAAC_PYTHON" "$NUM_JOBS" $GETDEPS_LFS_PATH
+
+COPY tictaac_binary/build_c_extensions.sh /taac/tictaac_binary/
+RUN . /opt/rh/gcc-toolset-12/enable && \
+    libsodium_prefix="$(ls -d /scratch/installed/libsodium-*)" && \
+    /taac/tictaac_binary/build_c_extensions.sh "$TICTAAC_DOWNLOADS" "$TICTAAC_WORK/c_extensions" "$TICTAAC_DEPS" "$libsodium_prefix" "$TICTAAC_PYTHON" "$TICTAAC_BUILTINS/c_extensions" "$NUM_JOBS" && \
+    rm -rf "$TICTAAC_WORK/c_extensions"
+
+COPY tictaac_binary/collect_thrift_builtins.sh /taac/tictaac_binary/
+RUN . /opt/rh/gcc-toolset-12/enable && \
+    /taac/tictaac_binary/collect_thrift_builtins.sh /scratch "$TICTAAC_BUILTINS/thrift"
+
+COPY CMakeLists.txt /taac/
+COPY thrift/ /taac/thrift/
+COPY taac/ /taac/taac/
+RUN . /opt/rh/gcc-toolset-12/enable && \
+    /taac/tictaac_binary/build_cpp_stack.sh taac /taac /scratch "$TICTAAC_DEPS" "$TICTAAC_PYTHON" "$NUM_JOBS" $GETDEPS_LFS_PATH
+
+COPY tictaac_binary/runtime-requirements.txt tictaac_binary/assemble_payload.sh /taac/tictaac_binary/
+RUN /taac/tictaac_binary/assemble_payload.sh /taac "$TICTAAC_PYTHON" /scratch/installed "$TICTAAC_WORK/payload" "$TICTAAC_DIST/payload.zip"
+
+COPY tictaac_binary/launcher.c tictaac_binary/link_tictaac.sh /taac/tictaac_binary/
+RUN . /opt/rh/gcc-toolset-12/enable && \
+    /taac/tictaac_binary/link_tictaac.sh "$TICTAAC_PYTHON" "$TICTAAC_DEPS" /scratch/installed "$TICTAAC_BUILTINS" "$TICTAAC_DIST/payload.zip" "$TICTAAC_WORK/link" "$TICTAAC_DIST/tictaac"
+
+COPY tictaac_binary/smoke_test.sh /taac/tictaac_binary/
+COPY tictaac_binary/smoke/ /taac/tictaac_binary/smoke/
+RUN /taac/tictaac_binary/smoke_test.sh "$TICTAAC_DIST/tictaac"

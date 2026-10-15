@@ -1,0 +1,52 @@
+{
+    "name": "oss_smoke_unreachable_dut",
+    "basset_pool": "",
+    "playbooks": [
+        {
+            "name": "dummy_playbook",
+            "stages": [
+                {
+                    "steps": [
+                        {
+                            "name": 1,
+                            "retryable_num": 0,
+                            "retryable_delay": 0,
+                            "delay": 0
+                        }
+                    ],
+                    "concurrent": false,
+                    "iteration": 1,
+                    "terminate_on_step_failure": false
+                }
+            ],
+            "iteration": 1,
+            "enabled": true,
+            "backup_and_restore_ixia_config": false,
+            "skip_test_config_prechecks": false,
+            "skip_test_config_postchecks": false,
+            "skip_test_config_snapshot_checks": false,
+            "override_duplicate_checks": true,
+            "restore_topology_baseline": false
+        }
+    ],
+    "rsyslog_services": [
+        1,
+        3,
+        2,
+        4
+    ],
+    "ignore_circuit_fbnet_status": false,
+    "ignore_down_circuits": true,
+    "endpoints": [
+        {
+            "name": "smoke-dut",
+            "dut": true
+        }
+    ],
+    "skip_ixia_protocol_verification": false,
+    "ixia_protocol_verification_timeout": 90,
+    "basset_reservation_time_hr": 4,
+    "log_collection_timeout": 180,
+    "traffic_generator_backend": 0,
+    "skip_default_oss_setup_tasks": false
+}

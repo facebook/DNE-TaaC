@@ -5,6 +5,8 @@
 | File | Purpose |
 |---|---|
 | `build-taac-image.sh` | Entry point. Builds `fboss-taac` from `Dockerfile.taac`. Auto-builds the FBOSS base image if missing. |
+| `ensure-base-image.sh` | Builds the revision-tagged FBOSS base image if it is missing and prints its tag. Shared by `build-taac-image.sh` and `scripts/build_tictaac_binary.sh`. |
+| `Dockerfile.tictaac-binary` | Builds the standalone `tictaac` executable. Driven by `scripts/build_tictaac_binary.sh`; see [`tictaac_binary/README.md`](../tictaac_binary/README.md). |
 | `Dockerfile.taac` | Multi-stage dockerfile — builds fbthrift-python + fboss-thrift-defs + transitive deps + TAAC in a builder stage, then produces a slim CentOS Stream 9 runtime image. |
 | `taac-entrypoint.sh` | `ENTRYPOINT` for `fboss-taac`. Resolves the per-config install hash + native lib paths and exports `PYTHONPATH` / `LD_LIBRARY_PATH` / `TAAC_OSS` before exec'ing the user command. |
 | `taac-regen-thrift.sh` | Installed as `/usr/local/bin/taac-regen-thrift` inside the image. Regenerates Python thrift bindings from a bind-mounted workspace using the baked-in `thrift1` compiler. |

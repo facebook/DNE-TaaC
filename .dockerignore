@@ -16,6 +16,7 @@
 # Selective COPYs (setup_getdeps.sh, manifests)
 !scripts/
 !getdeps/
+!tictaac_binary/
 
 # COPY . /taac (builder stage; .git/ and .projectid are excluded —
 # the builder stubs them for getdeps project detection)
