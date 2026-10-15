@@ -17,7 +17,7 @@ from taac.health_checks.constants import (
 from taac.libs.collectors.cpu_utilization_collector import (
     CpuUtilizationCollector,
 )
-from taac.libs.collectors.registry import get_collector
+from taac.libs.collectors.registry import get_collector_for_host
 from taac.utils.health_check_utils import (
     collector_window_start,
     format_timestamp,
@@ -457,7 +457,7 @@ class CpuUtilizationHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
         use ``[now - lookback_sec, now]`` (default ``lookback_sec=900``).
         Callers can override either endpoint via ``check_params``.
         """
-        collector = get_collector("cpu_utilization")
+        collector = get_collector_for_host("cpu_utilization", obj.name)
         if not isinstance(collector, CpuUtilizationCollector):
             # CollectorsTestHandler starts collectors for every OSS test
             # config, so a missing one here is unexpected. SKIP (not FAIL) per
@@ -474,20 +474,10 @@ class CpuUtilizationHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.SKIP,
                 message=(
-                    "No CpuUtilizationCollector registered under 'cpu_utilization'. "
-                    "The test config didn't start one — this check has nothing to "
-                    "evaluate."
-                ),
-            )
-        if collector.host != obj.name:
-            # Only one DUT gets a collector today (see CollectorsTestHandler);
-            # a mismatch means we'd be evaluating the wrong device's samples.
-            return hc_types.HealthCheckResult(
-                status=hc_types.HealthCheckStatus.SKIP,
-                message=(
-                    f"Registered CpuUtilizationCollector is bound to host "
-                    f"'{collector.host}', not '{obj.name}' — multi-DUT collector "
-                    "support isn't implemented; skipping this device."
+                    f"No CpuUtilizationCollector for '{obj.name}' (registry "
+                    f"slot 'cpu_utilization@{obj.name}'). CollectorsTestHandler "
+                    "starts one per FBOSS node — this node got none, so the "
+                    "check has nothing to evaluate."
                 ),
             )
         now = time.time()

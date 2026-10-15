@@ -17,7 +17,7 @@ from taac.health_checks.constants import (
 from taac.libs.collectors.memory_utilization_collector import (
     MemoryUtilizationCollector,
 )
-from taac.libs.collectors.registry import get_collector
+from taac.libs.collectors.registry import get_collector_for_host
 from taac.utils.arista_utils import find_process_pid
 from taac.utils.health_check_utils import (
     collector_window_start,
@@ -602,7 +602,7 @@ class MemoryUtilizationHealthCheck(
         to ``[now - lookback_sec, now]`` (default ``lookback_sec=900``).
         Callers can override either endpoint via ``check_params``.
         """
-        collector = get_collector("memory_utilization")
+        collector = get_collector_for_host("memory_utilization", obj.name)
         if not isinstance(collector, MemoryUtilizationCollector):
             # CollectorsTestHandler starts collectors for every OSS test
             # config, so a missing one here is unexpected. SKIP (not FAIL) per
@@ -619,21 +619,11 @@ class MemoryUtilizationHealthCheck(
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.SKIP,
                 message=(
-                    "No MemoryUtilizationCollector registered under "
-                    "'memory_utilization'. The test config didn't start one — "
-                    "this check has nothing to evaluate."
-                ),
-            )
-        if collector.host != obj.name:
-            # Only one DUT gets a collector today (see CollectorsTestHandler);
-            # a mismatch means we'd be evaluating the wrong device's samples.
-            return hc_types.HealthCheckResult(
-                status=hc_types.HealthCheckStatus.SKIP,
-                message=(
-                    f"Registered MemoryUtilizationCollector is bound to host "
-                    f"'{collector.host}', not '{obj.name}' — multi-DUT collector "
-                    "support isn't implemented; skipping this device."
-                ),
+                    f"No MemoryUtilizationCollector for '{obj.name}' (registry slot "
+                    f"'memory_utilization@{obj.name}'). CollectorsTestHandler starts one "
+                    "per FBOSS node — this node got none, so the check has "
+                    "nothing to evaluate."
+                    ),
             )
         now = time.time()
         window_end = check_params.get("window_end", now)
