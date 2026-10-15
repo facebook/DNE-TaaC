@@ -2000,15 +2000,18 @@ def create_port_queue_rate_check(
 def create_port_transceiver_check(
     json_params: t.Optional[t.Dict[str, t.Any]] = None,
 ) -> PointInTimeHealthCheck:
-    """Create a point-in-time check of optical transceiver presence and state.
+    """Create a point-in-time check of optical transceiver presence.
 
-    Inspects qsfp_service for each port's transceiver and asserts presence /
-    detected state matches expectations. Used in transceiver-removal /
+    Inspects qsfp_service for each interface and asserts transceiver
+    presence matches `expected_present`. Used in transceiver-removal /
     insertion tests and as a precheck around firmware upgrade stages.
 
     Args:
-        json_params: Opaque dict mapping port → expected transceiver
-            attributes (presence, type, vendor). Bare check when omitted.
+        json_params: Opaque dict with `interfaces` (list of interface names
+            to check; overrides the device's topology interfaces when
+            given, e.g. to target the one interface a snake test just
+            manipulated) and `expected_present` (bool, default True).
+            Bare check when omitted.
 
     Returns:
         A `PointInTimeHealthCheck` with `name=PORT_TRANSCEIVER_CHECK`.
