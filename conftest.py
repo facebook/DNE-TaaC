@@ -65,6 +65,7 @@ _OSS_READY_TEST_FILES = [
     "taac/health_checks/tests/test_common_utils.py",
     "taac/health_checks/tests/test_convergence_observer.py",
     "taac/tasks/tests/test_oss_gating.py",
+    "taac/health_checks/device_health_checks/test_l2_entry_threshold_observe_deadline.py",
 ]
 
 # Build absolute paths relative to this conftest's directory (repo root).
