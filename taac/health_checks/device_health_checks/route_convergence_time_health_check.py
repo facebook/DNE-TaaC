@@ -7,7 +7,8 @@ import shlex
 import time
 import typing as t
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import PurePosixPath
 
 from taac.constants import TestDevice
 from taac.health_checks.abstract_health_check import (
@@ -48,6 +49,9 @@ class RouteConvergenceTimeHealthCheck(
     - Parses RouteUpdateWrapper.cpp for route counts (Routes added/deleted)
     - Parses SwSwitch.cpp for state update timing
     - Provides detailed metrics including batch counts and per-operation times
+    - Rejects any BGPD route-programming RPC failure during an operation, even
+      if a later retry succeeds. This is a conservative programming-integrity
+      check: successful partial batches alone must not establish convergence.
 
     Parameters:
         network_group_regex (str): Regex to match network groups for toggle.
@@ -55,7 +59,7 @@ class RouteConvergenceTimeHealthCheck(
         iterations (int): Number of DELETE→ADD cycles to run. Default: 5
         time_threshold (int): Maximum allowed time in seconds for route convergence. Default: 35
         wait_time_seconds (int): Time to wait for convergence after each toggle. Default: 60
-        log_file (str): Path to the log file. Default: "/var/facebook/logs/wedge_agent.log"
+        log_file (str): Explicit log path; otherwise discover the readable agent log.
 
     Usage in test config:
         # Run 5 iterations of DELETE→ADD cycles
@@ -124,7 +128,7 @@ class RouteConvergenceTimeHealthCheck(
             check_params.get("observation_poll_interval_seconds", 1)
         )
         network_group_regex = check_params.get("network_group_regex")
-        log_file = check_params.get("log_file", "/var/facebook/logs/wedge_agent.log")
+        log_file = check_params.get("log_file")
         archive_dir = check_params.get(
             "archive_dir", "/var/facebook/logs/fboss/archive"
         )
@@ -147,6 +151,14 @@ class RouteConvergenceTimeHealthCheck(
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.ERROR,
                 message="Missing required parameter: network_group_regex",
+            )
+
+        try:
+            log_file = await self._resolve_log_file(log_file)
+        except Exception as ex:
+            return hc_types.HealthCheckResult(
+                status=hc_types.HealthCheckStatus.ERROR,
+                message=f"Cannot find a readable agent log: {ex}",
             )
 
         self.logger.info(
@@ -235,6 +247,27 @@ class RouteConvergenceTimeHealthCheck(
                 f"(threshold: {time_threshold}s)"
             ),
         )
+
+    async def _resolve_log_file(self, log_file: t.Optional[str]) -> str:
+        """Keep explicit paths; discover the legacy or OSS log for defaults."""
+        if log_file is not None:
+            return log_file
+        candidates = (
+            "/var/facebook/logs/wedge_agent.log",
+            "/var/facebook/logs/fboss/fboss_sw_agent.log",
+        )
+        paths = " ".join(shlex.quote(path) for path in candidates)
+        # Resolve once before toggling. Missing default logs are a collection
+        # error, rather than ten misleading missing-route-operation failures.
+        result = await self.driver.async_run_cmd_on_shell(
+            f'for path in {paths}; do '
+            'if test -r "$path"; then printf "%s\\n" "$path"; break; fi; done'
+        )
+        selected = (result or "").strip()
+        if selected not in candidates:
+            raise RuntimeError(f"none of {', '.join(candidates)} is readable")
+        self.logger.info(f"Using route convergence log: {selected}")
+        return selected
 
     async def _run_single_operation(
         self,
@@ -432,7 +465,7 @@ class RouteConvergenceTimeHealthCheck(
             start_time_file: Path to save the timestamp
 
         Returns:
-            Tuple of (HH:MM:SS string used to filter log lines, YYYYMMDDHHMM
+            Tuple of (HH:MM:SS.ffffff string used to filter log lines, YYYYMMDDHHMM
             string used to select rotated archive files). Both None on failure.
         """
         try:
@@ -451,7 +484,10 @@ class RouteConvergenceTimeHealthCheck(
                 # result (no space) leaves time_part empty and start_stamp a
                 # garbage value, so treat that as a total failure.
                 if hhmmss:
-                    return hhmmss, (start_stamp or None)
+                    # Keep subsecond precision: the same second can contain
+                    # batches from before the toggle capture.
+                    datetime.strptime(start_stamp[:8] + time_part, "%Y%m%d%H:%M:%S.%f")
+                    return time_part, start_stamp
         except Exception as e:
             self.logger.error(f"Failed to capture start time: {e}")
 
@@ -551,6 +587,7 @@ class RouteConvergenceTimeHealthCheck(
                     log_file,
                     start_time_str,
                     time_threshold,
+                    start_stamp,
                     log_source_command=log_source_command,
                 )
             else:
@@ -558,6 +595,7 @@ class RouteConvergenceTimeHealthCheck(
                     log_file,
                     start_time_str,
                     time_threshold,
+                    start_stamp,
                     log_source_command=log_source_command,
                 )
 
@@ -566,6 +604,14 @@ class RouteConvergenceTimeHealthCheck(
 
             if not result or not result.strip():
                 continue
+
+            if result.strip().startswith("PROGRAMMING_FAILURE "):
+                _, count, first_time, rpc = result.strip().split()
+                raise RuntimeError(
+                    f"BGPD route programming failed: {count} RPC failure(s) in "
+                    f"{log_file}; first {rpc} at {first_time}. "
+                    "Successful batches or later retries do not clear this failure."
+                )
 
             metrics = self._parse_awk_output(result, operation_type)
             if metrics is None:
@@ -579,11 +625,24 @@ class RouteConvergenceTimeHealthCheck(
 
         return aggregated
 
+    @staticmethod
+    def _awk_date_args(start_stamp: t.Optional[str]) -> str:
+        """Filter short toggle windows by glog date, including year rollover."""
+        if not start_stamp:
+            return ""
+        start_date = datetime.strptime(start_stamp[:8], "%Y%m%d")
+        next_date = start_date + timedelta(days=1)
+        return (
+            f'-v start_day="{start_date:%m%d}" '
+            f'-v next_day="{next_date:%m%d}"'
+        )
+
     def _build_add_awk_command(
         self,
         log_file: str,
         start_time_str: t.Optional[str],
         time_threshold: int,
+        start_stamp: t.Optional[str] = None,
         log_source_command: t.Optional[str] = None,
     ) -> str:
         """
@@ -593,29 +652,51 @@ class RouteConvergenceTimeHealthCheck(
         Only counts batches where routes_added > 0.
         """
         start_time = start_time_str or "00:00:00"
+        date_args = self._awk_date_args(start_stamp)
 
         source_command = log_source_command or f"zcat -f {shlex.quote(log_file)}"
-        return f"""{source_command} | awk -v start="{start_time}" -v threshold="{time_threshold}" '
+        return f"""{source_command} | awk -v start="{start_time}" -v threshold="{time_threshold}" {date_args} '
 function time_to_sec(t) {{
     split(t, a, ":");
     split(a[3], b, ".");
     return a[1]*3600 + a[2]*60 + b[1] + (length(b[2]) > 0 ? b[2]/1000000 : 0)
 }}
 BEGIN {{
-    total_added=0; total_deleted=0; batches=0;
+    total_added=0; total_deleted=0; batches=0; failures=0;
     first_ts=""; last_ts=""; start_sec=time_to_sec(start)
 }}
-/RouteUpdateWrapper.cpp.*Routes added:/ {{
+/RouteUpdateWrapper.cpp.*Routes added:/ || /ThriftHandler.cpp.* (addUnicastRoutes|deleteUnicastRoutes|syncFib) thrift request failed.*clientName="BGPD"/ {{
     if (match($0, /[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\\.[0-9]+/)) {{
         ts = substr($0, RSTART, RLENGTH);
-        if (time_to_sec(ts) >= start_sec) {{
+        event_sec = time_to_sec(ts);
+        if (start_day != "") {{
+            # Direct FBOSS glog lines start with severity + MMDD. Restrict
+            # this short operation to its date and the following date.
+            if (!match($0, /^[A-Z][0-9][0-9][0-9][0-9] /)) next;
+            day = substr($0, 2, 4);
+            if (day == next_day) event_sec += 86400;
+            else if (day != start_day) next;
+        }}
+        if (event_sec >= start_sec) {{
+            if ($0 ~ /ThriftHandler.cpp/ &&
+                $0 ~ /clientName="BGPD"/ &&
+                match($0, / (addUnicastRoutes|deleteUnicastRoutes|syncFib) thrift request failed/)) {{
+                failures++;
+                if (failures == 1) {{
+                    first_failure_ts = ts;
+                    split(substr($0, RSTART + 1, RLENGTH - 1), rpc_parts, " ");
+                    first_failure_rpc = rpc_parts[1];
+                }}
+                next;
+            }}
             if (match($0, /Routes added: [0-9]+/)) {{
                 split(substr($0, RSTART, RLENGTH), arr, " ");
                 added = arr[3];
                 if (added > 0) {{
                     batches++;
-                    if (first_ts == "") first_ts = ts;
+                    if (first_ts == "") {{ first_ts = ts; first_sec = event_sec; }}
                     last_ts = ts;
+                    last_sec = event_sec;
                     total_added += added
                 }}
             }}
@@ -627,8 +708,10 @@ BEGIN {{
     }}
 }}
 END {{
-    if (batches > 0) {{
-        wall_clock_time = time_to_sec(last_ts) - time_to_sec(first_ts);
+    if (failures > 0) {{
+        printf "PROGRAMMING_FAILURE %d %s %s\\n", failures, first_failure_ts, first_failure_rpc
+    }} else if (batches > 0) {{
+        wall_clock_time = last_sec - first_sec;
         printf "METRICS %d %d %d %.6f %s %s\\n", total_added, total_deleted, batches, wall_clock_time, first_ts, last_ts
     }} else {{
         print "NONE"
@@ -640,6 +723,7 @@ END {{
         log_file: str,
         start_time_str: t.Optional[str],
         time_threshold: int,
+        start_stamp: t.Optional[str] = None,
         log_source_command: t.Optional[str] = None,
     ) -> str:
         """
@@ -649,29 +733,51 @@ END {{
         Only counts batches where routes_deleted > 0.
         """
         start_time = start_time_str or "00:00:00"
+        date_args = self._awk_date_args(start_stamp)
 
         source_command = log_source_command or f"zcat -f {shlex.quote(log_file)}"
-        return f"""{source_command} | awk -v start="{start_time}" -v threshold="{time_threshold}" '
+        return f"""{source_command} | awk -v start="{start_time}" -v threshold="{time_threshold}" {date_args} '
 function time_to_sec(t) {{
     split(t, a, ":");
     split(a[3], b, ".");
     return a[1]*3600 + a[2]*60 + b[1] + (length(b[2]) > 0 ? b[2]/1000000 : 0)
 }}
 BEGIN {{
-    total_added=0; total_deleted=0; batches=0;
+    total_added=0; total_deleted=0; batches=0; failures=0;
     first_ts=""; last_ts=""; start_sec=time_to_sec(start)
 }}
-/RouteUpdateWrapper.cpp.*Routes added:/ {{
+/RouteUpdateWrapper.cpp.*Routes added:/ || /ThriftHandler.cpp.* (addUnicastRoutes|deleteUnicastRoutes|syncFib) thrift request failed.*clientName="BGPD"/ {{
     if (match($0, /[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\\.[0-9]+/)) {{
         ts = substr($0, RSTART, RLENGTH);
-        if (time_to_sec(ts) >= start_sec) {{
+        event_sec = time_to_sec(ts);
+        if (start_day != "") {{
+            # Direct FBOSS glog lines start with severity + MMDD. Restrict
+            # this short operation to its date and the following date.
+            if (!match($0, /^[A-Z][0-9][0-9][0-9][0-9] /)) next;
+            day = substr($0, 2, 4);
+            if (day == next_day) event_sec += 86400;
+            else if (day != start_day) next;
+        }}
+        if (event_sec >= start_sec) {{
+            if ($0 ~ /ThriftHandler.cpp/ &&
+                $0 ~ /clientName="BGPD"/ &&
+                match($0, / (addUnicastRoutes|deleteUnicastRoutes|syncFib) thrift request failed/)) {{
+                failures++;
+                if (failures == 1) {{
+                    first_failure_ts = ts;
+                    split(substr($0, RSTART + 1, RLENGTH - 1), rpc_parts, " ");
+                    first_failure_rpc = rpc_parts[1];
+                }}
+                next;
+            }}
             if (match($0, /Routes deleted: [0-9]+/)) {{
                 split(substr($0, RSTART, RLENGTH), arr, " ");
                 deleted = arr[3];
                 if (deleted > 0) {{
                     batches++;
-                    if (first_ts == "") first_ts = ts;
+                    if (first_ts == "") {{ first_ts = ts; first_sec = event_sec; }}
                     last_ts = ts;
+                    last_sec = event_sec;
                     total_deleted += deleted
                 }}
             }}
@@ -683,8 +789,10 @@ BEGIN {{
     }}
 }}
 END {{
-    if (batches > 0) {{
-        wall_clock_time = time_to_sec(last_ts) - time_to_sec(first_ts);
+    if (failures > 0) {{
+        printf "PROGRAMMING_FAILURE %d %s %s\\n", failures, first_failure_ts, first_failure_rpc
+    }} else if (batches > 0) {{
+        wall_clock_time = last_sec - first_sec;
         printf "METRICS %d %d %d %.6f %s %s\\n", total_added, total_deleted, batches, wall_clock_time, first_ts, last_ts
     }} else {{
         print "NONE"
@@ -745,7 +853,7 @@ END {{
         rotated archives whose window covers `start_stamp`, in chronological
         order, followed by the current (live) log.
 
-        Rotated archives are named `wedge_agent.log-YYYYMMDDHHMM.gz`, where the
+        Rotated archives are named `<log basename>-YYYYMMDDHHMM.gz`, where the
         stamp is the time of the LAST line in that archive. An archive is
         relevant when that stamp is >= our start (its tail reaches into the
         operation window). The live log is always included, so the common
@@ -761,11 +869,13 @@ END {{
             Ordered list of file paths (archives first, live log last).
         """
         archives: t.List[t.Tuple[str, str]] = []
+        basename = PurePosixPath(log_file).name
+        archive_pattern = re.compile(rf"{re.escape(basename)}-(\d{{12}})\.gz$")
         if start_stamp:
             try:
                 # pyrefly: ignore [missing-attribute]
                 out = await self.driver.async_run_cmd_on_shell(
-                    f"ls -1 {shlex.quote(archive_dir)}/wedge_agent.log-*.gz 2>/dev/null"
+                    f"ls -1 {shlex.quote(archive_dir)}/{shlex.quote(basename)}-*.gz 2>/dev/null"
                 )
             except Exception as e:
                 self.logger.warning(f"Failed to list archive logs: {e}")
@@ -773,9 +883,8 @@ END {{
 
             for line in (out or "").splitlines():
                 path = line.strip()
-                # Match only wedge_agent.log-<12 digits>.gz; this excludes
-                # wedge_agent_snapshots.log* by construction.
-                match = re.search(r"wedge_agent\.log-(\d{12})\.gz$", path)
+                # Match this agent log only; exclude snapshot and other logs.
+                match = archive_pattern.fullmatch(PurePosixPath(path).name)
                 if match and match.group(1) >= start_stamp:
                     archives.append((match.group(1), path))
 
