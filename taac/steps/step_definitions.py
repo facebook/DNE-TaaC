@@ -1451,6 +1451,7 @@ def create_openr_scale_injection_step(
     forbidden_dut_hosts: t.Optional[t.List[str]] = None,
     topology_type: t.Optional[str] = None,
     num_prefixes_per_node: t.Optional[int] = None,
+    generate_ipv4_prefixes: bool = False,
     num_sites: t.Optional[int] = None,
     num_super_spines: t.Optional[int] = None,
     prefix_seed: t.Optional[int] = None,
@@ -1547,6 +1548,8 @@ def create_openr_scale_injection_step(
             and lets a check assert them by name. 0 or omitted keeps the
             historical random behaviour. Published as
             ``{jq_var_prefix}_prefix_seed``.
+        generate_ipv4_prefixes: ask the injector to append one IPv4 /32 prefix
+            for every IPv6 /128 prefix. Defaults to False.
         area: restrict key accounting to one KvStore area. Read side only --
             it scopes what the step counts, and does not reach the injector.
         areas: comma-separated area names for the injector's ``--areas``. Two or
@@ -1606,6 +1609,8 @@ def create_openr_scale_injection_step(
         "restart_openr": restart_openr,
         "jq_var_prefix": jq_var_prefix,
     }
+    if generate_ipv4_prefixes:
+        params["generate_ipv4_prefixes"] = True
     if background:
         params["background"] = True
     for key, value in (
@@ -1780,6 +1785,7 @@ def create_openr_scale_kvstore_state_step(  # noqa: C901
     prefixes_per_node: int,
     dut_role: t.Literal["leaf", "spine"],
     area: str,
+    generate_ipv4_prefixes: bool = False,
     checkpoint: t.Literal["single", "after_a", "after_b"] = "single",
     state_key: str | None = None,
     retry_count: int = 6,
@@ -1787,6 +1793,7 @@ def create_openr_scale_kvstore_state_step(  # noqa: C901
     adjacency_batch_size: int = 16,
     prefix_batch_size: int = 500,
     enforce_production_counts: bool = True,
+    exact_scope: bool = False,
     dut_neighbor_interfaces: t.Mapping[str, str] | None = None,
 ) -> Step:
     """Create a semantic KvStore validation barrier for one or two injections."""
@@ -1813,6 +1820,10 @@ def create_openr_scale_kvstore_state_step(  # noqa: C901
         raise ValueError(f"{checkpoint} requires nonempty state_key")
     if not isinstance(enforce_production_counts, bool):
         raise ValueError("enforce_production_counts must be a boolean")
+    if not isinstance(generate_ipv4_prefixes, bool):
+        raise ValueError("generate_ipv4_prefixes must be a boolean")
+    if not isinstance(exact_scope, bool):
+        raise ValueError("exact_scope must be a boolean")
     if checkpoint != "single" and enforce_production_counts and dut_role != "leaf":
         raise ValueError("production KvStore counts require dut_role='leaf'")
     if (
@@ -1856,6 +1867,10 @@ def create_openr_scale_kvstore_state_step(  # noqa: C901
         "adjacency_batch_size": adjacency_batch_size,
         "prefix_batch_size": prefix_batch_size,
     }
+    if generate_ipv4_prefixes:
+        params["generate_ipv4_prefixes"] = True
+    if exact_scope:
+        params["exact_scope"] = True
     if checkpoint != "single":
         params.update(
             action="validate",

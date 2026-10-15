@@ -27,6 +27,9 @@ Test Cases
 - Test 4 (OPENR_SCALE_PHYSICAL_LINK_FLAP_TEST_CONFIG): temporarily split the
   second physical member into Port-Channel1911 and validate one down/up cycle
   while Scale Tester remains active through Port-Channel1910.
+- NW-5 (OPENR_SCALE_IPV4_IPV6_PREFIX_INJECTION_TEST_CONFIG): inject equal
+  deterministic IPv4 and IPv6 prefix populations and validate exact KvStore
+  state by family.
 
 All tests must run with ``--skip-testbed-isolation``: they depend on the
 pre-existing Port-Channel1910 interconnect, which testbed isolation shuts.
@@ -48,6 +51,9 @@ from taac.testconfigs.routing.openr.openr_portchannel_subif_test_config import (
 from taac.testconfigs.routing.openr.openr_scale_dut_cold_boot_test_config import (
     OPENR_SCALE_DUT_COLD_BOOT,
 )
+from taac.testconfigs.routing.openr.openr_scale_ipv4_ipv6_prefix_injection_test_config import (
+    OPENR_SCALE_IPV4_IPV6_PREFIX_INJECTION_TEST_CONFIG,
+)
 from taac.testconfigs.routing.openr.openr_scale_kvstore_merge_test_config import (
     OPENR_SCALE_KVSTORE_MERGE_TEST_CONFIG,
 )
@@ -61,6 +67,7 @@ from taac.testconfigs.routing.openr.openr_scale_test_config import (
 __all__ = [
     "OPENR_PORTCHANNEL_SUBIF_SCALE_TEST_CONFIG",
     "OPENR_SCALE_DUT_COLD_BOOT",
+    "OPENR_SCALE_IPV4_IPV6_PREFIX_INJECTION_TEST_CONFIG",
     "OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG",
     "OPENR_SCALE_KVSTORE_MERGE_TEST_CONFIG",
     "OPENR_SCALE_PHYSICAL_LINK_FLAP_TEST_CONFIG",

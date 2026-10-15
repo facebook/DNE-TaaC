@@ -7,6 +7,7 @@ import unittest
 
 from taac.playbooks.routing.openr_scale_playbooks import (
     get_openr_scale_dut_cold_boot_playbook,
+    get_openr_scale_ipv4_ipv6_prefix_injection_playbook,
     get_openr_scale_kvstore_injection_playbook,
     get_openr_scale_kvstore_merge_playbook,
 )
@@ -26,6 +27,47 @@ def _step_params(step: object) -> dict[str, t.Any]:
 
 
 class OpenRScalePlaybookTest(unittest.TestCase):
+    def test_ipv4_ipv6_prefix_injection_has_exact_isolated_contract(self) -> None:
+        playbook = get_openr_scale_ipv4_ipv6_prefix_injection_playbook(
+            helper_name="helper.example.com",
+            dut_name="dut.example.com",
+            dut_inband_address="2001:db8::1",
+            dut_mgmt_addresses=["2001:db8::2"],
+            num_spines=64,
+            num_leaves=256,
+            num_control_nodes=0,
+            num_sites=20,
+            ecmp_width=8,
+            prefixes_per_family_per_node=11,
+            dut_role="leaf",
+            area="0",
+            prefix_seed=20250903,
+        )
+
+        self.assertEqual(
+            "openr_scale_ipv4_ipv6_prefix_injection_playbook", playbook.name
+        )
+        self.assertEqual(
+            [
+                "openr_scale_performance",
+                "openr_scale_injection",
+                "openr_scale_performance",
+                "openr_scale_kvstore_state",
+            ],
+            [
+                _step_params(step)["custom_step_name"]
+                for step in playbook.stages[0].steps
+            ],
+        )
+        injection = _step_params(playbook.stages[0].steps[1])
+        validation = _step_params(playbook.stages[0].steps[3])
+        self.assertTrue(injection["generate_ipv4_prefixes"])
+        self.assertEqual(11, injection["num_prefixes_per_node"])
+        self.assertEqual(7797, injection["expected_updated_key_vals_delta"])
+        self.assertTrue(validation["generate_ipv4_prefixes"])
+        self.assertTrue(validation["exact_scope"])
+        self.assertEqual(11, validation["prefixes_per_node"])
+
     def test_performance_brackets_injection_before_semantic_validation(self) -> None:
         playbook = get_openr_scale_kvstore_injection_playbook(
             helper_name="helper.example.com",

@@ -41,6 +41,7 @@ from taac.test_as_a_config.types import Playbook
 
 __all__ = [
     "get_openr_scale_dut_cold_boot_playbook",
+    "get_openr_scale_ipv4_ipv6_prefix_injection_playbook",
     "get_openr_scale_kvstore_injection_playbook",
     "get_openr_scale_kvstore_merge_playbook",
     "get_openr_scale_physical_link_flap_playbook",
@@ -201,6 +202,119 @@ def get_openr_scale_kvstore_injection_playbook(
                 profile="kvstore_injection",
                 phase="single",
                 state_key="openr_scale_test_2_performance",
+            )
+        ],
+    )
+
+
+def get_openr_scale_ipv4_ipv6_prefix_injection_playbook(
+    helper_name: str,
+    dut_name: str,
+    dut_inband_address: str,
+    num_spines: int,
+    num_leaves: int,
+    num_control_nodes: int,
+    num_sites: int,
+    ecmp_width: int,
+    prefixes_per_family_per_node: int,
+    dut_role: t.Literal["leaf", "spine"],
+    area: str,
+    prefix_seed: int,
+    dut_mgmt_addresses: t.Optional[t.List[str]] = None,
+    dut_port: int = 2018,
+    scale_tester_remote_path: str = "/mnt/flash/scale_test_server",
+    injection_run_duration_sec: int = 5,
+    injection_timeout_sec: int = 240,
+) -> Playbook:
+    """Build the isolated full-scale IPv4/IPv6 prefix-injection case."""
+    node_names = bbf_simple_node_names(
+        num_spines,
+        num_leaves,
+        num_control_nodes,
+        num_sites,
+        dut_role,
+    )
+    expected_keys = expected_key_set(
+        node_names,
+        prefix_seed,
+        prefixes_per_family_per_node,
+        generate_ipv4_prefixes=True,
+    )
+    performance_state_key = "openr_scale_ipv4_ipv6_prefix_injection_performance"
+
+    return Playbook(
+        name="openr_scale_ipv4_ipv6_prefix_injection_playbook",
+        prechecks=[],
+        postchecks=[],
+        snapshot_checks=[],
+        stages=[
+            create_steps_stage(
+                stage_id="openr_scale_ipv4_ipv6_prefix_injection",
+                description=(
+                    f"Inject equal IPv4/IPv6 prefix populations into {dut_name} "
+                    "and validate the exact KvStore state"
+                ),
+                steps=[
+                    create_openr_scale_performance_step(
+                        dut_name=dut_name,
+                        profile="kvstore_injection",
+                        phase="single",
+                        state_key=performance_state_key,
+                        action="start",
+                    ),
+                    create_openr_scale_injection_step(
+                        helper_name=helper_name,
+                        dut_name=dut_name,
+                        dut_host=dut_inband_address,
+                        forbidden_dut_hosts=dut_mgmt_addresses,
+                        num_spines=num_spines,
+                        num_leaves=num_leaves,
+                        num_prefixes_per_node=prefixes_per_family_per_node,
+                        generate_ipv4_prefixes=True,
+                        num_sites=num_sites,
+                        num_super_spines=num_control_nodes,
+                        prefix_seed=prefix_seed,
+                        extra_flags=[f"--num_pods={ecmp_width}"],
+                        dut_role=dut_role,
+                        area=area,
+                        dut_port=dut_port,
+                        remote_path=scale_tester_remote_path,
+                        run_duration_sec=injection_run_duration_sec,
+                        run_timeout_sec=injection_timeout_sec,
+                        expected_updated_key_vals_delta=len(expected_keys),
+                        jq_var_prefix="openr_scale_ipv4_ipv6",
+                    ),
+                    create_openr_scale_performance_step(
+                        dut_name=dut_name,
+                        profile="kvstore_injection",
+                        phase="single",
+                        state_key=performance_state_key,
+                        action="validate",
+                    ),
+                    create_openr_scale_kvstore_state_step(
+                        dut_name=dut_name,
+                        seeds=[prefix_seed],
+                        num_spines=num_spines,
+                        num_leaves=num_leaves,
+                        num_control_nodes=num_control_nodes,
+                        num_sites=num_sites,
+                        ecmp_width=ecmp_width,
+                        prefixes_per_node=prefixes_per_family_per_node,
+                        generate_ipv4_prefixes=True,
+                        dut_role=dut_role,
+                        area=area,
+                        checkpoint="single",
+                        exact_scope=True,
+                    ),
+                ],
+            )
+        ],
+        cleanup_steps=[
+            create_openr_scale_performance_cleanup_step(
+                dut_name=dut_name,
+                profile="kvstore_injection",
+                phase="single",
+                state_key=performance_state_key,
             )
         ],
     )
