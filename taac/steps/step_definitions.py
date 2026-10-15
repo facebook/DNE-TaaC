@@ -22,7 +22,10 @@ from dataclasses import dataclass
 
 import paramiko
 from taac.abstractions.churn.attribute import AttributeChurn
-from neteng.test_infra.dne.taac.abstractions.churn.route import RouteChurn, RouteStorm
+from taac.abstractions.churn.route import (
+    RouteChurn,
+    RouteStorm,
+)
 from taac.abstractions.churn.session import SessionChurn
 from taac.abstractions.churn.workloads import (
     IgpMetricChurn,
