@@ -70,6 +70,7 @@ from tenacity import (
     retry_if_exception,
     stop_after_attempt,
     wait_exponential_jitter,
+    wait_fixed,
 )
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
@@ -5528,7 +5529,18 @@ class FbossSwitch(AbstractSwitch):
     async def async_get_vlan_addresses(
         self, vlan_id: int, global_only: bool = False
     ) -> List[str]:
-        all_interface_details = await self.async_get_all_interfaces()
+        # Setup calls this once per VLAN, so a rate-limited getAllInterfaces
+        # means wait and ask again, not fail setup.
+        all_interface_details = await AsyncRetrying(
+            retry=retry_if_exception(_is_fboss_method_rate_limit),
+            stop=stop_after_attempt(30),
+            wait=wait_fixed(1),
+            before_sleep=lambda state: self.logger.warning(
+                f"getAllInterfaces on {self.hostname} rate limited on attempt "
+                f"{state.attempt_number}/30; retrying"
+            ),
+            reraise=True,
+        )(self.async_get_all_interfaces)
         addresses = None
         for interface_detail in all_interface_details.values():
             if interface_detail.vlanId == vlan_id:
