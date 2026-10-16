@@ -113,7 +113,9 @@ async def async_get_fburl_retry(
 
 async def async_log_to_file_oss(content: str, prefix: str = "taac") -> str:
     """
-    OSS alternative for everpaste — writes content to a local file in /tmp.
+    OSS alternative for everpaste — writes content to a local file.
+
+    The directory is ``TAAC_LOG_DIR`` when set, else the usual temp dir.
 
     Args:
         content: The content to write to file.
@@ -128,10 +130,27 @@ async def async_log_to_file_oss(content: str, prefix: str = "taac") -> str:
     content_hash = hashlib.sha256(content.encode()).hexdigest()[:12]
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{prefix}_{timestamp}_{content_hash}.log"
-    filepath = os.path.join(tempfile.gettempdir(), filename)
+    # In a --rm container without a host-mounted /tmp the file is gone once the
+    # container exits, so TAAC_LOG_DIR can point this at a mounted volume.
+    log_dir = os.path.abspath(os.environ.get("TAAC_LOG_DIR") or tempfile.gettempdir())
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except OSError as exc:
+        # A bad TAAC_LOG_DIR must not replace the failure being reported. A
+        # temp dir that is itself unwritable (full disk) still raises below:
+        # there is nowhere left to put the evidence.
+        LOGGER.warning(f"TAAC_LOG_DIR {log_dir} unusable ({exc}); using temp dir")
+        log_dir = tempfile.gettempdir()
+    filepath = os.path.join(log_dir, filename)
 
-    with open(filepath, "w") as f:
-        f.write(content)
+    try:
+        with open(filepath, "w") as f:
+            f.write(content)
+    except OSError as exc:
+        LOGGER.warning(f"Could not write {filepath} ({exc}); using temp dir")
+        filepath = os.path.join(tempfile.gettempdir(), filename)
+        with open(filepath, "w") as f:
+            f.write(content)
 
     LOGGER.info(f"Content logged to: {filepath}")
     return filepath
