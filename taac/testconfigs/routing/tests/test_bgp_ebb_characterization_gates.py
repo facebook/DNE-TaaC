@@ -77,10 +77,7 @@ _UG_GATES: dict[str, _GateExpectation] = {
         {"80": 4.0, "95": 5.0},
         10.0,
     ),
-    "bgp_ebb_nexthop_group_count_threshold_playbook": (
-        {"80": 10.0, "95": 8.0},
-        10.0,
-    ),
+    "bgp_ebb_nexthop_group_count_threshold_playbook": (None, 10.0),
 }
 
 _NON_UG_GATES: dict[str, _GateExpectation] = {

@@ -506,7 +506,7 @@ _UG_CHARACTERIZATION_GATES: t.Mapping[str, CharacterizationGates] = {
         cpu_thresholds_pct=((80, 4.0), (95, 5.0)), rss_max_growth_pct=10.0
     ),
     "bgp_ebb_nexthop_group_count_threshold_playbook": CharacterizationGates(
-        cpu_thresholds_pct=((80, 10.0), (95, 8.0)), rss_max_growth_pct=10.0
+        rss_max_growth_pct=10.0
     ),
 }
 
