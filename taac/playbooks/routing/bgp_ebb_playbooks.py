@@ -2730,7 +2730,10 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
                 min_ecmp_width=2,
                 min_observed_groups=fibagent_nhg_watermark_high,
                 min_observed_multiway_groups=minimum_observed_multiway_groups,
-                min_programmed_groups=fibagent_nhg_watermark_high,
+                # No floor on hardware-programmed rows: while paused, FibAgent
+                # keeps NHGs no route uses until reconciliation, and EOS leaves
+                # unreferenced groups out of hardware, so that count stays below
+                # the high watermark. min_observed_groups checks EOS reached it.
                 max_programmed_groups=fibagent_nhg_watermark_high,
                 min_observed_groups_consecutive_samples=(
                     nexthop_group_min_consecutive_samples

@@ -2242,7 +2242,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
         self.assertEqual(3, nhg_params["min_observed_groups_consecutive_samples"])
         self.assertNotIn("min_bgp_groups", nhg_params)
         self.assertNotIn("min_bgp_groups_consecutive_samples", nhg_params)
-        self.assertEqual(1000, nhg_params["min_programmed_groups"])
+        self.assertNotIn("min_programmed_groups", nhg_params)
         self.assertEqual(1000, nhg_params["max_programmed_groups"])
         self.assertNotIn("min_bgp_multiway_groups", nhg_params)
         self.assertNotIn("min_bgp_multiway_consecutive_samples", nhg_params)
