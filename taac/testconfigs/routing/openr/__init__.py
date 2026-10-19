@@ -30,6 +30,9 @@ Test Cases
 - NW-5 (OPENR_SCALE_IPV4_IPV6_PREFIX_INJECTION_TEST_CONFIG): inject equal
   deterministic IPv4 and IPv6 prefix populations and validate exact KvStore
   state by family.
+- OPENR_UPDATE_LOSS: freeze FibAgent through asymmetric metric rebuilds on a
+  test-scoped second port-channel and fail when Decision moves on but Fib or
+  EOS keeps stale values (S696505 regression coverage).
 
 All tests must run with ``--skip-testbed-isolation``: they depend on the
 pre-existing Port-Channel1910 interconnect, which testbed isolation shuts.
@@ -66,6 +69,9 @@ from taac.testconfigs.routing.openr.openr_scale_physical_link_flap_test_config i
 from taac.testconfigs.routing.openr.openr_scale_test_config import (
     OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG,
 )
+from taac.testconfigs.routing.openr.openr_update_loss_test_config import (
+    OPENR_UPDATE_LOSS,
+)
 
 __all__ = [
     "OPENR_FIBAGENT_PAUSE",
@@ -75,4 +81,5 @@ __all__ = [
     "OPENR_SCALE_KVSTORE_INJECTION_TEST_CONFIG",
     "OPENR_SCALE_KVSTORE_MERGE_TEST_CONFIG",
     "OPENR_SCALE_PHYSICAL_LINK_FLAP_TEST_CONFIG",
+    "OPENR_UPDATE_LOSS",
 ]

@@ -1749,6 +1749,40 @@ def create_openr_fib_pause_validation_step(
     )
 
 
+def create_openr_update_loss_validation_step(
+    dut_name: str,
+    action: t.Literal["ready", "validate"],
+    state_key: str = "update_loss",
+    timeout_seconds: int = 600,
+    min_moved_prefixes: int = 1,
+    stimulus_cmd: t.Optional[str] = None,
+) -> Step:
+    """Bracket a FibAgent stall with Decision/Fib/EOS value comparison.
+
+    ``ready`` waits for a stable programmed fabric and snapshots the baseline
+    per-prefix Decision/Fib/EOS state. ``validate`` fails when Decision moved
+    (stimulus landed) but Fib or EOS kept stale values -- a route update lost
+    in the Decision->Fib queue -- and also fails when Decision never moved
+    (broken stimulus). ``stimulus_cmd`` is echoed into the failure evidence.
+    """
+    if action not in {"ready", "validate"}:
+        raise ValueError(f"Unsupported Open/R update-loss action {action!r}")
+    params_dict: t.Dict[str, t.Any] = {
+        "custom_step_name": "openr_update_loss_validation",
+        "action": action,
+        "dut_name": dut_name,
+        "state_key": state_key,
+        "timeout_seconds": timeout_seconds,
+        "min_moved_prefixes": min_moved_prefixes,
+    }
+    if stimulus_cmd is not None:
+        params_dict["stimulus_cmd"] = stimulus_cmd
+    return create_custom_step(
+        params_dict=params_dict,
+        description=f"{action.title()} Open/R update-loss validation on {dut_name}",
+    )
+
+
 def create_openr_scale_performance_cleanup_step(
     dut_name: str,
     profile: str,
