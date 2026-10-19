@@ -25,14 +25,22 @@ Those orderings are fixed by the landed static topologies
 ``static_topologies/fboss3388264{79,94}_ash6.cconf`` /
 ``fboss338826{570,578}_ash6.cconf``.
 
+It also covers the two 400G Wedge800 NextHop snake beds in ASH6.12 (T286495373):
+fboss342311886 (WEDGE800BNHP, the BACT board) and fboss342140185 (WEDGE800CNHP,
+the CACT board). They are cabled like the 400G Accton beds, per
+``static_topologies/fboss342311886_ash6.cconf`` and
+``fboss342140185_ash6.cconf``.
+
 Each bed gets two configs: a core one scoped to
 ``_W800_NPI_CORE_PLAYBOOKS``, and a full-suite one that takes every supported
 playbook ``gen_snake_playbooks`` emits plus the 10-size throughput benchmark
 (``test_snake_benchmark_*``). The FSDB disruptions are unsupported because
 ``fsdb.service`` is not deployed on these devices, so every config filters them
-out. IXIA endpoints are discovered over LLDP (every bed presents exactly two
-clean IXIA neighbours), so no config needs explicit
-``direct_ixia_connections``.
+out. The Accton beds' IXIA endpoints are discovered over LLDP (every bed presents
+exactly two clean IXIA neighbours). The NextHop beds hang off AresONE-M chassis
+that advertise their serial and a ``port.lane`` id over LLDP, which LLDP
+discovery does not map, so those configs pin the head and tail with
+``direct_ixia_connections`` instead.
 
 ``W800_NPI_SNAKE_TEST_CONFIGS`` is collected by
 ``testconfigs/internal/all.py``.
@@ -99,6 +107,36 @@ _W800_800G_IMIX = ixia_types.FrameSize(
     imix_weight={94: 1, 96: 18, 192: 3, 512: 1, 1200: 1, 4600: 76},
 )
 
+# AresONE-M chassis behind the NextHop 400G beds. The DUTs see them over LLDP as
+# ares1-my25330033 / ares1-my25350001 on port ids 1.1 (head) and 2.1 (tail),
+# i.e. physical ports 1 and 2.
+_IXIA30_ASH6_IP = "2401:db00:2066:3096:21a:c5ff:fe01:72a1"  # ixia30.netcastle.ash6
+_IXIA31_ASH6_IP = "2401:db00:2066:3096:21a:c5ff:fe01:7292"  # ixia31.netcastle.ash6
+
+
+def _nhp_400g_ixia_connections(
+    chassis_ip: str,
+) -> t.List[taac_types.DirectIxiaConnection]:
+    """Pin a NextHop 400G bed's head and tail to AresONE-M physical ports 1 and 2.
+
+    The ports are physical (``is_logical_port=False``), so TAAC resolves them to
+    the chassis's logical port for its current port speed at setup time.
+    """
+    return [
+        taac_types.DirectIxiaConnection(
+            interface="eth1/1/1",
+            ixia_chassis_ip=chassis_ip,
+            ixia_port="1/1",
+            is_logical_port=False,
+        ),
+        taac_types.DirectIxiaConnection(
+            interface=_SNAKE_END_64_PORT,
+            ixia_chassis_ip=chassis_ip,
+            ixia_port="1/2",
+            is_logical_port=False,
+        ),
+    ]
+
 
 def _gen_w800_snake_test_config(
     name: str,
@@ -107,6 +145,7 @@ def _gen_w800_snake_test_config(
     playbooks_to_include: t.Optional[t.List[str]] = None,
     frame_size_settings: t.Optional[ixia_types.FrameSize] = None,
     benchmark_link_speed_gbps: t.Optional[int] = None,
+    direct_ixia_connections: t.Optional[t.List[taac_types.DirectIxiaConnection]] = None,
 ) -> taac_types.TestConfig:
     """Build one W800 snake TestConfig.
 
@@ -129,6 +168,8 @@ def _gen_w800_snake_test_config(
             ``_W800_BENCHMARK_PACKET_SIZES`` throughput sweep at
             ``_W800_BENCHMARK_LINE_RATE``, with a traffic-rate threshold
             derived from this speed. ``None`` leaves the benchmark out.
+        direct_ixia_connections: Explicit IXIA wiring for the head and tail.
+            ``None`` discovers the IXIA endpoints over LLDP.
 
     Returns:
         A ``TestConfig`` for ``W800_NPI_SNAKE_TEST_CONFIGS``.
@@ -144,6 +185,7 @@ def _gen_w800_snake_test_config(
                 destination_ip="5000:1::2/64",
             ),
         ],
+        direct_ixia_connections=direct_ixia_connections,
         hostname=hostname,
         line_rate=99,
         playbooks_to_include=playbooks_to_include,
@@ -228,6 +270,24 @@ WEDGE800BACT_NPI_SNAKE_TEST_CONFIG_800G = _gen_w800_snake_test_config(
 )
 
 
+WEDGE800BNHP_NPI_SNAKE_TEST_CONFIG_400G = _gen_w800_snake_test_config(
+    name="WEDGE800BNHP_NPI_SNAKE_TEST_CONFIG_400G",
+    hostname="fboss342311886.ash6",
+    destination_interface=_SNAKE_END_64_PORT,
+    playbooks_to_include=_W800_NPI_CORE_PLAYBOOKS,
+    direct_ixia_connections=_nhp_400g_ixia_connections(_IXIA30_ASH6_IP),
+)
+
+
+WEDGE800CNHP_NPI_SNAKE_TEST_CONFIG_400G = _gen_w800_snake_test_config(
+    name="WEDGE800CNHP_NPI_SNAKE_TEST_CONFIG_400G",
+    hostname="fboss342140185.ash6",
+    destination_interface=_SNAKE_END_64_PORT,
+    playbooks_to_include=_W800_NPI_CORE_PLAYBOOKS,
+    direct_ixia_connections=_nhp_400g_ixia_connections(_IXIA31_ASH6_IP),
+)
+
+
 # ---------------------------------------------------------------------------
 # Full-suite configs -- no playbooks_to_include, so gen_snake_playbooks emits
 # every supported default: the 13 core playbooks plus test_72hr_longevity and
@@ -306,6 +366,24 @@ WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_800G = _gen_w800_snake_test_config
 )
 
 
+WEDGE800BNHP_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G = _gen_w800_snake_test_config(
+    name="WEDGE800BNHP_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G",
+    hostname="fboss342311886.ash6",
+    destination_interface=_SNAKE_END_64_PORT,
+    benchmark_link_speed_gbps=400,
+    direct_ixia_connections=_nhp_400g_ixia_connections(_IXIA30_ASH6_IP),
+)
+
+
+WEDGE800CNHP_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G = _gen_w800_snake_test_config(
+    name="WEDGE800CNHP_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G",
+    hostname="fboss342140185.ash6",
+    destination_interface=_SNAKE_END_64_PORT,
+    benchmark_link_speed_gbps=400,
+    direct_ixia_connections=_nhp_400g_ixia_connections(_IXIA31_ASH6_IP),
+)
+
+
 W800_NPI_SNAKE_TEST_CONFIGS = [
     WEDGE800CACT_NPI_SNAKE_TEST_CONFIG_100G,
     WEDGE800CACT_NPI_SNAKE_TEST_CONFIG_200G,
@@ -315,6 +393,8 @@ W800_NPI_SNAKE_TEST_CONFIGS = [
     WEDGE800BACT_NPI_SNAKE_TEST_CONFIG_200G,
     WEDGE800BACT_NPI_SNAKE_TEST_CONFIG_400G,
     WEDGE800BACT_NPI_SNAKE_TEST_CONFIG_800G,
+    WEDGE800BNHP_NPI_SNAKE_TEST_CONFIG_400G,
+    WEDGE800CNHP_NPI_SNAKE_TEST_CONFIG_400G,
     WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_100G,
     WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_200G,
     WEDGE800CACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G,
@@ -323,4 +403,6 @@ W800_NPI_SNAKE_TEST_CONFIGS = [
     WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_200G,
     WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G,
     WEDGE800BACT_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_800G,
+    WEDGE800BNHP_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G,
+    WEDGE800CNHP_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_400G,
 ]
