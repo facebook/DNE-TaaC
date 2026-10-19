@@ -719,9 +719,14 @@ class IxiaSyncRawSourceMacsTaskTest(later.unittest.TestCase):
         }
         task = IxiaSyncRawSourceMacsTask(ixia=ixia, logger=MagicMock())
 
-        await task.run({"traffic_item_regex": "^CPU_RAW$"})
+        await task.run(
+            {
+                "traffic_item_regex": "^CPU_RAW$",
+                "sync_destination_macs": True,
+            }
+        )
 
-        ixia.sync_raw_traffic_source_macs.assert_called_once_with("^CPU_RAW$")
+        ixia.sync_raw_traffic_source_macs.assert_called_once_with("^CPU_RAW$", True)
 
     async def test_fails_when_nothing_was_synced(self) -> None:
         ixia = MagicMock()

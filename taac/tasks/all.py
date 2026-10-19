@@ -638,7 +638,10 @@ class IxiaSyncRawSourceMacsTask(BaseTask):
 
     async def run(self, params: t.Dict[str, t.Any]) -> None:
         traffic_item_regex = params.get("traffic_item_regex", ".*")
-        synced = self.ixia.sync_raw_traffic_source_macs(traffic_item_regex)
+        sync_destination_macs = params.get("sync_destination_macs", False)
+        synced = self.ixia.sync_raw_traffic_source_macs(
+            traffic_item_regex, sync_destination_macs
+        )
         if not synced:
             raise ValueError(
                 f"No RAW traffic item matching {traffic_item_regex!r} had its "

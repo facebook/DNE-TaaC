@@ -5632,9 +5632,11 @@ class Ixia:
 
     @external_api
     def sync_raw_traffic_source_macs(
-        self, traffic_item_regex: str = ".*"
+        self,
+        traffic_item_regex: str = ".*",
+        sync_destination_macs: bool = False,
     ) -> t.Dict[str, str]:
-        """Rewrite each RAW traffic item's source MAC to its tx port's device-group MAC.
+        """Rewrite RAW traffic MACs from the live endpoint device groups.
 
         RAW packet headers are built before IXIA assigns device-group MACs, so
         they carry a placeholder source MAC. A DUT that validates source MACs
@@ -5645,6 +5647,9 @@ class Ixia:
         Args:
             traffic_item_regex: Only RAW traffic items whose name matches are
                 rewritten.
+            sync_destination_macs: Also rewrite the destination MAC to the rx
+                port's device-group MAC. This is for peer-switched traffic;
+                routed traffic should retain the DUT MAC.
 
         Returns:
             Map of rewritten traffic item name to the source MAC it now uses.
@@ -5662,31 +5667,77 @@ class Ixia:
                 for endpoint_set in traffic_item.EndpointSet.find()
                 for source in endpoint_set.Sources or []
             }
-            macs = {vport_macs[vport] for vport in tx_vports if vport in vport_macs}
-            if len(macs) != 1:
+            source_macs = {
+                vport_macs[vport] for vport in tx_vports if vport in vport_macs
+            }
+            if len(source_macs) != 1:
                 self.logger.warning(
                     f"[{traffic_item.Name}] Skipping source MAC sync: expected one "
                     f"device-group MAC for tx vports {sorted(tx_vports)}, found "
-                    f"{sorted(macs)}"
+                    f"{sorted(source_macs)}"
                 )
                 continue
-            mac = macs.pop()
+            source_mac = source_macs.pop()
+            destination_mac = None
+            if sync_destination_macs:
+                rx_vports = {
+                    destination.rsplit("/protocols", 1)[0]
+                    for endpoint_set in traffic_item.EndpointSet.find()
+                    for destination in endpoint_set.Destinations or []
+                }
+                destination_macs = {
+                    vport_macs[vport]
+                    for vport in rx_vports
+                    if vport in vport_macs
+                }
+                if len(destination_macs) != 1:
+                    self.logger.warning(
+                        f"[{traffic_item.Name}] Skipping MAC sync: expected one "
+                        f"device-group MAC for rx vports {sorted(rx_vports)}, "
+                        f"found {sorted(destination_macs)}"
+                    )
+                    continue
+                destination_mac = destination_macs.pop()
             updated = False
             for config_element in traffic_item.ConfigElement.find():
                 stack = config_element.Stack.find(StackTypeId="^ethernet$")
-                field_obj = stack.Field.find(DisplayName="^Source MAC Address$") if stack else None
-                if not field_obj:
+                source_field = (
+                    stack.Field.find(DisplayName="^Source MAC Address$")
+                    if stack
+                    else None
+                )
+                destination_field = (
+                    stack.Field.find(DisplayName="^Destination MAC Address$")
+                    if stack and sync_destination_macs
+                    else None
+                )
+                if not source_field or (
+                    sync_destination_macs and not destination_field
+                ):
                     self.logger.warning(
                         f"[{traffic_item.Name}] Config element has no Ethernet "
-                        "source MAC field; leaving it unchanged"
+                        "MAC fields required for sync; leaving it unchanged"
                     )
                     continue
-                field_obj.update(ValueType="singleValue", SingleValue=mac)
+                source_field.update(
+                    ValueType="singleValue", SingleValue=source_mac
+                )
+                if destination_field and destination_mac:
+                    destination_field.update(
+                        ValueType="singleValue", SingleValue=destination_mac
+                    )
                 updated = True
             if not updated:
                 continue
-            synced[traffic_item.Name] = mac
-            self.logger.info(f"[{traffic_item.Name}] Source MAC set to {mac}")
+            synced[traffic_item.Name] = source_mac
+            self.logger.info(
+                f"[{traffic_item.Name}] Source MAC set to {source_mac}"
+                + (
+                    f", destination MAC set to {destination_mac}"
+                    if destination_mac
+                    else ""
+                )
+            )
         if synced:
             traffic_running = self.is_traffic_running()
             self.regenerate_traffic_items()

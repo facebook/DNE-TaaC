@@ -82,6 +82,45 @@ class BgpRouteCountVerificationHealthCheckTest(unittest.IsolatedAsyncioTestCase)
             driver.async_get_bgp_sessions.assert_not_awaited()
             driver.async_execute_show_json_on_shell.assert_not_awaited()
 
+    async def test_thrift_exact_peer_address_selector(self) -> None:
+        health_check, driver = self._health_check()
+        peer = "2001:db8::1"
+        driver.async_get_bgp_sessions.return_value = [object()]
+        device = MagicMock(spec=TestDevice)
+        device.name = "dut.example.com"
+
+        with (
+            patch(
+                f"{_MODULE}.filter_bgp_sessions",
+                return_value=[peer],
+            ) as filter_sessions,
+            patch(
+                f"{_MODULE}.get_route_counts_for_peers",
+                new=AsyncMock(return_value={peer: 10}),
+            ),
+            patch(
+                f"{_MODULE}.validate_all_peer_route_counts",
+                return_value=[],
+            ),
+        ):
+            result = await health_check._run(
+                device,
+                hc_types.BaseHealthCheckIn(),
+                {
+                    "peer_addresses_to_check": [peer],
+                    "expected_count": 10,
+                    "policy_type": "post_policy",
+                },
+            )
+
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
+        filter_sessions.assert_called_once_with(
+            bgp_sessions=driver.async_get_bgp_sessions.return_value,
+            descriptions_to_ignore=[],
+            descriptions_to_check=[],
+            peer_addresses_to_check={peer},
+        )
+
     async def test_thrift_histogram_is_compared_per_afi(self) -> None:
         health_check, driver = self._health_check()
         driver.async_get_bgp_sessions.return_value = [object()] * 4

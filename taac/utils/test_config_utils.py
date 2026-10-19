@@ -30,6 +30,7 @@ def create_raw_arp_request_traffic_item(
     line_rate_type: ixia_types.RateType = ixia_types.RateType.FRAMES_PER_SECOND,
     line_rate: int = 2000,
     enabled: bool = True,
+    tracking_types: list[ixia_types.TrafficStatsTrackingType] | None = None,
 ) -> taac_types.BasicTrafficItemConfig:
     """Create the canonical raw ARP-request IXIA traffic item."""
     register_custom_frame_payload(name, ARP_REQUEST_BODY_HEX)
@@ -52,6 +53,7 @@ def create_raw_arp_request_traffic_item(
         line_rate=line_rate,
         traffic_type=ixia_types.TrafficType.RAW,
         bidirectional=False,
+        tracking_types=tracking_types or [],
         packet_headers=ARP_REQUEST_TRAFFIC_PACKET_HEADERS,
         frame_size_settings=ixia_types.FrameSize(
             type=ixia_types.FrameSizeType.FIXED,

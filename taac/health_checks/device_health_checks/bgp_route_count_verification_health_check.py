@@ -56,10 +56,20 @@ class BgpRouteCountVerificationHealthCheck(
         descriptions_to_ignore: t.Sequence[str],
         descriptions_to_check: t.Sequence[str],
         exact_peer_group_names: t.Sequence[str],
+        peer_addresses_to_check: t.Sequence[str],
     ) -> None:
-        if exact_peer_group_names and (descriptions_to_ignore or descriptions_to_check):
+        selector_count = sum(
+            bool(selector)
+            for selector in (
+                descriptions_to_ignore or descriptions_to_check,
+                exact_peer_group_names,
+                peer_addresses_to_check,
+            )
+        )
+        if selector_count > 1:
             raise ValueError(
-                "description filters and exact_peer_group_names are mutually exclusive"
+                "description filters, exact_peer_group_names, and "
+                "peer_addresses_to_check are mutually exclusive"
             )
 
     async def _run(
@@ -78,6 +88,7 @@ class BgpRouteCountVerificationHealthCheck(
                 - descriptions_to_ignore: List of description substrings to ignore peers by (optional)
                 - descriptions_to_check: List of description substrings to check peers by (optional)
                 - exact_peer_group_names: Exact BGP peer-group names to check (optional)
+                - peer_addresses_to_check: Exact BGP peer addresses to check (optional)
                 - direction: "received" or "advertised" (optional, defaults to "received")
                 - policy_type: "pre_policy" or "post_policy" (optional, defaults to "pre_policy")
                     - pre_policy: Uses getPrefilterReceivedNetworks/getPrefilterAdvertisedNetworks
@@ -99,6 +110,7 @@ class BgpRouteCountVerificationHealthCheck(
         descriptions_to_ignore = check_params.get("descriptions_to_ignore", [])
         descriptions_to_check = check_params.get("descriptions_to_check", [])
         exact_peer_group_names = check_params.get("exact_peer_group_names", [])
+        requested_peer_addresses = check_params.get("peer_addresses_to_check", [])
         direction = check_params.get("direction", "received")
         policy_type = check_params.get("policy_type", "pre_policy")
         expected_count = check_params.get("expected_count")
@@ -111,6 +123,7 @@ class BgpRouteCountVerificationHealthCheck(
                 descriptions_to_ignore,
                 descriptions_to_check,
                 exact_peer_group_names,
+                requested_peer_addresses,
             )
             validate_direction(direction)
             validate_policy_type(policy_type)
@@ -149,9 +162,13 @@ class BgpRouteCountVerificationHealthCheck(
         )
 
         try:
-            peer_addresses_to_check = await self._resolve_peer_group_addresses(
-                hostname,
-                exact_peer_group_names,
+            peer_addresses_to_check = (
+                set(requested_peer_addresses)
+                if requested_peer_addresses
+                else await self._resolve_peer_group_addresses(
+                    hostname,
+                    exact_peer_group_names,
+                )
             )
 
             # Get all BGP sessions
@@ -168,7 +185,13 @@ class BgpRouteCountVerificationHealthCheck(
                 descriptions_to_check=descriptions_to_check,
                 peer_addresses_to_check=peer_addresses_to_check,
             )
-            if peer_addresses_to_check is not None and not peers_to_check:
+            missing_peer_addresses = set(requested_peer_addresses) - set(peers_to_check)
+            if requested_peer_addresses and missing_peer_addresses:
+                raise RuntimeError(
+                    "Exact peer selection did not resolve to established sessions: "
+                    f"missing={sorted(missing_peer_addresses)}"
+                )
+            if exact_peer_group_names and not peers_to_check:
                 raise RuntimeError(
                     "No established peers matched the selected exact peer groups"
                 )
@@ -344,12 +367,14 @@ class BgpRouteCountVerificationHealthCheck(
         descriptions_to_check = check_params.get("descriptions_to_check", [])
         descriptions_to_ignore = check_params.get("descriptions_to_ignore", [])
         exact_peer_group_names = check_params.get("exact_peer_group_names", [])
+        requested_peer_addresses = check_params.get("peer_addresses_to_check", [])
 
         try:
             self._validate_peer_selectors(
                 descriptions_to_ignore,
                 descriptions_to_check,
                 exact_peer_group_names,
+                requested_peer_addresses,
             )
             expected_count_histogram_by_afi = normalize_expected_count_histogram_by_afi(
                 check_params.get("expected_count_histogram_by_afi")
@@ -412,9 +437,13 @@ class BgpRouteCountVerificationHealthCheck(
                     continue
                 peers_by_afi[afi] = peers
 
-            peer_addresses_to_check = await self._resolve_peer_group_addresses(
-                hostname,
-                exact_peer_group_names,
+            peer_addresses_to_check = (
+                set(requested_peer_addresses)
+                if requested_peer_addresses
+                else await self._resolve_peer_group_addresses(
+                    hostname,
+                    exact_peer_group_names,
+                )
             )
             peer_route_counts_by_afi: dict[str, dict[str, int]] = {
                 afi: {} for afi in address_families
@@ -443,7 +472,17 @@ class BgpRouteCountVerificationHealthCheck(
                         )
                     )
                 }
-                if peer_addresses_to_check is not None and not filtered_peers:
+                missing_peer_addresses = set(requested_peer_addresses) - set(
+                    filtered_peers
+                )
+                if requested_peer_addresses and missing_peer_addresses:
+                    runtime_errors.append(
+                        "Exact peer selection did not resolve for "
+                        f"{afi}: missing={sorted(missing_peer_addresses)}"
+                    )
+                    runtime_error_afis.add(afi)
+                    continue
+                if exact_peer_group_names and not filtered_peers:
                     runtime_errors.append(
                         "No established peers matched the selected exact peer groups "
                         f"for {afi}"

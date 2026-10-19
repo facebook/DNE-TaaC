@@ -365,18 +365,22 @@ def create_ixia_stop_traffic_and_wait_task(wait_seconds: int = 0) -> Task:
     )
 
 
-def create_ixia_sync_raw_source_macs_task(traffic_item_regex: str = ".*") -> Task:
+def create_ixia_sync_raw_source_macs_task(
+    traffic_item_regex: str = ".*",
+    sync_destination_macs: bool = False,
+) -> Task:
     """Create a post-IXIA task that gives RAW traffic items a valid source MAC.
 
     RAW items carry a placeholder source MAC; this rewrites each one to the
     MAC of its tx port's IXIA device group so the DUT accepts the frames.
     """
+    params: t.Dict[str, t.Any] = {"traffic_item_regex": traffic_item_regex}
+    if sync_destination_macs:
+        params["sync_destination_macs"] = True
     return Task(
         task_name="ixia_sync_raw_source_macs",
         ixia_needed=True,
-        params=Params(
-            json_params=json.dumps({"traffic_item_regex": traffic_item_regex})
-        ),
+        params=Params(json_params=json.dumps(params)),
     )
 
 

@@ -22,19 +22,30 @@ def _topology(vport_href: str, mac: str) -> MagicMock:
 
 
 def _traffic_item(
-    name: str, traffic_type: str, sources: list[str]
+    name: str,
+    traffic_type: str,
+    sources: list[str],
+    destinations: list[str] | None = None,
 ) -> tuple[MagicMock, MagicMock]:
-    field_obj = MagicMock()
+    source_field = MagicMock()
+    destination_field = MagicMock()
+    stack = MagicMock()
+    stack.Field.find.side_effect = lambda **kwargs: {
+        "^Source MAC Address$": source_field,
+        "^Destination MAC Address$": destination_field,
+    }.get(kwargs["DisplayName"])
     config_element = MagicMock()
-    config_element.Stack.find.return_value.Field.find.return_value = field_obj
+    config_element.Stack.find.return_value = stack
     endpoint_set = MagicMock()
     endpoint_set.Sources = sources
+    endpoint_set.Destinations = destinations or []
     traffic_item = MagicMock()
     traffic_item.Name = name
     traffic_item.TrafficType = traffic_type
     traffic_item.EndpointSet.find.return_value = [endpoint_set]
     traffic_item.ConfigElement.find.return_value = [config_element]
-    return traffic_item, field_obj
+    traffic_item.destination_mac_field = destination_field
+    return traffic_item, source_field
 
 
 def _make_ixia(
@@ -75,6 +86,33 @@ class SyncRawTrafficSourceMacsTest(unittest.TestCase):
             ValueType="singleValue", SingleValue="00:12:01:00:00:01"
         )
         ipv6_field.update.assert_not_called()
+        regenerate.assert_called_once_with()
+        apply_traffic.assert_called_once_with()
+
+    def test_optionally_sets_rx_port_device_group_mac_on_raw_items(self) -> None:
+        raw_item, source_field = _traffic_item(
+            "L2_RAW",
+            "raw",
+            [f"{VPORT_1}/protocols"],
+            [f"{VPORT_2}/protocols"],
+        )
+        ixia, regenerate, apply_traffic = _make_ixia(
+            [
+                _topology(VPORT_1, "00:11:01:00:00:01"),
+                _topology(VPORT_2, "00:12:01:00:00:01"),
+            ],
+            [raw_item],
+        )
+
+        synced = ixia.sync_raw_traffic_source_macs(sync_destination_macs=True)
+
+        self.assertEqual(synced, {"L2_RAW": "00:11:01:00:00:01"})
+        source_field.update.assert_called_once_with(
+            ValueType="singleValue", SingleValue="00:11:01:00:00:01"
+        )
+        raw_item.destination_mac_field.update.assert_called_once_with(
+            ValueType="singleValue", SingleValue="00:12:01:00:00:01"
+        )
         regenerate.assert_called_once_with()
         apply_traffic.assert_called_once_with()
 
