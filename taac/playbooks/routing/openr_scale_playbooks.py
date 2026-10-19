@@ -13,11 +13,14 @@ from taac.health_checks.healthcheck_definitions import (
     create_core_dumps_snapshot_check,
     create_openr_spark_neighbor_check,
     create_port_channel_expected_state_check,
+    create_service_restart_check,
 )
 from taac.stages.stage_definitions import create_steps_stage
 from taac.steps.step_definitions import (
     create_interface_flap_step,
     create_longevity_step,
+    create_openr_fib_pause_validation_step,
+    create_openr_fibagent_pause_step,
     create_openr_scale_cold_boot_step,
     create_openr_scale_injection_step,
     create_openr_scale_kvstore_state_cleanup_step,
@@ -873,5 +876,159 @@ def get_openr_scale_dut_cold_boot_playbook(
         ],
         cleanup_steps=[
             create_openr_scale_cold_boot_step(action="cleanup", **common_state),
+        ],
+    )
+
+
+def _metric_burst_cmd(interface: str, burst: int, updates: int, last: bool) -> str:
+    """Shell steps that each change the metric of every route through ``interface``.
+
+    Each value differs from the one before it, and the final burst ends by
+    clearing the increment so the DUT is left as it was found.
+    """
+    cmds = []
+    for index in range(updates):
+        if last and index == updates - 1:
+            cmd = f"breeze lm clear-link-metric-increase --yes --quiet {interface}"
+        else:
+            value = 10 * (burst * updates + index + 1)
+            cmd = f"breeze lm increase-link-metric --yes --quiet {interface} {value}"
+        cmds.append(f"timeout 60 {cmd} >/dev/null 2>&1")
+    return "; ".join(cmds)
+
+
+def get_openr_fibagent_pause_playbook(
+    *,
+    dut_name: str,
+    helper_name: str,
+    dut_inband_address: str,
+    dut_mgmt_addresses: t.Optional[t.List[str]] = None,
+    interface: str = "po1910",
+    bursts: int = 2,
+    updates_per_burst: int = 4,
+    pause_tail_seconds: float = 1.0,
+    settle_seconds: int = 20,
+    num_spines: int = 64,
+    num_leaves: int = 256,
+    num_sites: int = 20,
+    ecmp_width: int = 8,
+    prefixes_per_node: int = 11,
+    prefix_seed: int = 20250903,
+    expected_routes: int = 3729,
+    scale_tester_remote_path: str = "/mnt/flash/scale_test_server",
+    scale_tester_log_path: str = "/mnt/flash/openr_fibagent_pause.log",
+    injector_watchdog_seconds: int = 1800,
+    ready_timeout_seconds: int = 600,
+) -> Playbook:
+    """Freeze FibAgent while an Open/R route-update burst is in flight.
+
+    The helper simulates the fabric with every neighbor on ``interface`` only:
+    FibAgent rejects next hops on ``<interface>.<vlan>`` subinterfaces, so a
+    subinterface fabric can leave the routes unprogrammed. Each burst SIGSTOPs
+    FibAgent, then changes the link-metric increment on ``interface``
+    ``updates_per_burst`` times (each a separate Open/R update of every route),
+    holds the freeze ``pause_tail_seconds`` longer, and resumes FibAgent.
+    """
+    steps = [
+        create_openr_scale_injection_step(
+            helper_name=helper_name,
+            dut_name=dut_name,
+            dut_host=dut_inband_address,
+            forbidden_dut_hosts=dut_mgmt_addresses,
+            num_spines=num_spines,
+            num_leaves=num_leaves,
+            num_prefixes_per_node=prefixes_per_node,
+            num_sites=num_sites,
+            num_super_spines=0,
+            prefix_seed=prefix_seed,
+            extra_flags=[
+                f"--num_pods={ecmp_width}",
+                "--num_fake_keys_per_node=0",
+                "--fake_key_version_bump_interval_sec=0",
+            ],
+            simulate_neighbors=True,
+            verify_routes=False,
+            interfaces=[interface],
+            remote_path=scale_tester_remote_path,
+            run_duration_sec=injector_watchdog_seconds,
+            background=True,
+            background_log_path=scale_tester_log_path,
+            jq_var_prefix="openr_fibagent_pause",
+        ),
+        create_openr_fib_pause_validation_step(
+            dut_name=dut_name,
+            action="ready",
+            expected_routes=expected_routes,
+            allowed_interfaces=[interface],
+            timeout_seconds=ready_timeout_seconds,
+        ),
+        create_openr_fib_pause_validation_step(dut_name=dut_name, action="start"),
+    ]
+    for burst in range(bursts):
+        steps.append(
+            create_openr_fib_pause_validation_step(
+                dut_name=dut_name, action="burst_start"
+            )
+        )
+        steps.append(
+            create_openr_fibagent_pause_step(
+                dut_name=dut_name,
+                pause_seconds=pause_tail_seconds,
+                during_pause_shell_cmd=_metric_burst_cmd(
+                    interface, burst, updates_per_burst, last=burst == bursts - 1
+                ),
+                description=(
+                    f"Pause FibAgent through {updates_per_burst} Open/R route updates"
+                ),
+            )
+        )
+        # While FibAgent is frozen, Fib's call for the first update blocks and
+        # Decision->Fib coalescing merges the rest into one queued update.
+        steps.append(
+            create_openr_fib_pause_validation_step(
+                dut_name=dut_name,
+                action="burst_check",
+                expected_routes=expected_routes,
+            )
+        )
+        steps.append(
+            create_longevity_step(
+                duration=settle_seconds,
+                start_traffic=False,
+                description=f"Let Open/R and FibAgent settle for {settle_seconds}s",
+            )
+        )
+    steps.append(
+        create_openr_fib_pause_validation_step(
+            dut_name=dut_name,
+            action="validate",
+            min_route_updates=expected_routes * bursts,
+        )
+    )
+    # A step, not a postcheck, so it runs on the DUT only; services=[] skips
+    # the default Sand agent list, part of which this platform never runs.
+    steps.append(
+        create_validation_step(
+            point_in_time_checks=[
+                create_service_restart_check(services=[], daemons=["FibAgent", "Openr"])
+            ],
+            description="FibAgent and Openr were not restarted",
+            start_traffic=False,
+            fail_on_failure=True,
+        )
+    )
+    return Playbook(
+        name="openr_fibagent_pause_playbook",
+        prechecks=[],
+        postchecks=[],
+        snapshot_checks=[
+            create_core_dumps_snapshot_check(core_dumps_to_ignore=["FbConfigAgent"])
+        ],
+        stages=[
+            create_steps_stage(
+                stage_id="openr_fibagent_pause",
+                description=f"Pause FibAgent on {dut_name} under Open/R churn",
+                steps=steps,
+            )
         ],
     )

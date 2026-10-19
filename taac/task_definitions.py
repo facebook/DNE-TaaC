@@ -29,6 +29,30 @@ from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import Params, PeriodicTask, Task
 
 
+def create_openr_fib_programming_task(
+    dut_name: str,
+    action: t.Literal["enable", "disable"],
+    drain_timeout: int = 300,
+) -> Task:
+    """Toggle a lab EOS DUT's Open/R between dryrun and FIB programming.
+
+    ``enable`` snapshots ``/etc/openr_config``, sets ``dryrun: false`` and
+    restarts Open/R. ``disable`` first waits until Open/R and FibAgent hold no
+    routes (Open/R can only withdraw them while programming), then restores the
+    snapshot and restarts Open/R.
+    """
+    if action not in {"enable", "disable"}:
+        raise ValueError(f"Unsupported Open/R FIB programming action {action!r}")
+    return Task(
+        task_name="openr_fib_programming",
+        params=Params(
+            json_params=json.dumps(
+                {"dut_name": dut_name, "action": action, "drain_timeout": drain_timeout}
+            )
+        ),
+    )
+
+
 def create_openr_scale_isolation_task(
     hosts: t.Sequence[str],
     helper_hostname: str,

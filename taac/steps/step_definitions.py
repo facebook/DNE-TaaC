@@ -1668,6 +1668,87 @@ def create_openr_scale_performance_step(
     )
 
 
+def create_openr_fibagent_pause_step(
+    dut_name: str,
+    pause_seconds: float = 1.0,
+    during_pause_shell_cmd: t.Optional[str] = None,
+    agent: str = "FibAgent",
+    description: t.Optional[str] = None,
+) -> Step:
+    """Freeze an EOS daemon (FibAgent by default) with SIGSTOP.
+
+    ``during_pause_shell_cmd`` runs on the DUT while the daemon is frozen (e.g.
+    Open/R route-update triggers); the daemon stays frozen ``pause_seconds``
+    longer, then gets SIGCONT. Fails if the daemon's PID or start time changed.
+    """
+    params_dict: t.Dict[str, t.Any] = {
+        "custom_step_name": "openr_fibagent_pause",
+        "dut_name": dut_name,
+        "agent": agent,
+        "pause_seconds": pause_seconds,
+    }
+    if during_pause_shell_cmd:
+        params_dict["during_pause_shell_cmd"] = during_pause_shell_cmd
+    return create_custom_step(
+        params_dict=params_dict,
+        description=description or f"Pause {agent} on {dut_name}",
+    )
+
+
+def create_openr_fib_pause_validation_step(
+    dut_name: str,
+    action: t.Literal["ready", "start", "validate", "burst_start", "burst_check"],
+    state_key: str = "fibagent_pause",
+    max_thrift_failures: int = 0,
+    max_sync_fib_calls: int = 0,
+    min_route_updates: int = 1,
+    max_route_updates: t.Optional[int] = None,
+    timeout_seconds: int = 120,
+    expected_routes: t.Optional[int] = None,
+    allowed_interfaces: t.Optional[t.List[str]] = None,
+    threshold_profile: t.Optional[str] = None,
+) -> Step:
+    """Bracket FibAgent pauses with Open/R Fib counter and programming checks.
+
+    ``ready`` waits until Open/R holds ``expected_routes`` routes, FibAgent has
+    programmed all of them, and every next hop is on ``allowed_interfaces``.
+    ``burst_start``/``burst_check`` bracket one pause: ``burst_check`` waits for
+    recovery, checks EOS, and gates the burst on the configerator threshold
+    ``threshold_profile`` (default ``fibagent_pause``): CPU, RSS, FibAgent route
+    sets per stall, and backlog drain time.
+    ``start`` records the Open/R Fib counters. ``validate`` waits until
+    ``fib.synced`` is 1 and FibAgent has programmed every Open/R route, then
+    asserts the thrift-failure and syncFib deltas stay within bounds and that at
+    least ``min_route_updates`` (and, when set, at most ``max_route_updates``)
+    route updates reached FibAgent.
+    """
+    if action not in {"ready", "start", "validate", "burst_start", "burst_check"}:
+        raise ValueError(f"Unsupported Open/R FIB pause validation action {action!r}")
+    if action in {"ready", "burst_check"} and expected_routes is None:
+        raise ValueError(f"{action} requires expected_routes")
+    params_dict: t.Dict[str, t.Any] = {
+        "custom_step_name": "openr_fib_pause_validation",
+        "action": action,
+        "dut_name": dut_name,
+        "state_key": state_key,
+        "max_thrift_failures": max_thrift_failures,
+        "max_sync_fib_calls": max_sync_fib_calls,
+        "min_route_updates": min_route_updates,
+        "timeout_seconds": timeout_seconds,
+    }
+    if max_route_updates is not None:
+        params_dict["max_route_updates"] = max_route_updates
+    if threshold_profile is not None:
+        params_dict["threshold_profile"] = threshold_profile
+    if expected_routes is not None:
+        params_dict["expected_routes"] = expected_routes
+        params_dict["allowed_interfaces"] = allowed_interfaces or []
+    return create_custom_step(
+        params_dict=params_dict,
+        description=f"{action.title()} Open/R FIB pause validation on {dut_name}",
+    )
+
+
 def create_openr_scale_performance_cleanup_step(
     dut_name: str,
     profile: str,

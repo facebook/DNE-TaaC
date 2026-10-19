@@ -60,6 +60,9 @@ if t.TYPE_CHECKING or not TAAC_OSS:
     from taac.internal.tasks.ixia_preflight_task import (
         IxiaPreflightTask,
     )
+    from taac.internal.tasks.openr_fib_programming_task import (
+        OpenRFibProgrammingTask,
+    )
     from taac.internal.tasks.openr_route_action_task import (
         OpenRRouteActionTask,
     )
@@ -238,6 +241,7 @@ TASK_REGISTRY: t.List[t.Type[BaseTask]] = [
 if not TAAC_OSS:
     TASK_REGISTRY.extend(
         [
+            OpenRFibProgrammingTask,
             OpenRRouteActionTask,
             OpenRScaleColdBootFixtureTask,
             OpenRScaleColdBootMonitor,

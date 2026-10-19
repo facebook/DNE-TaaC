@@ -45,6 +45,9 @@ References
 - Requirements & Design: https://docs.google.com/document/d/1F1pkyhYx2sVxJxADitWBZVVpRIs-LoYFM87zkeHYb_8/edit?usp=sharing
 """
 
+from taac.testconfigs.routing.openr.openr_fibagent_pause_test_config import (
+    OPENR_FIBAGENT_PAUSE,
+)
 from taac.testconfigs.routing.openr.openr_portchannel_subif_test_config import (
     OPENR_PORTCHANNEL_SUBIF_SCALE_TEST_CONFIG,
 )
@@ -65,6 +68,7 @@ from taac.testconfigs.routing.openr.openr_scale_test_config import (
 )
 
 __all__ = [
+    "OPENR_FIBAGENT_PAUSE",
     "OPENR_PORTCHANNEL_SUBIF_SCALE_TEST_CONFIG",
     "OPENR_SCALE_DUT_COLD_BOOT",
     "OPENR_SCALE_IPV4_IPV6_PREFIX_INJECTION_TEST_CONFIG",
