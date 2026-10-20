@@ -1,7 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-# pyre-unsafe
-
 """Wedge800 (W800) NPI snake TestConfigs.
 
 Single-DUT loopback qualification for the W800 NPI program, covering all
@@ -33,8 +31,9 @@ the CACT board). They are cabled like the 400G Accton beds, per
 
 Each bed gets two configs: a core one scoped to
 ``_W800_NPI_CORE_PLAYBOOKS``, and a full-suite one that takes every supported
-playbook ``gen_snake_playbooks`` emits plus the 10-size throughput benchmark
-(``test_snake_benchmark_*``). The FSDB disruptions are unsupported because
+default playbook ``gen_snake_playbooks`` emits, link-flap longevity, rapid A-end
+flap stress, and the 10-size throughput benchmark (``test_snake_benchmark_*``).
+The FSDB disruptions are unsupported because
 ``fsdb.service`` is not deployed on these devices, so every config filters them
 out. The Accton beds' IXIA endpoints are discovered over LLDP (every bed presents
 exactly two clean IXIA neighbours). The NextHop beds hang off AresONE-M chassis
@@ -161,7 +160,8 @@ def _gen_w800_snake_test_config(
         destination_interface: Far end of the serpentine -- ``eth1/32/5`` on the
             64-port beds, ``eth1/32/1`` on the 32-port 800G beds.
         playbooks_to_include: Allowlist of generated playbook names. ``None``
-            keeps everything ``gen_snake_playbooks`` emits (the full suite).
+            includes the full suite with link-flap longevity and rapid A-end
+            flap stress.
         frame_size_settings: IXIA frame-size policy; ``None`` uses the IXIA
             default.
         benchmark_link_speed_gbps: The bed's port speed. When set, adds the
@@ -193,6 +193,8 @@ def _gen_w800_snake_test_config(
         frame_size_settings=frame_size_settings,
         postcheck_port_state_retry_count=_W800_RECOVERY_RETRY_COUNT,
         flap_recovery_check_retry_count=_W800_RECOVERY_RETRY_COUNT,
+        include_link_flap_longevity=playbooks_to_include is None,
+        include_rapid_a_end_flap_stress=playbooks_to_include is None,
         include_benchmark=benchmark_link_speed_gbps is not None,
         benchmark_packet_sizes=_W800_BENCHMARK_PACKET_SIZES,
         benchmark_line_rate=_W800_BENCHMARK_LINE_RATE,
@@ -291,10 +293,11 @@ WEDGE800CNHP_NPI_SNAKE_TEST_CONFIG_400G = _gen_w800_snake_test_config(
 # ---------------------------------------------------------------------------
 # Full-suite configs -- no playbooks_to_include, so gen_snake_playbooks emits
 # every supported default: the 13 core playbooks plus test_72hr_longevity and
-# the three system-reboot playbooks. The shared helper removes the two
-# unsupported FSDB disruptions and adds the 10 test_snake_benchmark_* playbooks
-# (12 minutes each, about 2 hours in total). The 72-hour soak alone puts a
-# complete run at roughly 3.5 days, and the reboot playbooks need BMC
+# the three system-reboot playbooks. The shared helper also enables link-flap
+# longevity and rapid A-end flap stress, removes the two unsupported FSDB
+# disruptions, and adds the 10 test_snake_benchmark_* playbooks (12 minutes
+# each, about 2 hours in total), for 29 playbooks. The 72-hour soak and stress
+# playbooks make these long campaigns, and the reboot playbooks need BMC
 # reachability from the test host, which is why these live as separate
 # TestConfigs rather than replacing the core ones. Select a subset at run time
 # with --regex (e.g. 'test_snake_benchmark' for the sweep alone).
