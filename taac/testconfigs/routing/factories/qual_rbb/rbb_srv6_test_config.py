@@ -347,6 +347,12 @@ def _edge_ebgp_setup_tasks(
                 "enable_ipv6_afi": True,
                 "ibgp_peer_addr": C.R1_ROUTER_ID,
                 "ibgp_srv6_nexthop": C.SRV6_DECAP_SID,
+                # A retained device-only bootstrap locally originates the test
+                # tail route and disables next-hop-self to preserve its decap
+                # SID. Traffic mode instead learns the route from IXIA. Reconcile
+                # that exact mode transition in the reversible edge overlay.
+                "ibgp_next_hop_self": True,
+                "withdraw_network6_prefix": C.TAIL_DEST_PREFIX,
                 "edge_rif_cidr": f"{C.IXIA_R2_EDGE_GW_V6}/{edge_mask}",
                 "edge_port_name": topology.r2.primary_ixia_interface,
             },

@@ -164,7 +164,9 @@ if [[ "$INIT_ONLY" -eq 1 ]]; then
     install_template "$REPO_ROOT/examples/taac_secrets.json.example" secrets.json 600
 
     echo
-    echo "Edit the four files above, then run:"
+    echo "Edit device_info.csv and circuit_info.csv for the lab."
+    echo "Then either edit rbb.env and secrets.json, or provide their values"
+    echo "through exported TAAC_* environment variables. Then run:"
     if [[ "$CONFIG_DIR" == "$DEFAULT_CONFIG_DIR" ]]; then
         echo "  ./scripts/run-rbb-srv6.sh --check"
     else
@@ -184,13 +186,27 @@ if [[ "$LOCAL_DIR" == *:* ]]; then
     echo "Error: resolved configuration directory cannot contain ':'" >&2
     exit 1
 fi
-for required_file in rbb.env secrets.json device_info.csv circuit_info.csv; do
+for required_file in device_info.csv circuit_info.csv; do
     if [[ ! -f "$LOCAL_DIR/$required_file" ]]; then
         echo "Error: missing $LOCAL_DIR/$required_file" >&2
         print_init_hint
         exit 1
     fi
 done
+for optional_file in rbb.env secrets.json; do
+    if [[ -e "$LOCAL_DIR/$optional_file" && ! -f "$LOCAL_DIR/$optional_file" ]]; then
+        echo "Error: $LOCAL_DIR/$optional_file is not a regular file" >&2
+        exit 1
+    fi
+done
+
+DOCKER_INPUT_ARGS=(--volume "$LOCAL_DIR:/workspace/.taac:ro")
+if [[ -f "$LOCAL_DIR/rbb.env" ]]; then
+    DOCKER_INPUT_ARGS=(
+        --env-file "$LOCAL_DIR/rbb.env"
+        "${DOCKER_INPUT_ARGS[@]}"
+    )
+fi
 
 # CLI mode is authoritative even if the caller's shell contains stale TAAC_*
 # values from an earlier run. The Docker helper forwards these variables after
@@ -214,16 +230,14 @@ if [[ "$CHECK_ONLY" -eq 1 ]]; then
         CHECK_ARGS+=(--setup-dut-edges)
     fi
     exec "$REPO_ROOT/docker/run_taac_docker.sh" \
-        --env-file "$LOCAL_DIR/rbb.env" \
-        --volume "$LOCAL_DIR:/workspace/.taac:ro" \
+        "${DOCKER_INPUT_ARGS[@]}" \
         run "${CHECK_ARGS[@]}"
 fi
 
 # The single-quoted program must expand TAAC_* inside the container, not here.
 # shellcheck disable=SC2016
 exec "$REPO_ROOT/docker/run_taac_docker.sh" \
-    --env-file "$LOCAL_DIR/rbb.env" \
-    --volume "$LOCAL_DIR:/workspace/.taac:ro" \
+    "${DOCKER_INPUT_ARGS[@]}" \
     run bash -c '
         set -euo pipefail
         preflight=(
@@ -244,14 +258,16 @@ exec "$REPO_ROOT/docker/run_taac_docker.sh" \
         runner=(
             python3 -m taac.runner.oss_entry_point
             --test-configs /workspace/examples/rbb_srv6_3_usids_config.py
-            --secrets-file /workspace/.taac/secrets.json
             --device-info-csv /workspace/.taac/device_info.csv
             --circuit-info-csv /workspace/.taac/circuit_info.csv
             --dut "$TAAC_RBB_R1_HOST" "$TAAC_RBB_R2_HOST"
             --playbook bgp_rbb_srv6_3_usids
         )
+        if [[ -f /workspace/.taac/secrets.json ]]; then
+            runner+=(--secrets-file /workspace/.taac/secrets.json)
+        fi
         if [[ "${TAAC_RBB_INCLUDE_TRAFFIC:-0}" == "1" ]]; then
-            : "${TAAC_IXIA_API_SERVER:?Set TAAC_IXIA_API_SERVER in .taac/rbb.env}"
+            : "${TAAC_IXIA_API_SERVER:?Set TAAC_IXIA_API_SERVER in the environment or rbb.env}"
             runner+=(--ixia-api-server "$TAAC_IXIA_API_SERVER")
         fi
         exec "${runner[@]}" "$@"

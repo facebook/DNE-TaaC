@@ -575,9 +575,13 @@ class TaacRunner:
         self._test_case_cleanup_pending = False
         self._test_case_handlers_pending_cleanup: t.List[BaseCustomTestHandler] = []
         self._test_case_rsyslog_created = False
-        # Shared data dictionary that persists across all tasks (setup, test, teardown)
-        # This allows tasks to share information (e.g., backup filenames) across execution
+        # TestConfig-lifecycle task state. Setup/teardown tasks may use this to
+        # exchange recovery information across the outer config lifecycle.
         self.shared_task_data: t.Dict[t.Any, t.Any] = {}
+        # Registered steps use a narrower store. It is reset before every
+        # playbook execution so state can cross that playbook's iterations,
+        # setup, stages, and cleanup, but can never leak into another playbook.
+        self._playbook_shared_task_data: t.Dict[t.Any, t.Any] = {}
         self.test_summary = TaacTestSummary(self.logger)
         # The latest investigation, retained for the legacy Netcastle test-case
         # link integration. Reset per test case so a prior result is not reused.
@@ -1329,7 +1333,7 @@ class TaacRunner:
         # Set after construction so third-party Step subclasses with explicit
         # constructor signatures do not have to accept a new keyword merely to
         # benefit from runner-owned registered-task state.
-        step_obj.shared_data = self.shared_task_data
+        step_obj.shared_data = self._playbook_shared_task_data
         step_obj._input = (
             json_to_thrift(step.input_json, STEP_NAME_TO_INPUT[step.name])
             if step.input_json
@@ -1498,6 +1502,7 @@ class TaacRunner:
         test_case_results: t.List[trr_types.CheckResult] = []
         test_case_start_time = int(time.time())
         iteration_count = self._get_test_case_iteration_count(playbook)
+        self._playbook_shared_task_data = {}
 
         try:
             for _ in range(iteration_count):

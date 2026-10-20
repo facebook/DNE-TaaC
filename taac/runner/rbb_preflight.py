@@ -246,13 +246,18 @@ def run_preflight(
     device_path = config_dir / "device_info.csv"
     circuit_path = config_dir / "circuit_info.csv"
 
-    profile = _load_env_profile(profile_path)
-    for name, value in profile.items():
-        # Matches docker/run_taac_docker.sh: an explicitly exported host value
-        # has precedence over the non-secret profile.
-        os.environ.setdefault(name, value)
+    if profile_path.exists() or profile_path.is_symlink():
+        profile = _load_env_profile(profile_path)
+        for name, value in profile.items():
+            # Matches docker/run_taac_docker.sh: an explicitly exported host value
+            # has precedence over the non-secret profile.
+            os.environ.setdefault(name, value)
 
-    load_oss_secrets(str(secrets_path))
+    # Both local files are convenience inputs, not required interfaces. This
+    # keeps the wrapper usable in CI and in organizations that inject settings
+    # and credentials through their own environment/secret manager.
+    if secrets_path.exists() or secrets_path.is_symlink():
+        load_oss_secrets(str(secrets_path))
     required = {
         "TAAC_RBB_R1_HOST",
         "TAAC_RBB_R2_HOST",
