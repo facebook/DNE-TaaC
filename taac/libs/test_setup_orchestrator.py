@@ -1247,12 +1247,30 @@ class TestSetupOrchestrator:
             raise ExceptionGroup("Multiple TAAC resources failed to clean up", errors)
 
     async def async_wait_for_interfaces_to_stabilize(self) -> None:
+        # Discovery returns every Ixia-cabled port on the device, but a config
+        # may drive only some of them. When the config declares its Ixia ports,
+        # wait on just those so an unused (and possibly disabled) Ixia port
+        # does not block setup.
+        declared_ixia_interfaces = self._get_ixia_interface_names()
         coroutines = []
         for test_device in self.test_topology.devices:
-            interfaces = [
-                interface.interface_name
-                for interface in test_device.interfaces + test_device.ixia_interfaces
+            ixia_interfaces = [
+                interface.interface_name for interface in test_device.ixia_interfaces
             ]
+            declared = declared_ixia_interfaces.get(test_device.name)
+            if declared:
+                skipped = sorted(set(ixia_interfaces) - declared)
+                if skipped:
+                    self.logger.info(
+                        f"Not waiting on Ixia interfaces unused by this test config "
+                        f"on {test_device.name}: {skipped}"
+                    )
+                ixia_interfaces = [
+                    interface for interface in ixia_interfaces if interface in declared
+                ]
+            interfaces = [
+                interface.interface_name for interface in test_device.interfaces
+            ] + ixia_interfaces
             driver = await async_get_device_driver(test_device.name)
             coroutines.append(driver.async_check_interfaces_status(interfaces, True))
         await asyncio.gather(*coroutines)
