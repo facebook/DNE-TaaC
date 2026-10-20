@@ -56,7 +56,10 @@ from taac.ixia.config_render import (
     render_ixia_config,
     ResolvedCheck,
 )
-from neteng.test_infra.dne.taac.ixia.ixia_tracer import IxiaTraceSlice, slugify_phase
+from taac.ixia.ixia_tracer import (
+    IxiaTraceSlice,
+    slugify_phase,
+)
 from taac.ixia.taac_ixia import TaacIxia
 
 # taac.libs.collectors.registry is OSS-safe (no Meta-internal imports) and owns
@@ -110,7 +113,10 @@ from taac.steps.all_steps import (  # oss-rewrite (force ShipIt re-export to taa
     NAME_TO_STEP,
     STEP_NAME_TO_INPUT,
 )
-from neteng.test_infra.dne.taac.steps.step import Step, TestbedError
+from taac.steps.step import (
+    Step,
+    TestbedError,
+)
 from taac.steps.step_definitions import ValidationStep
 from taac.tasks.utils import run_task
 from taac.test_configs import get_test_config
