@@ -13,7 +13,7 @@ from taac.health_checks.abstract_health_check import (
 from taac.health_checks.constants import (
     DAILY_TABLE_TRANSFORM_DESC,
 )
-from taac.libs.collectors.registry import get_collector
+from taac.libs.collectors.registry import get_collector_for_host
 from taac.libs.collectors.systemd_state_collector import (
     SystemdStateCollector,
 )
@@ -184,7 +184,7 @@ class UncleanExitHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckI
         ``[now - lookback_sec, now]`` (``lookback_sec=900``). Callers can
         override either endpoint via ``check_params``.
         """
-        collector = get_collector("systemd_state")
+        collector = get_collector_for_host("systemd_state", obj.name)
         if not isinstance(collector, SystemdStateCollector):
             # CollectorsTestHandler starts collectors for every OSS test
             # config, so a missing one here is unexpected. SKIP (not FAIL)
@@ -201,20 +201,11 @@ class UncleanExitHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckI
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.SKIP,
                 message=(
-                    "No SystemdStateCollector registered under "
-                    "'systemd_state'. The test config didn't start one — "
-                    "this check has nothing to evaluate."
-                ),
-            )
-        if collector.host != obj.name:
-            return hc_types.HealthCheckResult(
-                status=hc_types.HealthCheckStatus.SKIP,
-                message=(
-                    f"Registered SystemdStateCollector is bound to host "
-                    f"'{collector.host}', not '{obj.name}' — multi-DUT "
-                    "collector support isn't implemented; skipping this "
-                    "device."
-                ),
+                    f"No SystemdStateCollector for '{obj.name}' (registry slot "
+                    f"'systemd_state@{obj.name}'). CollectorsTestHandler starts one "
+                    "per FBOSS node — this node got none, so the check has "
+                    "nothing to evaluate."
+                    ),
             )
 
         now = time.time()

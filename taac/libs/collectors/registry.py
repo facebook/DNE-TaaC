@@ -43,6 +43,32 @@ def get_collector(name: str) -> t.Optional[t.Any]:
     return _collectors.get(name)
 
 
+def host_key(name: str, host: str) -> str:
+    """Registry key for ``name``'s collector on ``host``.
+
+    One flat slot per collector name only ever holds one host's samples, so
+    on a multi-node topology every device but the registrant's got SKIPped.
+    Qualifying the key by host gives each node its own slot while leaving the
+    unqualified name free for single-host registrants (the FPF collectors)."""
+    return f"{name}@{host}"
+
+
+def get_collector_for_host(name: str, host: str) -> t.Optional[t.Any]:
+    """Return ``host``'s collector for ``name``, or ``None``.
+
+    Prefers the host-qualified slot. Falls back to the unqualified one only
+    when it is actually bound to ``host`` -- a collector registered flat by
+    some other producer is still usable by the device it polls, but must not
+    be handed to a check running against a different device."""
+    collector = _collectors.get(host_key(name, host))
+    if collector is not None:
+        return collector
+    collector = _collectors.get(name)
+    if collector is not None and getattr(collector, "host", None) == host:
+        return collector
+    return None
+
+
 def unregister_collector(name: str) -> None:
     """Drop the entry under ``name``, if any. A no-op when absent.
 

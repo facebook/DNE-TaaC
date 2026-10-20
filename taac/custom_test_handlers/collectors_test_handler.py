@@ -33,11 +33,13 @@ Registry key convention (matches what the health checks look for):
   (``UncleanExitHealthCheck`` today; future: ``SystemctlActiveState`` /
   ``ServiceRestart``)
 
-Only the first DUT with ``operating_system == "FBOSS"`` gets collectors
-attached; the health checks are per-device and only one collector is
-registered per name.
+Every DUT with ``operating_system == "FBOSS"`` gets its own collector
+set, registered under the host-qualified key ``"<name>@<host>"``. The
+first DUT is additionally registered under the bare name, so a consumer
+that still looks up ``get_collector("cpu_utilization")`` keeps working.
 """
 
+import os
 import typing as t
 
 from taac.custom_test_handlers.base_custom_test_handler import (
@@ -51,6 +53,7 @@ from taac.libs.collectors.memory_utilization_collector import (
     MemoryUtilizationCollector,
 )
 from taac.libs.collectors.registry import (
+    host_key,
     register_collector,
     unregister_collector,
 )
@@ -94,9 +97,9 @@ class CollectorsTestHandler(BaseCustomTestHandler):
             for device in self.test_topology.devices
             if device.attributes.operating_system == "FBOSS"
         ]
-        self._cpu_collector: t.Optional[CpuUtilizationCollector] = None
-        self._memory_collector: t.Optional[MemoryUtilizationCollector] = None
-        self._systemd_state_collector: t.Optional[SystemdStateCollector] = None
+        # (registry name, collector) for every slot this handler owns,
+        # across every DUT -- teardown stops and unregisters exactly these.
+        self._started: t.List[t.Tuple[str, t.Any]] = []
 
     async def async_test_setUp(self) -> None:
         if not self._fboss_devices:
@@ -106,84 +109,71 @@ class CollectorsTestHandler(BaseCustomTestHandler):
             )
             return
 
-        # Only the first DUT gets collectors. Multi-DUT collector support is
-        # out of scope for the initial wiring — each named registry slot only
-        # holds one collector, and the OSS health checks target a single DUT
-        # per invocation.
-        dut = self._fboss_devices[0]
-        driver = await async_get_device_driver(dut)
         services = list(DEFAULT_SERVICE_NAMES)
-
         self.logger.info(
             f"CollectorsTestHandler: starting CPU + memory + systemd-state "
-            f"collectors on {dut} "
+            f"collectors on {self._fboss_devices} "
             f"(services={services}, interval={DEFAULT_POLL_INTERVAL_SEC}s)"
         )
 
-        cpu = CpuUtilizationCollector(
-            driver=driver,
-            services=services,
-            host=dut,
-            interval_sec=DEFAULT_POLL_INTERVAL_SEC,
-        )
-        cpu.start()
-        register_collector("cpu_utilization", cpu)
-        self._cpu_collector = cpu
+        for index, dut in enumerate(self._fboss_devices):
+            try:
+                driver = await async_get_device_driver(dut)
+            except Exception as e:
+                # One unreachable pod node must not cost the DUT its
+                # collectors -- the checks on that node SKIP, as they did
+                # before this handler was multi-host, and the rest run.
+                self.logger.warning(
+                    f"CollectorsTestHandler: no driver for {dut} ({e}); "
+                    "its collector-backed checks will SKIP."
+                )
+                continue
 
-        mem = MemoryUtilizationCollector(
-            driver=driver,
-            services=services,
-            host=dut,
-            interval_sec=DEFAULT_POLL_INTERVAL_SEC,
-        )
-        mem.start()
-        register_collector("memory_utilization", mem)
-        self._memory_collector = mem
-
-        systemd_state = SystemdStateCollector(
-            driver=driver,
-            services=services,
-            host=dut,
-            interval_sec=DEFAULT_POLL_INTERVAL_SEC,
-        )
-        systemd_state.start()
-        register_collector("systemd_state", systemd_state)
-        self._systemd_state_collector = systemd_state
+            for name, cls in (
+                ("cpu_utilization", CpuUtilizationCollector),
+                ("memory_utilization", MemoryUtilizationCollector),
+                ("systemd_state", SystemdStateCollector),
+            ):
+                collector = cls(
+                    driver=driver,
+                    services=services,
+                    host=dut,
+                    # Default tmp_path is pid+second-stamped, so same-second
+                    # starts on different hosts would share one file and
+                    # interleave their rows. Key it by host instead.
+                    tmp_path=f"/tmp/{name}_collector.{os.getpid()}.{dut}.log",
+                    interval_sec=DEFAULT_POLL_INTERVAL_SEC,
+                )
+                collector.start()
+                register_collector(host_key(name, dut), collector)
+                self._started.append((host_key(name, dut), collector))
+                if index == 0:
+                    # Back-compat for consumers still reading the bare name.
+                    register_collector(name, collector)
+                    self._started.append((name, collector))
 
     async def async_test_tearDown(self) -> None:
         # Stop the collectors first, THEN unregister — stopping while they're
         # still registered ensures late queries (from a straggler postcheck)
         # at least see the final rows before the slots empty. Only this
-        # handler's own two keys are dropped: the registry is shared, so
+        # handler's own keys are dropped: the registry is shared, so
         # clear_collectors() here would discard other handlers' collectors
         # and reset the runner's test-case start timestamp.
-        if self._cpu_collector is not None:
+        #
+        # The first DUT's collectors appear twice (host-qualified + bare), so
+        # stop each object once and unregister every key.
+        stopped = set()
+        for _, collector in self._started:
+            if id(collector) in stopped:
+                continue
+            stopped.add(id(collector))
             try:
-                await self._cpu_collector.stop()
+                await collector.stop()
             except Exception as e:
                 self.logger.warning(
-                    f"CollectorsTestHandler: CPU collector stop() failed: {e}"
+                    f"CollectorsTestHandler: {type(collector).__name__} "
+                    f"stop() failed for {getattr(collector, 'host', '?')}: {e}"
                 )
-            self._cpu_collector = None
-
-        if self._memory_collector is not None:
-            try:
-                await self._memory_collector.stop()
-            except Exception as e:
-                self.logger.warning(
-                    f"CollectorsTestHandler: memory collector stop() failed: {e}"
-                )
-            self._memory_collector = None
-
-        if self._systemd_state_collector is not None:
-            try:
-                await self._systemd_state_collector.stop()
-            except Exception as e:
-                self.logger.warning(
-                    f"CollectorsTestHandler: systemd_state collector stop() failed: {e}"
-                )
-            self._systemd_state_collector = None
-
-        unregister_collector("cpu_utilization")
-        unregister_collector("memory_utilization")
-        unregister_collector("systemd_state")
+        for name, _ in self._started:
+            unregister_collector(name)
+        self._started = []
