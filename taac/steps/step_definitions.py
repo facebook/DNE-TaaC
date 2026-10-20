@@ -76,6 +76,7 @@ if not TAAC_OSS:
     from neteng.netcastle.utils.reachability_utils import wait_for_ping_reachable
 else:
     from taac.utils.oss_driver_utils import (
+        is_host_ping_reachable,
         wait_for_ping_reachable,
     )
 
@@ -12628,6 +12629,8 @@ class RegisterSpeedFlipPatcherStep(StepBase[taac_types.BaseInput]):
 # =============================================================================
 
 _WEDGE_POWER_CMD: str = "/usr/local/bin/wedge_power.sh"
+# Failed probes in a row before a BMC-reset device counts as down.
+_REBOOT_DOWN_CONSECUTIVE_PROBES: int = 3
 
 
 class SystemRebootStep(StepBase[taac_types.SystemRebootInput]):
@@ -12640,6 +12643,7 @@ class SystemRebootStep(StepBase[taac_types.SystemRebootInput]):
     ) -> None:
         start_time = time.time()
         sleep_time_after_reboot = params.get("sleep_time_after_reboot", 0)
+        bmc_reset_issued, bmc_error = False, ""
         if input.trigger == taac_types.SystemRebootTrigger.FULL_SYSTEM_REBOOT:
             await self.driver.async_full_system_reboot()
             self.logger.info(
@@ -12652,6 +12656,7 @@ class SystemRebootStep(StepBase[taac_types.SystemRebootInput]):
         ):
             # `reset -s` power-cycles the whole chassis; bare `reset` is microserver-only.
             wedge_power_system_reset = f"{_WEDGE_POWER_CMD} reset -s"
+            bmc_reset_issued = True
             try:
                 run_bmc_cmd_hwcontrol(self.device.name, wedge_power_system_reset)
                 self.logger.info(
@@ -12663,15 +12668,18 @@ class SystemRebootStep(StepBase[taac_types.SystemRebootInput]):
                 paramiko.SSHException,
                 RuntimeError,
             ) as e:
+                bmc_error = (
+                    f"{wedge_power_system_reset!r} raised {type(e).__name__}: {e}"
+                )
                 self.logger.info(
-                    f"BMC command {wedge_power_system_reset!r} raised {type(e).__name__} "
-                    f"(expected post-reboot disconnect): {e}"
+                    f"BMC command {bmc_error} (expected post-reboot disconnect)"
                 )
         elif (
             input.trigger == taac_types.SystemRebootTrigger.BMC_MICROSERVER_ONLY_RESET
             and self.is_fboss
         ):
             wedge_power_microserver_reset = f"{_WEDGE_POWER_CMD} reset"
+            bmc_reset_issued = True
             try:
                 run_bmc_cmd_hwcontrol(self.device.name, wedge_power_microserver_reset)
                 self.logger.info(
@@ -12683,10 +12691,44 @@ class SystemRebootStep(StepBase[taac_types.SystemRebootInput]):
                 paramiko.SSHException,
                 RuntimeError,
             ) as e:
-                self.logger.info(
-                    f"BMC command {wedge_power_microserver_reset!r} raised {type(e).__name__} "
-                    f"(expected post-reboot disconnect): {e}"
+                bmc_error = (
+                    f"{wedge_power_microserver_reset!r} raised {type(e).__name__}: {e}"
                 )
+                self.logger.info(
+                    f"BMC command {bmc_error} (expected post-reboot disconnect)"
+                )
+        use_ipv6 = params.get("use_ipv6", True)
+        if TAAC_OSS and bmc_reset_issued:
+            # The BMC call swallows connect/exit errors and does not wait, so the
+            # pingable wait below would pass on a device that never went down.
+            # ping -c 5 -w 10 also fails on a single lost reply, so "down" takes
+            # consecutive failed probes.
+            self.logger.info(f"Waiting for {self.device.name} to go down...")
+            down_start = time.monotonic()
+            deadline = down_start + params.get("reboot_down_timeout_s", 180)
+            unreachable = 0
+            while unreachable < _REBOOT_DOWN_CONSECUTIVE_PROBES:
+                if await convert_to_async(
+                    is_host_ping_reachable, self.device.name, use_ipv6=use_ipv6
+                ):
+                    unreachable = 0
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            f"{self.device.name} never went down after {input.trigger.name}; "
+                            "the BMC reset did not take effect (check TAAC_BMC_HOST)"
+                            + (f"; BMC command {bmc_error}" if bmc_error else "")
+                        )
+                    await asyncio.sleep(5)
+                else:
+                    unreachable += 1
+                    if unreachable < _REBOOT_DOWN_CONSECUTIVE_PROBES:
+                        # An instant failure (DNS, no route) must not count
+                        # three times within a second.
+                        await asyncio.sleep(5)
+            self.logger.info(
+                f"{self.device.name} went down {time.monotonic() - down_start:.1f} seconds after {input.trigger.name}"
+            )
+
         if sleep_time_after_reboot > 0:
             self.logger.info(
                 f"Waiting for {sleep_time_after_reboot} seconds after reboot"
@@ -12694,7 +12736,6 @@ class SystemRebootStep(StepBase[taac_types.SystemRebootInput]):
             await asyncio.sleep(sleep_time_after_reboot)
 
         self.logger.info(f"Waiting for {self.device.name} to be pingable...")
-        use_ipv6 = params.get("use_ipv6", True)
         if TAAC_OSS:
             # Only the OSS helper takes use_ipv6; netcastle's always pings v6.
             # pyre resolves wait_for_ping_reachable to the netcastle binding
