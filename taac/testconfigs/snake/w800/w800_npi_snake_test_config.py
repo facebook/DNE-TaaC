@@ -35,9 +35,7 @@ Each configured bed gets two configs: a core one scoped to
 ``_W800_NPI_CORE_PLAYBOOKS``, and a full-suite one that takes every supported
 default playbook ``gen_snake_playbooks`` emits, link-flap longevity, rapid A-end
 flap stress, and the 10-size throughput benchmark (``test_snake_benchmark_*``).
-The FSDB disruptions are unsupported because
-``fsdb.service`` is not deployed on these devices, so every config filters them
-out. The Accton beds' IXIA endpoints are discovered over LLDP (every bed presents
+The Accton beds' IXIA endpoints are discovered over LLDP (every bed presents
 exactly two clean IXIA neighbours). The NextHop beds hang off AresONE-M chassis
 that advertise their serial and a ``port.lane`` id over LLDP, which LLDP
 discovery does not map, so those configs pin the head and tail with
@@ -56,13 +54,8 @@ from taac.testconfigs.snake.test_test_config import (
 from taac.test_as_a_config import types as taac_types
 
 
-_W800_UNSUPPORTED_PLAYBOOKS = [
-    "test_snake_fsdb_restart",
-    "test_snake_fsdb_crash",
-]
-
-# Everything gen_snake_playbooks emits except the FSDB disruptions,
-# test_72hr_longevity (3-day soak, run on its own once the short soaks are clean),
+# Everything gen_snake_playbooks emits except test_72hr_longevity (3-day soak,
+# run on its own once the short soaks are clean),
 # and the three system-reboot playbooks (need BMC reachability from the test
 # host). Spelled as an allowlist rather than playbooks_to_skip because
 # gen_snake_test_config validates playbooks_to_include against the generated set
@@ -170,9 +163,8 @@ def _gen_w800_snake_test_config(
 
     Every W800 bed shares the same snake shape, addressing, line rate and
     recovery headroom; only the hostname, the chain's far end, the playbook
-    scope and the frame size vary. All configs omit the unsupported FSDB
-    disruptions. Collapsing the rest here keeps each config below stating just
-    what differs.
+    scope and the frame size vary. Collapsing the rest here keeps each config
+    below stating just what differs.
 
     Args:
         name: Name registered in ``TestConfig.name``.
@@ -209,7 +201,6 @@ def _gen_w800_snake_test_config(
         hostname=hostname,
         line_rate=99,
         playbooks_to_include=playbooks_to_include,
-        playbooks_to_skip=_W800_UNSUPPORTED_PLAYBOOKS,
         frame_size_settings=frame_size_settings,
         postcheck_port_state_retry_count=_W800_RECOVERY_RETRY_COUNT,
         flap_recovery_check_retry_count=_W800_RECOVERY_RETRY_COUNT,

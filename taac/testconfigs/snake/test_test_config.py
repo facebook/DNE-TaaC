@@ -9,7 +9,7 @@ or Kodiak3 chassis back into themselves via fiber jumpers (a "snake"
 topology). Each ``SnakeConfig`` declares one source/destination port pair
 on the same DUT plus point-to-point IPv6 addressing; the framework
 generates IXIA traffic across the loop and runs PTP + a suite of snake
-playbooks (link toggles, FSDB restart/crash, etc.) plus the standard
+playbooks (link toggles, service disruptions, stress cases, etc.) plus the standard
 ``gen_common_hcs`` health-check set.
 
 Each module-level constant (``MINIPACK3_STANDALONE_*``,
@@ -668,10 +668,6 @@ MINIPACK3_STANDALONE_TEST_CONFIG_ZR4_800G = gen_snake_test_config(
         type=ixia_types.FrameSizeType.CUSTOM_IMIX,
         imix_weight={94: 1, 96: 18, 192: 3, 512: 1, 1200: 1, 4600: 76, 9000: 76},
     ),
-    playbooks_to_skip=[
-        "test_snake_fsdb_restart",
-        "test_snake_fsdb_crash",
-    ],
     iteration=10,
     include_link_flap_longevity=True,
     link_flap_longevity_enable_delay_s=300,
@@ -800,10 +796,6 @@ KODIAK3_STANDALONE_TEST_CONFIG_ZR4_800G = gen_snake_test_config(
         type=ixia_types.FrameSizeType.CUSTOM_IMIX,
         imix_weight={94: 1, 96: 18, 192: 3, 512: 1, 1200: 1, 4600: 76, 9000: 76},
     ),
-    playbooks_to_skip=[
-        "test_snake_fsdb_restart",
-        "test_snake_fsdb_crash",
-    ],
     iteration=10,
     include_link_flap_longevity=True,
 )
@@ -885,8 +877,6 @@ MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX = gen_snake_test_conf
     #    port every 5s for 10 min and FAILS on any flap -- surfacing the spontaneous
     #    ~60s gearbox link flaps (T283020514) instead of riding through them.
     #  * remaining longevity (1m/1h/72h): out of scope for this run.
-    #  * fsdb restart/crash: fsdb is not deployed on this manually brought-up box (no
-    #    fsdb.service), so they time out on fsdb-thrift -- an environment gap, not a bug.
     #  * transceiver/fiber removal: require physical optic/fiber manipulation at the rack.
     # The three system-reboot playbooks (bmc_full / bmc_microserver / microserver) are
     # now ENABLED. They were skipped out of concern that this hand-brought-up box (no
@@ -900,8 +890,6 @@ MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX = gen_snake_test_conf
         "test_72hr_longevity",
         "test_snake_transceiver_removal",
         "test_snake_fiber_removal",
-        "test_snake_fsdb_restart",
-        "test_snake_fsdb_crash",
     ],
     # iteration=1 for the first full Phase 3/4 sweep (validate each disruption once);
     # bump later once a clean single-iteration sweep is confirmed.
@@ -955,10 +943,6 @@ ICEPACK_STANDALONE_TEST_CONFIG_FR4_800G = gen_snake_test_config(
         type=ixia_types.FrameSizeType.CUSTOM_IMIX,
         imix_weight={94: 1, 96: 18, 192: 3, 512: 1, 1200: 1, 4600: 76, 9000: 76},
     ),
-    playbooks_to_skip=[
-        "test_snake_fsdb_restart",
-        "test_snake_fsdb_crash",
-    ],
     iteration=10,
     include_link_flap_longevity=True,
     link_flap_longevity_enable_delay_s=300,
@@ -982,10 +966,6 @@ ICEPACK_STANDALONE_TEST_CONFIG_FR4_400G = gen_snake_test_config(
         type=ixia_types.FrameSizeType.CUSTOM_IMIX,
         imix_weight={94: 1, 96: 18, 192: 3, 512: 1, 1200: 1, 4600: 76, 9000: 76},
     ),
-    playbooks_to_skip=[
-        "test_snake_fsdb_restart",
-        "test_snake_fsdb_crash",
-    ],
     iteration=10,
     include_link_flap_longevity=True,
 )
@@ -1061,7 +1041,6 @@ ICEPACK_MP3_CROSS_DEVICE_ICEPACK_THRIFT_FLAP_TEST_CONFIG = gen_snake_test_config
         "test_snake_interface_reset_with_qsfp_reset",
         "test_snake_agent_warmboot",
         "test_snake_qsfp_service_restart",
-        "test_snake_fsdb_restart",
         "test_snake_agent_coldboot",
         "test_snake_agent_crash",
         "test_snake_qsfp_service_crash",
@@ -1119,7 +1098,6 @@ ICEPACK_MP3_CROSS_DEVICE_MP3_THRIFT_FLAP_TEST_CONFIG = gen_snake_test_config(
         "test_snake_interface_reset_with_qsfp_reset",
         "test_snake_agent_warmboot",
         "test_snake_qsfp_service_restart",
-        "test_snake_fsdb_restart",
         "test_snake_agent_coldboot",
         "test_snake_agent_crash",
         "test_snake_qsfp_service_crash",

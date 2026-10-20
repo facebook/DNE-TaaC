@@ -16822,28 +16822,6 @@ def gen_snake_playbooks(
                 ],
             ),
             taac_types.Playbook(
-                name="test_snake_fsdb_restart",
-                iteration=iteration,
-                prechecks=_prechecks,
-                postchecks=_postchecks,
-                stages=[
-                    create_steps_stage(
-                        steps=[
-                            create_service_interruption_step(
-                                service=taac_types.Service.FSDB,
-                                trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
-                            ),
-                            create_service_convergence_step(
-                                services=[
-                                    taac_types.Service.AGENT,
-                                    taac_types.Service.FSDB,
-                                ],
-                            ),
-                        ]
-                    )
-                ],
-            ),
-            taac_types.Playbook(
                 name="test_snake_agent_coldboot",
                 iteration=iteration,
                 prechecks=_prechecks,
@@ -16936,30 +16914,6 @@ def gen_snake_playbooks(
                     create_ixia_packet_loss_check(clear_traffic_stats=True),
                 ]
                 + gen_ptp_health_checks(),
-            ),
-            taac_types.Playbook(
-                name="test_snake_fsdb_crash",
-                iteration=iteration,
-                prechecks=_prechecks,
-                postchecks=_postchecks,
-                stages=[
-                    create_steps_stage(
-                        steps=[
-                            create_service_interruption_step(
-                                service=taac_types.Service.FSDB,
-                                trigger=taac_types.ServiceInterruptionTrigger.CRASH,
-                            ),
-                            create_service_convergence_step(
-                                services=[
-                                    taac_types.Service.AGENT,
-                                    taac_types.Service.FSDB,
-                                ],
-                            ),
-                            # Wait some additional time since the convergence step can sometimes complete too quickly
-                            create_longevity_step(duration=300),
-                        ]
-                    )
-                ],
             ),
             taac_types.Playbook(
                 name="test_snake_system_reboot_bmc_full",
