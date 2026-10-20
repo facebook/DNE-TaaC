@@ -2030,6 +2030,7 @@ def create_bgp_nhg_random_storm_stage(
     minimum_changed_paths_per_epoch: int = 5_000,
     epoch_count: int = 48,
     epoch_interval_seconds: int = 25,
+    restoration_stage_prefix_count: int | None = None,
 ) -> Stage:
     """Create C16 as one failure-safe, topology-bound random-storm step."""
     return Stage(
@@ -2061,6 +2062,7 @@ def create_bgp_nhg_random_storm_stage(
                 minimum_changed_paths_per_epoch=minimum_changed_paths_per_epoch,
                 epoch_count=epoch_count,
                 epoch_interval_seconds=epoch_interval_seconds,
+                restoration_stage_prefix_count=restoration_stage_prefix_count,
             )
         ]
     )

@@ -1268,6 +1268,7 @@ def create_bgp_nhg_random_storm_step(
     minimum_changed_paths_per_epoch: int = 5_000,
     epoch_count: int = 48,
     epoch_interval_seconds: int = 25,
+    restoration_stage_prefix_count: int | None = None,
     description: str | None = None,
 ) -> Step:
     """Create the topology-bound CICD-EBB-16 peer-by-prefix random storm."""
@@ -1353,6 +1354,17 @@ def create_bgp_nhg_random_storm_step(
         raise ValueError("NHG random-storm seed must be an integer")
     if not isinstance(enable_control_plane_validation, bool):
         raise ValueError("enable_control_plane_validation must be a boolean")
+    staged_restore: dict[str, int] = {}
+    if restoration_stage_prefix_count is not None:
+        if (
+            isinstance(restoration_stage_prefix_count, bool)
+            or not isinstance(restoration_stage_prefix_count, int)
+            or restoration_stage_prefix_count <= 0
+        ):
+            raise ValueError("restoration_stage_prefix_count must be a positive integer")
+        staged_restore["restoration_stage_prefix_count"] = (
+            restoration_stage_prefix_count
+        )
     return create_custom_step(
         params_dict={
             "custom_step_name": "bgp_nhg_random_storm",
@@ -1364,6 +1376,7 @@ def create_bgp_nhg_random_storm_step(
             "target_membership_width": target_membership_width,
             "enable_control_plane_validation": enable_control_plane_validation,
             **numeric,
+            **staged_restore,
         },
         description=description or "Run seeded dual-stack peer-by-prefix NHG storm",
     )

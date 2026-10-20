@@ -2650,6 +2650,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     fibagent_nhg_watermark_high: int = 1000,
     fibagent_nhg_watermark_low: int = 1000,
     fibagent_restart_reprogram_wait_seconds: int = 120,
+    restoration_stage_prefix_count: int | None = None,
     enable_update_group: bool = True,
     exclude_bgp_mon: bool = True,
     bgp_mon_parent_network: str | None = None,
@@ -2671,6 +2672,10 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
         fibagent_restart_reprogram_wait_seconds: Time allowed after FibAgentBgp
             comes back for it to reprogram the full table before the
             post-restart RIB-FIB check runs; the check also retries.
+        restoration_stage_prefix_count: When set, restore the baseline this
+            many prefixes per AFI at a time instead of all at once. A one-shot
+            restore builds wide per-prefix intermediate groups that can
+            transiently overflow the Jericho2 FecLevel2 table.
     """
     target_prefix_counts = tuple(
         items.get("target_prefix_count") for items in ixia_items_by_afi.values()
@@ -2773,6 +2778,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
                     minimum_changed_paths_per_epoch=minimum_changed_paths_per_epoch,
                     epoch_count=epoch_count,
                     epoch_interval_seconds=epoch_interval_seconds,
+                    restoration_stage_prefix_count=restoration_stage_prefix_count,
                 ),
                 create_steps_stage(
                     steps=[

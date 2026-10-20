@@ -112,6 +112,9 @@ _LONGEVITY_DURATION_SECONDS = 14400
 _FULL_SCALE_FEC_PRECHECK_THRESHOLD = 15_000
 _NEXTHOP_GROUP_AGGREGATE_GUARDRAIL = 8192
 _NHG_STORM_PLAYBOOK_NAME = "bgp_ebb_nexthop_group_count_threshold_playbook"
+# Five 30-prefix blocks per AFI per stage keep the restoration transient under
+# the 104,856-entry Jericho2 FecLevel2 table; a one-shot restore overflowed it.
+_NHG_STORM_RESTORATION_STAGE_PREFIX_COUNT = 150
 _DEFAULT_EBGP_PREFIX_COUNT = 750
 _RUNTIME_UPDATE_EBGP_PREFIX_COUNT = 850
 _TC7_STATIC_EBGP_PREFIX_COUNT = 650
@@ -1477,6 +1480,7 @@ def _get_bgp_ebb_full_scale_playbooks(
             epoch_count=nhg_storm_epoch_count,
             epoch_interval_seconds=nhg_storm_epoch_interval_seconds,
             soak_duration=nhg_storm_soak_seconds,
+            restoration_stage_prefix_count=_NHG_STORM_RESTORATION_STAGE_PREFIX_COUNT,
             nexthop_group_poll_interval_seconds=(nhg_storm_poll_interval_seconds),
             nexthop_group_min_samples=nhg_storm_min_eos_samples,
             nexthop_group_min_consecutive_samples=(
