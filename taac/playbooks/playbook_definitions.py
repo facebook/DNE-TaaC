@@ -13,6 +13,7 @@ The runner-side abstract base class lives in `playbooks/playbook.py`.
 import json
 import math
 import re
+import shlex
 import typing as t
 import uuid
 from enum import Enum
@@ -84,6 +85,7 @@ from taac.health_checks.healthcheck_definitions import (
     create_port_channel_state_snapshot_check,
     create_port_counters_check,
     create_port_queue_rate_check,
+    create_port_speed_check,
     create_port_state_check,
     create_port_transceiver_check,
     create_port_tx_rx_check,
@@ -16594,6 +16596,379 @@ def create_system_reboot_playbooks(
             ],
         ),
     ]
+
+
+def create_rbb_3x200g_zr_playbooks(
+    *,
+    devices: t.List[t.Dict[str, t.Any]],
+    ixia_peer_addresses: t.List[str],
+    traffic_item_name: str,
+    iteration: int = 10,
+    recovery_wait_s: int = 300,
+    longevity_duration_s: int = 12 * 60 * 60,
+    max_packet_loss_duration_ms: str = "25",
+) -> t.List[Playbook]:
+    """Build non-system-reboot qualification playbooks for a 3x200G ZR LAG.
+
+    ``devices`` contains one entry per RBB with ``hostname``,
+    ``zr_port_channel``, ``zr_members`` and ``non_zr_interface``. Every
+    disruptive case is generated once per device. Device health checks remain
+    topology-scoped and therefore validate both ends after each disruption.
+
+    TAAC testbed isolation removes links to devices outside the declared
+    topology. ``PORT_STATE_CHECK`` only treats links between declared endpoints
+    as its implicit enabled set; the three ZR members are added explicitly and
+    the non-ZR interface is explicitly expected down. Other isolated ports do
+    not participate in this check.
+    """
+
+    def _device_tag(device: t.Dict[str, t.Any]) -> str:
+        return device["hostname"].replace(".", "_").replace("-", "_")
+
+    def _disabled_interfaces() -> t.List[t.Dict[str, str]]:
+        return [
+            {
+                "switch_name": device["hostname"],
+                "interface_name": device["non_zr_interface"],
+            }
+            for device in devices
+        ]
+
+    def _zr_member_interfaces() -> t.List[t.Dict[str, str]]:
+        return [
+            {"switch_name": device["hostname"], "interface_name": member}
+            for device in devices
+            for member in device["zr_members"]
+        ]
+
+    def _port_channel_names() -> t.Dict[str, t.List[str]]:
+        return {
+            device["hostname"]: [device["zr_port_channel"]]
+            for device in devices
+        }
+
+    def _port_speed_params() -> t.Dict[str, t.Dict[str, t.Any]]:
+        return {
+            device["hostname"]: {
+                "interfaces": [
+                    {"interface_name": member, "expected_speed": 200}
+                    for member in device["zr_members"]
+                ]
+            }
+            for device in devices
+        }
+
+    def _recovery_checks() -> t.List[PointInTimeHealthCheck]:
+        return [
+            create_port_state_check(
+                additional_interfaces=_zr_member_interfaces(),
+                disabled_interfaces=_disabled_interfaces(),
+                retry_count=30,
+                retry_delay_seconds=10,
+                retry_delay_multiplier=1.0,
+            ),
+            create_port_speed_check(json_params=_port_speed_params()),
+            create_port_channel_expected_state_check(
+                json_params={
+                    "port_channel_names": _port_channel_names(),
+                    "expected_up": True,
+                }
+            ),
+            create_openr_spark_neighbor_check(
+                expected_neighbor_count=1,
+                retry_count=30,
+                retry_delay_seconds=10,
+                retry_delay_multiplier=1.0,
+            ),
+            create_bgp_session_establish_check(
+                ignore_all_prefixes_except=ixia_peer_addresses,
+                expected_established_sessions=1,
+                retry_count=30,
+                retry_delay_seconds=10,
+                retry_delay_multiplier=1.0,
+            ),
+        ]
+
+    def _packet_loss_check(
+        *, clear_traffic_stats: bool
+    ) -> PointInTimeHealthCheck:
+        # At ~400G, stopping a bidirectional IXIA traffic item leaves a small
+        # Tx/Rx statistics skew. On rb001-03 this was 13-18 ms while every ZR
+        # member had zero uncorrected FEC codewords and zero ASIC input errors.
+        # Gate on loss duration so the check remains strict without treating
+        # the traffic-stop measurement artifact as product packet loss.
+        return create_ixia_packet_loss_check(
+            thresholds=[
+                hc_types.PacketLossThreshold(
+                    names=[traffic_item_name],
+                    str_value=max_packet_loss_duration_ms,
+                    metric=hc_types.PacketLossMetric.DURATION,
+                )
+            ],
+            clear_traffic_stats=clear_traffic_stats,
+        )
+
+    def _prechecks() -> t.List[PointInTimeHealthCheck]:
+        return _recovery_checks() + [
+            _packet_loss_check(clear_traffic_stats=False)
+        ]
+
+    def _postchecks(
+        *, clear_traffic_stats: bool = True
+    ) -> t.List[PointInTimeHealthCheck]:
+        return _recovery_checks() + [
+            _packet_loss_check(clear_traffic_stats=clear_traffic_stats)
+        ]
+
+    def _member_flap_steps(
+        device: t.Dict[str, t.Any], method: taac_types.InterfaceFlapMethod
+    ) -> t.List[Step]:
+        steps: t.List[Step] = []
+        for member in device["zr_members"]:
+            steps.extend(
+                [
+                    create_interface_flap_step(
+                        enable=False,
+                        interfaces=[member],
+                        interface_flap_method=method,
+                        device_name=device["hostname"],
+                        delay=10,
+                        description=f"Disable {device['hostname']}:{member}",
+                    ),
+                    create_interface_flap_step(
+                        enable=True,
+                        interfaces=[member],
+                        interface_flap_method=method,
+                        device_name=device["hostname"],
+                        delay=recovery_wait_s,
+                        description=(
+                            f"Enable {device['hostname']}:{member} and wait for ZR relock"
+                        ),
+                    ),
+                ]
+            )
+        return steps
+
+    def _member_flap_playbook(
+        name: str,
+        device: t.Dict[str, t.Any],
+        method: taac_types.InterfaceFlapMethod,
+    ) -> Playbook:
+        return Playbook(
+            name=f"{name}_{_device_tag(device)}",
+            iteration=iteration,
+            prechecks=_prechecks(),
+            stages=[
+                create_steps_stage(steps=_member_flap_steps(device, method))
+            ],
+            postchecks=_postchecks(),
+            traffic_items_to_start=[traffic_item_name],
+        )
+
+    def _qsfp_reset_playbook(device: t.Dict[str, t.Any]) -> Playbook:
+        return Playbook(
+            name=f"test_rbb_zr_qsfp_reset_{_device_tag(device)}",
+            iteration=iteration,
+            prechecks=_prechecks(),
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        create_interface_flap_step(
+                            enable=False,
+                            interfaces=[member],
+                            interface_flap_method=(
+                                taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_RESET
+                            ),
+                            device_name=device["hostname"],
+                            delay=recovery_wait_s,
+                            description=(
+                                f"Reset the transceiver for {device['hostname']}:{member}"
+                            ),
+                        )
+                        for member in device["zr_members"]
+                    ]
+                )
+            ],
+            postchecks=_postchecks(),
+            traffic_items_to_start=[traffic_item_name],
+        )
+
+    def _service_playbook(
+        name: str,
+        device: t.Dict[str, t.Any],
+        service: Service,
+        trigger: ServiceInterruptionTrigger,
+        cold_boot: bool = False,
+        clear_traffic_stats: bool = True,
+    ) -> Playbook:
+        services = [Service.AGENT]
+        if service == Service.QSFP_SERVICE:
+            services.append(Service.QSFP_SERVICE)
+
+        return Playbook(
+            name=f"{name}_{_device_tag(device)}",
+            iteration=iteration,
+            prechecks=_prechecks(),
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        create_service_interruption_step(
+                            service=service,
+                            trigger=trigger,
+                            create_cold_boot_file=cold_boot,
+                            device_regexes=[device["hostname"]],
+                        ),
+                        create_service_convergence_step(
+                            services=services,
+                            timeout=recovery_wait_s,
+                            device_regexes=[device["hostname"]],
+                        ),
+                        create_longevity_step(
+                            duration=recovery_wait_s,
+                            description=(
+                                "Wait for ZR links and control plane to settle"
+                            ),
+                        ),
+                    ]
+                )
+            ],
+            postchecks=_postchecks(clear_traffic_stats=clear_traffic_stats),
+            traffic_items_to_start=[traffic_item_name],
+        )
+
+    def _port_channel_flap_playbook(device: t.Dict[str, t.Any]) -> Playbook:
+        port_channel = shlex.quote(device["zr_port_channel"])
+        disable_cmd = f"fboss2 set port state {port_channel} disable"
+        enable_cmd = f"fboss2 set port state {port_channel} enable"
+        return Playbook(
+            name=f"test_rbb_zr_port_channel_flap_{_device_tag(device)}",
+            iteration=iteration,
+            prechecks=_prechecks(),
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        create_run_ssh_command_step(
+                            cmd=disable_cmd,
+                            device_regexes=[device["hostname"]],
+                            description=(
+                                f"Admin-disable {device['hostname']}:"
+                                f"{device['zr_port_channel']}"
+                            ),
+                        ),
+                        create_longevity_step(
+                            duration=10,
+                            description="Hold the ZR port-channel down",
+                        ),
+                        create_run_ssh_command_step(
+                            cmd=enable_cmd,
+                            device_regexes=[device["hostname"]],
+                            description=(
+                                f"Admin-enable {device['hostname']}:"
+                                f"{device['zr_port_channel']}"
+                            ),
+                        ),
+                        create_longevity_step(
+                            duration=recovery_wait_s,
+                            description=(
+                                "Wait for the 3-member ZR port-channel to recover"
+                            ),
+                        ),
+                    ]
+                )
+            ],
+            cleanup_steps=[
+                create_run_ssh_command_step(
+                    cmd=enable_cmd,
+                    device_regexes=[device["hostname"]],
+                    description=(
+                        f"Cleanup: admin-enable {device['hostname']}:"
+                        f"{device['zr_port_channel']}"
+                    ),
+                )
+            ],
+            postchecks=_postchecks(),
+            traffic_items_to_start=[traffic_item_name],
+        )
+
+    playbooks: t.List[Playbook] = []
+    for device in devices:
+        playbooks.extend(
+            [
+                _member_flap_playbook(
+                    "test_rbb_zr_member_flap",
+                    device,
+                    taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE,
+                ),
+                _member_flap_playbook(
+                    "test_rbb_zr_qsfp_low_power",
+                    device,
+                    taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_POWER,
+                ),
+                _member_flap_playbook(
+                    "test_rbb_zr_qsfp_util_disable",
+                    device,
+                    taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_TX,
+                ),
+                _qsfp_reset_playbook(device),
+                _service_playbook(
+                    "test_rbb_zr_agent_warmboot",
+                    device,
+                    Service.AGENT,
+                    ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                    clear_traffic_stats=False,
+                ),
+                _service_playbook(
+                    "test_rbb_zr_agent_coldboot",
+                    device,
+                    Service.AGENT,
+                    ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                    cold_boot=True,
+                ),
+                _service_playbook(
+                    "test_rbb_zr_agent_crash",
+                    device,
+                    Service.AGENT,
+                    ServiceInterruptionTrigger.CRASH,
+                ),
+                _service_playbook(
+                    "test_rbb_zr_qsfp_service_restart",
+                    device,
+                    Service.QSFP_SERVICE,
+                    ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                    clear_traffic_stats=False,
+                ),
+                _service_playbook(
+                    "test_rbb_zr_qsfp_service_crash",
+                    device,
+                    Service.QSFP_SERVICE,
+                    ServiceInterruptionTrigger.CRASH,
+                ),
+                _port_channel_flap_playbook(device),
+            ]
+        )
+
+    playbooks.append(
+        Playbook(
+            name="test_rbb_zr_12hr_longevity",
+            prechecks=_prechecks(),
+            stages=[
+                create_steps_stage(
+                    steps=[
+                        create_longevity_step(
+                            duration=longevity_duration_s,
+                            collect_port_state=True,
+                            poll_interval=5,
+                            fail_on_flap=True,
+                            description="12-hour ZR traffic and link stability soak",
+                        )
+                    ]
+                )
+            ],
+            postchecks=_postchecks(),
+            traffic_items_to_start=[traffic_item_name],
+        )
+    )
+    return playbooks
 
 
 def gen_snake_playbooks(
