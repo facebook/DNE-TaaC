@@ -37,6 +37,21 @@ _REDUCED_TRANSITION_PLAYBOOK_NAMES = [
     "SPEED_FLIP_51T_SPD_021_400G_200G_TO_800G_REDUCED",
 ]
 
+_REDUCED_TRANSITION_PLAYBOOK_NAMES = [
+    "SPEED_FLIP_51T_SPD_010_2X100G_TO_2X200G_REDUCED",
+    "SPEED_FLIP_51T_SPD_011_2X100G_TO_2X400G_REDUCED",
+    "SPEED_FLIP_51T_SPD_012_2X200G_TO_2X400G_REDUCED",
+    "SPEED_FLIP_51T_SPD_013_2X100G_TO_200G_400G_REDUCED",
+    "SPEED_FLIP_51T_SPD_014_2X100G_TO_400G_200G_REDUCED",
+    "SPEED_FLIP_51T_SPD_015_2X200G_TO_200G_400G_REDUCED",
+    "SPEED_FLIP_51T_SPD_016_2X200G_TO_400G_200G_REDUCED",
+    "SPEED_FLIP_51T_SPD_017_2X400G_TO_800G_REDUCED",
+    "SPEED_FLIP_51T_SPD_018_2X200G_TO_800G_REDUCED",
+    "SPEED_FLIP_51T_SPD_019_2X100G_TO_800G_REDUCED",
+    "SPEED_FLIP_51T_SPD_020_200G_400G_TO_800G_REDUCED",
+    "SPEED_FLIP_51T_SPD_021_400G_200G_TO_800G_REDUCED",
+]
+
 
 def _health_check_params(speed: int) -> dict[str, object]:
     return {
@@ -149,6 +164,87 @@ class ReusableSpeedFlipPlaybookTest(unittest.TestCase):
 
         self.assertEqual(wrapped.cleanup_steps, playbook.cleanup_steps)
 
+    def test_builds_stateful_transition_and_unwinds_patchers_lifo(self) -> None:
+        factory = getattr(
+            playbook_definitions,
+            "create_stateful_bidirectional_speed_flip_playbook",
+            None,
+        )
+        patcher_spec = getattr(playbook_definitions, "SpeedFlipPatcherSpec", None)
+        self.assertIsNotNone(factory)
+        self.assertIsNotNone(patcher_spec)
+        if factory is None or patcher_spec is None:
+            return
+
+        initial = patcher_spec(
+            name="initial_100",
+            endpoints=_ENDPOINTS,
+            speed_in_gbps=100,
+        )
+        target_200 = patcher_spec(
+            name="target_200",
+            endpoints={_DUT: ["eth1/10/1"], _PEER: ["eth1/3/1"]},
+            speed_in_gbps=200,
+        )
+        target_400 = patcher_spec(
+            name="target_400",
+            endpoints={_DUT: ["eth1/10/5"], _PEER: ["eth1/3/5"]},
+            speed_in_gbps=400,
+        )
+
+        playbook = factory(
+            name="STATEFUL_SPEED_FLIP",
+            initial_patchers=[initial],
+            target_patchers=[target_200, target_400],
+            initial_health_check_params=_health_check_params(100),
+            target_health_check_params={
+                _DUT: {
+                    "interfaces": [
+                        {"interface_name": "eth1/10/1", "expected_speed": 200},
+                        {"interface_name": "eth1/10/5", "expected_speed": 400},
+                    ]
+                },
+                _PEER: {
+                    "interfaces": [
+                        {"interface_name": "eth1/3/1", "expected_speed": 200},
+                        {"interface_name": "eth1/3/5", "expected_speed": 400},
+                    ]
+                },
+            },
+            target_port_cage_count=1,
+            iteration=1,
+        )
+
+        patcher_operations = [
+            (
+                t.cast(str, params["patcher_name"]),
+                t.cast(bool, params["register_patcher"]),
+            )
+            for stage in playbook.stages
+            for step in stage.steps
+            if "register_patcher" in (params := _step_params(step))
+        ]
+        self.assertEqual(
+            patcher_operations,
+            [
+                ("initial_100", True),
+                ("target_200", True),
+                ("target_400", True),
+                ("target_400", False),
+                ("target_200", False),
+                ("initial_100", False),
+            ],
+        )
+        self.assertEqual(playbook.iteration, 1)
+        self.assertEqual(
+            [
+                t.cast(str, _step_params(step)["patcher_name"])
+                for step in playbook.cleanup_steps or []
+                if "patcher_name" in _step_params(step)
+            ],
+            ["target_400", "target_200", "initial_100"],
+        )
+
 
 class SpeedFlip51TTestConfigTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -190,6 +286,163 @@ class SpeedFlip51TTestConfigTest(unittest.TestCase):
             register_params = _step_params(playbook.stages[0].steps[0])
             self.assertEqual(register_params["endpoints"], _ENDPOINTS)
             self.assertEqual(register_params["target_port_cage_count"], 1)
+
+        for playbook in test_config.playbooks:
+            for stage in playbook.stages:
+                for step in stage.steps:
+                    params = _step_params(step)
+                    if "register_patcher" in params:
+                        self.assertEqual(params["target_port_cage_count"], 1)
+
+    def test_reduced_transition_cases_use_one_iteration(self) -> None:
+        playbooks_by_name = {
+            playbook.name: playbook for playbook in self.test_config.playbooks
+        }
+
+        for name in _REDUCED_TRANSITION_PLAYBOOK_NAMES:
+            self.assertEqual(playbooks_by_name[name].iteration, 1)
+
+    def test_reduced_cases_wait_for_the_native_state_before_postchecks(self) -> None:
+        playbooks_by_name = {
+            playbook.name: playbook for playbook in self.test_config.playbooks
+        }
+
+        for name in _REDUCED_TRANSITION_PLAYBOOK_NAMES:
+            last_stage = playbooks_by_name[name].stages[-1]
+            self.assertEqual(
+                [step.name for step in last_stage.steps],
+                [
+                    taac_types.StepName.VERIFY_PORT_OPERATIONAL_STATE,
+                    taac_types.StepName.VERIFY_PORT_OPERATIONAL_STATE,
+                    taac_types.StepName.VALIDATION_STEP,
+                ],
+            )
+
+    def test_reduced_cases_encode_every_requested_speed_transition(self) -> None:
+        playbooks_by_name = {
+            playbook.name: playbook for playbook in self.test_config.playbooks
+        }
+
+        def speed_operations(name: str) -> list[tuple[int, bool]]:
+            return [
+                (
+                    t.cast(int, params["speed_in_gbps"]),
+                    t.cast(bool, params["register_patcher"]),
+                )
+                for stage in playbooks_by_name[name].stages
+                for step in stage.steps
+                if "register_patcher" in (params := _step_params(step))
+            ]
+
+        expected_operations = [
+            [(100, True), (200, True), (200, False), (100, False)],
+            [(100, True), (400, True), (400, False), (100, False)],
+            [(200, True), (400, True), (400, False), (200, False)],
+            [
+                (100, True),
+                (200, True),
+                (400, True),
+                (400, False),
+                (200, False),
+                (100, False),
+            ],
+            [
+                (100, True),
+                (200, True),
+                (400, True),
+                (400, False),
+                (200, False),
+                (100, False),
+            ],
+            [
+                (200, True),
+                (200, True),
+                (400, True),
+                (400, False),
+                (200, False),
+                (200, False),
+            ],
+            [
+                (200, True),
+                (400, True),
+                (200, True),
+                (200, False),
+                (400, False),
+                (200, False),
+            ],
+        ]
+        for name, expected in zip(
+            _REDUCED_TRANSITION_PLAYBOOK_NAMES[:7], expected_operations
+        ):
+            self.assertEqual(speed_operations(name), expected)
+
+    def test_spd_017_through_021_cover_subsumable_up_and_down_sequentially(
+        self,
+    ) -> None:
+        playbooks_by_name = {
+            playbook.name: playbook for playbook in self.test_config.playbooks
+        }
+
+        for name in _REDUCED_TRANSITION_PLAYBOOK_NAMES[7:]:
+            playbook = playbooks_by_name[name]
+            flap_operations = [
+                (
+                    t.cast(bool, params["enable"]),
+                    t.cast(str, params["device_name"]),
+                    tuple(t.cast(list[str], params["interfaces"])),
+                )
+                for stage in playbook.stages
+                for step in stage.steps
+                if step.name == taac_types.StepName.INTERFACE_FLAP_STEP
+                for params in [_step_params(step)]
+            ]
+            self.assertIn((True, _DUT, ("eth1/10/5",)), flap_operations)
+            self.assertIn((True, _PEER, ("eth1/3/5",)), flap_operations)
+            self.assertIn((False, _DUT, ("eth1/10/5",)), flap_operations)
+            self.assertIn((False, _PEER, ("eth1/3/5",)), flap_operations)
+
+            speed_operations = [
+                (
+                    t.cast(int, params["speed_in_gbps"]),
+                    t.cast(bool, params["register_patcher"]),
+                )
+                for stage in playbook.stages
+                for step in stage.steps
+                if "register_patcher" in (params := _step_params(step))
+            ]
+            self.assertEqual(sum(speed == 800 for speed, _ in speed_operations), 4)
+
+    def test_800g_cleanup_unregisters_each_patcher_once(self) -> None:
+        playbooks_by_name = {
+            playbook.name: playbook for playbook in self.test_config.playbooks
+        }
+
+        for name in _REDUCED_TRANSITION_PLAYBOOK_NAMES[7:]:
+            cleanup_patcher_names = [
+                t.cast(str, params["patcher_name"])
+                for step in playbooks_by_name[name].cleanup_steps or []
+                if "patcher_name" in (params := _step_params(step))
+            ]
+            self.assertEqual(
+                cleanup_patcher_names,
+                list(dict.fromkeys(cleanup_patcher_names)),
+            )
+
+    def test_100g_to_mixed_cases_transition_through_2x200g(self) -> None:
+        playbooks_by_name = {
+            playbook.name: playbook for playbook in self.test_config.playbooks
+        }
+
+        for name in _REDUCED_TRANSITION_PLAYBOOK_NAMES[3:5]:
+            registered_200g = [
+                params
+                for stage in playbooks_by_name[name].stages
+                for step in stage.steps
+                if (params := _step_params(step)).get("register_patcher") is True
+                and params.get("speed_in_gbps") == 200
+            ]
+            self.assertEqual(len(registered_200g), 1)
+            self.assertEqual(registered_200g[0]["endpoints"], _ENDPOINTS)
 
     def test_replaces_the_old_bundled_ko3_config(self) -> None:
         names = [
@@ -299,6 +552,35 @@ class SpeedFlip51TTestConfigTest(unittest.TestCase):
                     {check.name for check in playbook.snapshot_checks or []}
                 )
             )
+            self.assertNotIn(
+                hc_types.CheckName.BGP_PEER_ROUTE_CHECK,
+                {check.name for check in playbook.snapshot_checks or []},
+            )
+
+    def test_bgp_checks_are_scoped_to_the_two_ixia_peers(self) -> None:
+        expected_peers = [
+            "2401:db00:e50d:11:9::11",
+            "2401:db00:e50d:11:8::11",
+        ]
+
+        for playbook in self.test_config.playbooks:
+            bgp_checks = [
+                check
+                for check in list(playbook.prechecks or [])
+                + list(playbook.postchecks or [])
+                if check.name == hc_types.CheckName.BGP_SESSION_ESTABLISH_CHECK
+            ]
+            self.assertEqual(len(bgp_checks), 2)
+            for check in bgp_checks:
+                self.assertIsNotNone(check.check_params)
+                params = t.cast(taac_types.Params, check.check_params)
+                self.assertIsNotNone(params.json_params)
+                self.assertEqual(
+                    json.loads(t.cast(str, params.json_params))[
+                        "ignore_all_prefixes_except"
+                    ],
+                    expected_peers,
+                )
 
     def test_configures_and_cleans_device_side_bgp_peers(self) -> None:
         setup_tasks = list(self.test_config.setup_tasks or [])
