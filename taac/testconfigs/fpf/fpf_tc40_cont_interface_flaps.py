@@ -10,7 +10,7 @@ facing that host via LLDP and rapidly flaps them. All 8 GTSWs flap IN PARALLEL
 (asyncio.gather inside one custom step) with a 7s up / 7s down symmetric cycle,
 for 15 minutes — maximum cross-plane chaos on the chosen host. After the flaps
 stop, a stable-state longevity playbook (same expectations as
-fpf_stress_test_config) validates full recovery.
+fpf_tc41_longevity_pristine) validates full recovery.
 
 Two-playbook "longevity-anchored health check" pattern:
   1. Disrupt playbook captures the exact UP-port set across all eight GTSWs,

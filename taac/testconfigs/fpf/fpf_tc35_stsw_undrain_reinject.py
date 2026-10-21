@@ -8,7 +8,8 @@ Undrains an STSW plane via the on-box LOCAL_DRAINER, then re-injects the FPF
 prefixes on the trigger STSWs (undrain always re-injects; the base community
 list is used with NO drain-marker, so the plane returns to fully preferred).
 After a 5-minute longevity settle, the steady state is validated against the
-ordinary STABLE-STATE expectation contract (same as fpf_stress_test_config):
+ordinary STABLE-STATE expectation contract (same as
+fpf_tc41_longevity_pristine):
 the previously-drained plane is fully reachable again, all sessions up, no loss.
 
 The single self-contained playbook first establishes and verifies a drained

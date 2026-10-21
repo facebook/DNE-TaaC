@@ -19,7 +19,8 @@ Two-playbook "longevity-anchored health check" pattern:
      TaacRunner stamps a FRESH test_case_start_time at the start of THIS
      playbook, so every stable-state health check (prod-prefix, HRT mem/driver,
      host-spray, convergence/session) anchors its query window at LONGEVITY
-     START with the SAME stable-state expectations as fpf_stress_test_config.
+     START with the SAME stable-state expectations as
+     fpf_tc41_longevity_pristine.
      The noisy flap window is excluded.
 
 Downlink interface selection (runtime LLDP):

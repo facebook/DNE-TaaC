@@ -17,7 +17,8 @@ HRT runs on the rtptest host, NOT on a FBOSS switch, so the restart goes through
 the host-SSH path (lab-ssh as root), the same transport used by the ib-traffic /
 NIC-flap host steps — see ``fpf_restart_hrt`` in custom_step.py.
 
-Two-playbook structure (both full stable-state v2 — same as fpf_stress_test_config):
+Two-playbook structure (both full stable-state v2 — same as
+fpf_tc41_longevity_pristine):
   1. Disrupt playbook: inject + stabilize, record restart initiation, restart
      HRT, settle 120s, then validate bounded production-prefix recovery plus the
      remaining stable-state checks.

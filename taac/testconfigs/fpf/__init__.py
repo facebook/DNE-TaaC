@@ -14,9 +14,6 @@ from taac.testconfigs.fpf.fpf_gar_class_d import (
 from taac.testconfigs.fpf.fpf_shared_injection_suite import (
     TEST_CONFIG as FPF_SHARED_INJECTION_SUITE,
 )
-from taac.testconfigs.fpf.fpf_stress_test_config import (
-    TEST_CONFIG as FPF_STRESS_TEST_CONFIG,
-)
 from taac.testconfigs.fpf.fpf_tc04_wedge_agent_warmboot import (
     TEST_CONFIG as FPF_TC04_WEDGE_AGENT_WARMBOOT,
 )
@@ -161,7 +158,6 @@ __all__ = [
     "FPF_GAR_CLASS_B_C",
     "FPF_GAR_CLASS_D",
     "FPF_SHARED_INJECTION_SUITE",
-    "FPF_STRESS_TEST_CONFIG",
     "FPF_TC04_WEDGE_AGENT_WARMBOOT",
     "FPF_TC05_BGP_GR_WITHIN_WINDOW",
     "FPF_TC06_BGP_GR_BEYOND_WINDOW",
