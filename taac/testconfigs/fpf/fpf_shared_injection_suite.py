@@ -551,6 +551,41 @@ def _service_restart_playbook(
     ]
 
 
+def _tc26(*, spray, skip_ssh) -> list:
+    """tc26: qsfp_service restart on the DUT GTSW.
+
+    qsfp_service manages transceivers and does not touch routing or forwarding,
+    so the contract is identical to stable state: no affected RIB and no
+    reconvergence assertion (unlike the bgp/fsdb/agent restarts above).
+    """
+    return [
+        create_fpf_service_restart_playbook(
+            gtsws=OBSERVER_GTSWS,
+            hosts=GPU_HOSTS,
+            trigger_stsws=ALL_STSW_TRIGGERS,
+            service=taac_types.Service.QSFP_SERVICE,
+            restart_device_regexes=[DUT_GTSW],
+            affected_rib=None,
+            prefix_count=PREFIX_COUNT,
+            community_list=DEFAULT_COMMUNITY_LIST,
+            injected_lanes=INJECTED_LANES,
+            prod_prefixes=PROD_PREFIXES,
+            prod_prefixes_by_host=PROD_PREFIXES_BY_HOST,
+            hrt_memory_hosts=HRT_MEMORY_HOSTS,
+            hrt_driver_hosts=HRT_MEMORY_HOSTS,
+            fsdb_expected_total=EXPECTED_FSDB_SESSION_COUNT,
+            stabilization_delay_sec=120,
+            settle_after_restart_sec=120,
+            skip_ssh_dependent_checks=skip_ssh,
+            spray_hosts=spray,
+            ib_traffic_config=_ib_readiness_config(spray),
+            skip_injection=True,
+            rf_vf_groups=RF_VF_GROUPS,
+            playbook_name="fpf_tc26_qsfp_service_restart",
+        )
+    ]
+
+
 def _tc23(*, spray, skip_ssh) -> list:
     return _service_restart_playbook(
         spray=spray,
@@ -1695,6 +1730,7 @@ def create_fpf_shared_injection_suite_test_config() -> TestConfig:
     playbooks += _tc07(spray=spray)
     playbooks += _tc08(spray=spray)
     # Service restarts.
+    playbooks += _tc26(spray=spray, skip_ssh=skip_ssh)
     playbooks += _tc23(spray=spray, skip_ssh=skip_ssh)
     playbooks += _tc24(spray=spray, skip_ssh=skip_ssh)
     playbooks += _tc04(spray=spray, skip_ssh=skip_ssh)

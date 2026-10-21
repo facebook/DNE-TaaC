@@ -433,6 +433,18 @@ class TestFpfGracefulRestartConfigs(unittest.TestCase):
             with self.subTest(playbook=name):
                 _assert_ods_policy(self, _playbook(shared, name), transient_allowed)
 
+    def test_shared_suite_runs_tc26_qsfp_restart_before_routing_restarts(self):
+        config = (
+            fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
+        )
+        names = [playbook.name for playbook in config.playbooks]
+
+        self.assertEqual(names.count("fpf_tc26_qsfp_service_restart"), 1)
+        self.assertLess(
+            names.index("fpf_tc26_qsfp_service_restart"),
+            names.index("fpf_tc23_bgp_restart"),
+        )
+
     def test_shared_suite_uses_tc04_as_the_single_wedge_warm_restart(self):
         config = (
             fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
