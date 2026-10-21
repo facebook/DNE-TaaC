@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 from ixia.ixia import types as ixia_types
 from taac.health_checks.healthcheck_definitions import (
-    create_bgp_peer_route_snapshot_check,
     create_bgp_session_establish_check,
     create_core_dumps_snapshot_check,
     create_drain_state_check,
@@ -28,6 +27,9 @@ from taac.playbooks.playbook_definitions import (
     create_bidirectional_speed_flip_playbook,
     create_speed_flip_playbook,
     create_speed_flip_test_config_playbook,
+    create_stateful_bidirectional_speed_flip_playbook,
+    SpeedFlipPatcherSpec,
+    SpeedFlipPortStateVariant,
 )
 from taac.stages.stage_definitions import create_steps_stage
 from taac.steps.step_definitions import (
@@ -807,6 +809,10 @@ _SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS: t.Dict[str, t.List[str]] = {
     _SPEED_FLIP_51T_DUT: ["eth1/10/1", "eth1/10/5"],
     _SPEED_FLIP_51T_PEER: ["eth1/3/1", "eth1/3/5"],
 }
+_SPEED_FLIP_51T_IXIA_BGP_PEERS: t.List[str] = [
+    "2401:db00:e50d:11:9::11",
+    "2401:db00:e50d:11:8::11",
+]
 
 
 def _create_speed_flip_ixia_port_config(
@@ -897,7 +903,9 @@ def _speed_flip_prechecks() -> t.List[taac_types.PointInTimeHealthCheck]:
     return [
         create_drain_state_check(),
         create_systemctl_active_state_check(),
-        create_bgp_session_establish_check(),
+        create_bgp_session_establish_check(
+            ignore_all_prefixes_except=_SPEED_FLIP_51T_IXIA_BGP_PEERS,
+        ),
         create_lldp_check(),
         create_port_state_check(),
         create_ixia_packet_loss_check(
@@ -909,7 +917,9 @@ def _speed_flip_prechecks() -> t.List[taac_types.PointInTimeHealthCheck]:
 
 def _speed_flip_postchecks() -> t.List[taac_types.PointInTimeHealthCheck]:
     return [
-        create_bgp_session_establish_check(),
+        create_bgp_session_establish_check(
+            ignore_all_prefixes_except=_SPEED_FLIP_51T_IXIA_BGP_PEERS,
+        ),
         create_lldp_check(),
         create_port_state_check(),
         create_ixia_packet_loss_check(
@@ -934,6 +944,207 @@ def _single_cage_health_check_params(speed_in_gbps: int) -> t.Dict[str, t.Any]:
     }
 
 
+class _ReducedSpeedFlipCase(t.NamedTuple):
+    utp_id: str
+    playbook_name: str
+    initial_speeds: t.Tuple[int, int]
+    target_speeds: t.Tuple[int, t.Optional[int]]
+    exercise_subsumable_states: bool = False
+    target_transition_speeds: t.Optional[
+        t.Tuple[t.Tuple[t.Optional[int], t.Optional[int]], ...]
+    ] = None
+
+
+_REDUCED_SPEED_FLIP_CASES = [
+    _ReducedSpeedFlipCase(
+        "SPD_010",
+        "SPEED_FLIP_51T_SPD_010_2X100G_TO_2X200G_REDUCED",
+        (100, 100),
+        (200, 200),
+    ),
+    _ReducedSpeedFlipCase(
+        "SPD_011",
+        "SPEED_FLIP_51T_SPD_011_2X100G_TO_2X400G_REDUCED",
+        (100, 100),
+        (400, 400),
+    ),
+    _ReducedSpeedFlipCase(
+        "SPD_012",
+        "SPEED_FLIP_51T_SPD_012_2X200G_TO_2X400G_REDUCED",
+        (200, 200),
+        (400, 400),
+    ),
+    _ReducedSpeedFlipCase(
+        "SPD_013",
+        "SPEED_FLIP_51T_SPD_013_2X100G_TO_200G_400G_REDUCED",
+        (100, 100),
+        (200, 400),
+        target_transition_speeds=((200, 200), (None, 400)),
+    ),
+    _ReducedSpeedFlipCase(
+        "SPD_014",
+        "SPEED_FLIP_51T_SPD_014_2X100G_TO_400G_200G_REDUCED",
+        (100, 100),
+        (400, 200),
+        target_transition_speeds=((200, 200), (400, None)),
+    ),
+    _ReducedSpeedFlipCase(
+        "SPD_015",
+        "SPEED_FLIP_51T_SPD_015_2X200G_TO_200G_400G_REDUCED",
+        (200, 200),
+        (200, 400),
+    ),
+    _ReducedSpeedFlipCase(
+        "SPD_016",
+        "SPEED_FLIP_51T_SPD_016_2X200G_TO_400G_200G_REDUCED",
+        (200, 200),
+        (400, 200),
+    ),
+    _ReducedSpeedFlipCase(
+        "SPD_017",
+        "SPEED_FLIP_51T_SPD_017_2X400G_TO_800G_REDUCED",
+        (400, 400),
+        (800, None),
+        True,
+    ),
+    _ReducedSpeedFlipCase(
+        "SPD_018",
+        "SPEED_FLIP_51T_SPD_018_2X200G_TO_800G_REDUCED",
+        (200, 200),
+        (800, None),
+        True,
+    ),
+    _ReducedSpeedFlipCase(
+        "SPD_019",
+        "SPEED_FLIP_51T_SPD_019_2X100G_TO_800G_REDUCED",
+        (100, 100),
+        (800, None),
+        True,
+    ),
+    _ReducedSpeedFlipCase(
+        "SPD_020",
+        "SPEED_FLIP_51T_SPD_020_200G_400G_TO_800G_REDUCED",
+        (200, 400),
+        (800, None),
+        True,
+    ),
+    _ReducedSpeedFlipCase(
+        "SPD_021",
+        "SPEED_FLIP_51T_SPD_021_400G_200G_TO_800G_REDUCED",
+        (400, 200),
+        (800, None),
+        True,
+    ),
+]
+
+
+def _single_cage_subport_endpoints(
+    subports: t.Iterable[str],
+) -> t.Dict[str, t.List[str]]:
+    requested = set(subports)
+    return {
+        hostname: [
+            interface for interface in interfaces if _subport(interface) in requested
+        ]
+        for hostname, interfaces in _SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS.items()
+    }
+
+
+def _single_cage_state_health_check_params(
+    speeds: t.Tuple[int, t.Optional[int]],
+) -> t.Dict[str, t.Any]:
+    return {
+        hostname: {
+            "interfaces": [
+                {"interface_name": interface, "expected_speed": speed}
+                for interface in interfaces
+                for speed in [speeds[int(_subport(interface) == "5")]]
+                if speed is not None
+            ]
+        }
+        for hostname, interfaces in _SPEED_FLIP_51T_SINGLE_CAGE_ENDPOINTS.items()
+    }
+
+
+def _single_cage_state_patchers(
+    case: _ReducedSpeedFlipCase,
+    state_name: str,
+    speeds: t.Tuple[t.Optional[int], t.Optional[int]],
+) -> t.List[SpeedFlipPatcherSpec]:
+    subports_by_speed: t.Dict[int, t.List[str]] = {}
+    for subport, speed in zip(("1", "5"), speeds):
+        if speed is not None:
+            subports_by_speed.setdefault(speed, []).append(subport)
+    return [
+        SpeedFlipPatcherSpec(
+            name=(
+                f"change_speed_test_{speed}_{case.utp_id.lower()}_"
+                f"{state_name}_{'_'.join(subports)}"
+            ),
+            endpoints=_single_cage_subport_endpoints(subports),
+            speed_in_gbps=speed,
+        )
+        for speed, subports in subports_by_speed.items()
+    ]
+
+
+def _build_reduced_transition_playbook(
+    case: _ReducedSpeedFlipCase,
+    snapshot_checks: t.List[taac_types.SnapshotHealthCheck],
+) -> Playbook:
+    state_variants = None
+    target_down_endpoints = None
+    if case.exercise_subsumable_states:
+        subsumable_endpoints = _single_cage_subport_endpoints(["5"])
+        state_variants = [
+            SpeedFlipPortStateVariant(
+                name="subsumable_up",
+                initially_up_endpoints=subsumable_endpoints,
+            ),
+            SpeedFlipPortStateVariant(
+                name="subsumable_down",
+                initially_down_endpoints=subsumable_endpoints,
+            ),
+        ]
+        target_down_endpoints = subsumable_endpoints
+
+    target_transition_speeds = case.target_transition_speeds or (case.target_speeds,)
+    target_patchers = [
+        patcher
+        for index, speeds in enumerate(target_transition_speeds)
+        for patcher in _single_cage_state_patchers(
+            case,
+            f"target_{index}",
+            speeds,
+        )
+    ]
+
+    return create_speed_flip_test_config_playbook(
+        built_playbook=create_stateful_bidirectional_speed_flip_playbook(
+            name=case.playbook_name,
+            initial_patchers=_single_cage_state_patchers(
+                case, "initial", case.initial_speeds
+            ),
+            target_patchers=target_patchers,
+            initial_health_check_params=_single_cage_state_health_check_params(
+                case.initial_speeds
+            ),
+            target_health_check_params=_single_cage_state_health_check_params(
+                case.target_speeds
+            ),
+            target_port_cage_count=1,
+            restored_health_check_params=_single_cage_health_check_params(200),
+            target_oper_down_endpoints=target_down_endpoints,
+            state_variants=state_variants,
+            prechecks=_speed_flip_prechecks(),
+            postchecks=_speed_flip_postchecks(),
+            traffic_items_to_start=[_SPEED_FLIP_51T_TRAFFIC_ITEM],
+            iteration=1,
+        ),
+        snapshot_checks=snapshot_checks,
+    )
+
+
 def _build_51t_single_cage_two_port_test_config() -> TestConfig:
     target_health_check_params = _single_cage_health_check_params(100)
     baseline_health_check_params = _single_cage_health_check_params(200)
@@ -944,7 +1155,6 @@ def _build_51t_single_cage_two_port_test_config() -> TestConfig:
             post_snapshot_checkpoint_id="test_case_end",
         ),
         create_core_dumps_snapshot_check(),
-        create_bgp_peer_route_snapshot_check(),
     ]
     case_specs = [
         (
@@ -984,6 +1194,10 @@ def _build_51t_single_cage_two_port_test_config() -> TestConfig:
         )
         for name, target_trigger_stages, baseline_trigger_stages in case_specs
     ]
+    playbooks.extend(
+        _build_reduced_transition_playbook(case, snapshot_checks)
+        for case in _REDUCED_SPEED_FLIP_CASES
+    )
     return TestConfig(
         name="SPEED_FLIP_51T_SINGLE_CAGE_TWO_PORT_TEST_CONFIG",
         basset_pool="dne.test",

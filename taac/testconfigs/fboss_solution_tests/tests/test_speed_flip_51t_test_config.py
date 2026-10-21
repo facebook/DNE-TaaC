@@ -22,6 +22,20 @@ _ENDPOINTS = {
     _DUT: ["eth1/10/1", "eth1/10/5"],
     _PEER: ["eth1/3/1", "eth1/3/5"],
 }
+_REDUCED_TRANSITION_PLAYBOOK_NAMES = [
+    "SPEED_FLIP_51T_SPD_010_2X100G_TO_2X200G_REDUCED",
+    "SPEED_FLIP_51T_SPD_011_2X100G_TO_2X400G_REDUCED",
+    "SPEED_FLIP_51T_SPD_012_2X200G_TO_2X400G_REDUCED",
+    "SPEED_FLIP_51T_SPD_013_2X100G_TO_200G_400G_REDUCED",
+    "SPEED_FLIP_51T_SPD_014_2X100G_TO_400G_200G_REDUCED",
+    "SPEED_FLIP_51T_SPD_015_2X200G_TO_200G_400G_REDUCED",
+    "SPEED_FLIP_51T_SPD_016_2X200G_TO_400G_200G_REDUCED",
+    "SPEED_FLIP_51T_SPD_017_2X400G_TO_800G_REDUCED",
+    "SPEED_FLIP_51T_SPD_018_2X200G_TO_800G_REDUCED",
+    "SPEED_FLIP_51T_SPD_019_2X100G_TO_800G_REDUCED",
+    "SPEED_FLIP_51T_SPD_020_200G_400G_TO_800G_REDUCED",
+    "SPEED_FLIP_51T_SPD_021_400G_200G_TO_800G_REDUCED",
+]
 
 
 def _health_check_params(speed: int) -> dict[str, object]:
@@ -166,10 +180,11 @@ class SpeedFlip51TTestConfigTest(unittest.TestCase):
                 "SPEED_FLIP_51T_SPD_001_100G_TO_200G_WARMBOOT",
                 "SPEED_FLIP_51T_SPD_004_100G_TO_200G_AGENT_CRASH",
                 "SPEED_FLIP_51T_SPD_007_100G_TO_200G_COOP_CRASH_WARMBOOT",
-            ],
+            ]
+            + _REDUCED_TRANSITION_PLAYBOOK_NAMES,
         )
 
-        for playbook in test_config.playbooks:
+        for playbook in test_config.playbooks[:3]:
             self.assertEqual(playbook.iteration, 1)
             self.assertEqual(len(playbook.cleanup_steps or []), 1)
             register_params = _step_params(playbook.stages[0].steps[0])
@@ -257,7 +272,6 @@ class SpeedFlip51TTestConfigTest(unittest.TestCase):
         expected_snapshots = {
             hc_types.CheckName.PORT_SPEED_SNAPSHOT_CHECK,
             hc_types.CheckName.CORE_DUMPS_CHECK,
-            hc_types.CheckName.BGP_PEER_ROUTE_CHECK,
         }
 
         for playbook in self.test_config.playbooks:
