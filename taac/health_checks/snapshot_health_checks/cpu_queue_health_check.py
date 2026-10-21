@@ -127,16 +127,27 @@ class CpuQueueHealthCheck(
                 else out_packets_increase[queue]
             )
             packets_per_second = packets_increase / elapsed_secs
+            # Without the raw window a failure cannot be told apart from its
+            # neighbours: a flat counter (nothing was punted), a counter that
+            # went backwards (the agent restarted inside the window), and a
+            # policer eating the punts (discards climbing while out_packets
+            # barely moves) all read as "no increase".
+            window = (
+                f"out_packets {pre_out_packets} -> {post_out_packets} in "
+                f"{elapsed_secs}s, discards "
+                f"{pre_snapshot_discard_packets[queue]} -> "
+                f"{post_snapshot_discard_packets[queue]}"
+            )
 
             if packets_increase <= 0:
                 failure_reasons.append(
-                    f"No output packet increase detected on queue {queue}"
+                    f"No output packet increase detected on queue {queue} ({window})"
                 )
             elif packets_per_second < min_out_pps_threshold[queue]:
                 failure_reasons.append(
                     f"Output packet per second on queue {queue} "
                     f"({packets_per_second}) is below threshold "
-                    f"({min_out_pps_threshold[queue]})"
+                    f"({min_out_pps_threshold[queue]}) ({window})"
                 )
             else:
                 self.logger.debug(
