@@ -4471,6 +4471,213 @@ def create_bidirectional_speed_flip_playbook(
     )
 
 
+class SpeedFlipPatcherSpec(t.NamedTuple):
+    """One named speed patcher used by a stateful transition playbook."""
+
+    name: str
+    endpoints: t.Dict[str, t.List[str]]
+    speed_in_gbps: int
+
+
+class SpeedFlipPortStateVariant(t.NamedTuple):
+    """Initial administrative state applied before one transition cycle."""
+
+    name: str
+    initially_up_endpoints: t.Optional[t.Dict[str, t.List[str]]] = None
+    initially_down_endpoints: t.Optional[t.Dict[str, t.List[str]]] = None
+
+
+def create_stateful_bidirectional_speed_flip_playbook(  # noqa: C901
+    name: str,
+    initial_patchers: t.List[SpeedFlipPatcherSpec],
+    target_patchers: t.List[SpeedFlipPatcherSpec],
+    initial_health_check_params: t.Dict[str, t.Any],
+    target_health_check_params: t.Dict[str, t.Any],
+    target_port_cage_count: int,
+    restored_health_check_params: t.Optional[t.Dict[str, t.Any]] = None,
+    target_oper_down_endpoints: t.Optional[t.Dict[str, t.List[str]]] = None,
+    state_variants: t.Optional[t.List[SpeedFlipPortStateVariant]] = None,
+    target_trigger_stages: t.Optional[t.List[taac_types.Stage]] = None,
+    initial_trigger_stages: t.Optional[t.List[taac_types.Stage]] = None,
+    prechecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
+    postchecks: t.Optional[t.List[taac_types.PointInTimeHealthCheck]] = None,
+    snapshot_checks: t.Optional[t.List[taac_types.SnapshotHealthCheck]] = None,
+    traffic_items_to_start: t.Optional[t.List[str]] = None,
+    iteration: int = 1,
+) -> Playbook:
+    """Build repeatable initial-state, target-state, and reverse transitions.
+
+    Each cycle registers every initial-state patcher, validates that state,
+    registers the target-state patchers, validates the target, and then removes
+    patchers in LIFO order to prove the reverse transition. Registration and
+    unregistration use the existing speed-patcher step, which warmboots the
+    agent after applying Coop configuration.
+
+    ``state_variants`` lets a caller repeat the cycle with different explicit
+    initial port states. This is useful for reduced-topology subsumption tests,
+    where one physical cage exercises an initially-up and initially-down
+    subsumable port in separate cycles.
+    """
+    if not initial_patchers:
+        raise ValueError("At least one initial-state patcher is required")
+    if not target_patchers:
+        raise ValueError("At least one target-state patcher is required")
+
+    variants = state_variants or [SpeedFlipPortStateVariant(name="default")]
+    target_down = target_oper_down_endpoints or {}
+
+    def patcher_step(
+        spec: SpeedFlipPatcherSpec, register_patcher: bool
+    ) -> taac_types.Step:
+        return create_register_speed_flip_patcher_step(
+            register_patcher=register_patcher,
+            port_state_change=False,
+            patcher_name=spec.name,
+            endpoints=spec.endpoints,
+            speed_in_gbps=spec.speed_in_gbps,
+            target_port_cage_count=target_port_cage_count,
+        )
+
+    def patcher_stages(
+        specs: t.Iterable[SpeedFlipPatcherSpec], register_patcher: bool
+    ) -> t.List[taac_types.Stage]:
+        return [
+            create_steps_stage(steps=[patcher_step(spec, register_patcher)])
+            for spec in specs
+        ]
+
+    def health_check_endpoints(
+        params: t.Dict[str, t.Any],
+    ) -> t.Dict[str, t.List[str]]:
+        return {
+            hostname: [
+                interface["interface_name"]
+                for interface in device_params["interfaces"]
+            ]
+            for hostname, device_params in params.items()
+        }
+
+    def validation_stage(
+        health_check_params: t.Dict[str, t.Any],
+        down_endpoints: t.Optional[t.Dict[str, t.List[str]]] = None,
+    ) -> taac_types.Stage:
+        down = down_endpoints or {}
+        expected_endpoints = health_check_endpoints(health_check_params)
+        steps: t.List[taac_types.Step] = []
+        for hostname, interfaces in expected_endpoints.items():
+            up_interfaces = [
+                interface
+                for interface in interfaces
+                if interface not in down.get(hostname, [])
+            ]
+            if up_interfaces:
+                steps.append(
+                    create_verify_port_operational_state_step(
+                        interfaces=up_interfaces,
+                        operational_state=True,
+                        device_regexes=[hostname],
+                    )
+                )
+        for hostname, interfaces in down.items():
+            if interfaces:
+                steps.append(
+                    create_verify_port_operational_state_step(
+                        interfaces=interfaces,
+                        operational_state=False,
+                        device_regexes=[hostname],
+                    )
+                )
+        steps.append(create_port_speed_validation_step(health_check_params))
+        return create_steps_stage(steps=steps)
+
+    def admin_state_stages(
+        endpoints: t.Optional[t.Dict[str, t.List[str]]], enable: bool
+    ) -> t.List[taac_types.Stage]:
+        if not endpoints:
+            return []
+        return [
+            create_steps_stage(
+                steps=[
+                    create_interface_flap_step(
+                        enable=enable,
+                        interfaces=interfaces,
+                        interface_flap_method=(
+                            taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE
+                        ),
+                        device_name=hostname,
+                        start_traffic=False,
+                    )
+                    for hostname, interfaces in endpoints.items()
+                    if interfaces
+                ]
+            )
+        ]
+
+    stages: t.List[taac_types.Stage] = []
+    cleanup_steps: t.List[taac_types.Step] = []
+    cleanup_down_endpoints: t.Dict[str, t.List[str]] = {}
+    for variant in variants:
+        initial_down = variant.initially_down_endpoints or {}
+        for hostname, interfaces in initial_down.items():
+            cleanup_down_endpoints.setdefault(hostname, []).extend(
+                interface
+                for interface in interfaces
+                if interface not in cleanup_down_endpoints.get(hostname, [])
+            )
+        stages.extend(patcher_stages(initial_patchers, register_patcher=True))
+        stages.extend(admin_state_stages(variant.initially_up_endpoints, enable=True))
+        stages.extend(admin_state_stages(initial_down, enable=False))
+        stages.append(validation_stage(initial_health_check_params, initial_down))
+        stages.extend(patcher_stages(target_patchers, register_patcher=True))
+        stages.append(validation_stage(target_health_check_params, target_down))
+        stages.extend(target_trigger_stages or [])
+        stages.extend(
+            patcher_stages(reversed(target_patchers), register_patcher=False)
+        )
+        stages.append(validation_stage(initial_health_check_params, initial_down))
+        stages.extend(initial_trigger_stages or [])
+        stages.extend(admin_state_stages(initial_down, enable=True))
+        if initial_down:
+            stages.append(validation_stage(initial_health_check_params))
+        stages.extend(
+            patcher_stages(reversed(initial_patchers), register_patcher=False)
+        )
+        if restored_health_check_params:
+            stages.append(validation_stage(restored_health_check_params))
+
+    cleanup_steps.extend(
+        patcher_step(spec, register_patcher=False)
+        for spec in reversed(target_patchers)
+    )
+    cleanup_steps.extend(
+        patcher_step(spec, register_patcher=False)
+        for spec in reversed(initial_patchers)
+    )
+    for hostname, interfaces in cleanup_down_endpoints.items():
+        cleanup_steps.append(
+            create_interface_flap_step(
+                enable=True,
+                interfaces=interfaces,
+                interface_flap_method=(
+                    taac_types.InterfaceFlapMethod.THRIFT_PORT_STATE_CHANGE
+                ),
+                device_name=hostname,
+                start_traffic=False,
+            )
+        )
+
+    return Playbook(
+        name=name,
+        stages=stages,
+        iteration=iteration,
+        prechecks=prechecks,
+        postchecks=postchecks,
+        snapshot_checks=snapshot_checks,
+        traffic_items_to_start=traffic_items_to_start,
+        cleanup_steps=cleanup_steps,
+    )
+
+
 def create_speed_flip_test_config_playbook(
     built_playbook: Playbook,
     snapshot_checks: t.List,
