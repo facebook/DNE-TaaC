@@ -16,10 +16,6 @@ from taac.libs.fpf.fpf_stress_checks import (
 from taac.testconfigs.fpf import (
     fpf_hardening_common,
     fpf_shared_injection_suite,
-    fpf_tc27_agent_coldboot,
-    fpf_tc29_fsdb_gr_stop30_reenable,
-    fpf_tc30_fsdb_gr_stop180_no_reenable,
-    fpf_tc31_fsdb_enable_recover,
     fpf_tc33_gtsw_stsw_links_down,
     fpf_tc35_stsw_undrain_reinject,
     fpf_tc36_stsw_all_connections_down,
@@ -51,10 +47,6 @@ TW_ENV = {
     "TAAC_FPF_LINK_DRAIN_INTERFACE": "eth1/41/5",
 }
 MODULES = [
-    fpf_tc27_agent_coldboot,
-    fpf_tc29_fsdb_gr_stop30_reenable,
-    fpf_tc30_fsdb_gr_stop180_no_reenable,
-    fpf_tc31_fsdb_enable_recover,
     fpf_tc33_gtsw_stsw_links_down,
     fpf_tc35_stsw_undrain_reinject,
     fpf_tc36_stsw_all_connections_down,
@@ -104,7 +96,7 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
             for module in MODULES
             if module is not fpf_tc40_cont_interface_flaps
         ]
-        self.assertEqual(len(configs), 16)
+        self.assertEqual(len(configs), 12)
         for config in configs:
             with self.subTest(config=config.name):
                 collector = next(
@@ -192,18 +184,6 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
             },
         )
 
-        tc30_spray = next(
-            check
-            for check in fpf_tc30_fsdb_gr_stop180_no_reenable.TEST_CONFIG.playbooks[
-                0
-            ].postchecks
-            if check.check_id == "fpf_tc30_fsdb_gr_stop180_host_spray"
-        )
-        self.assertEqual(
-            json.loads(tc30_spray.check_params.json_params)["impacted_lanes_by_host"],
-            {SERVER: ["beth0"]},
-        )
-
         tc38_spray = next(
             check
             for check in fpf_tc38_persistent_ndp_clear.TEST_CONFIG.playbooks[
@@ -256,26 +236,6 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
         ]
         self.assertIn("fpf_verify_recovered_state", tc38_stable_custom_names)
         self.assertIn("record_fpf_recovered_baseline_time", tc38_stable_custom_names)
-
-    def test_fsdb_stop_and_recovery_remain_an_ordered_pair(self):
-        tc30_steps = _steps(
-            fpf_tc30_fsdb_gr_stop180_no_reenable.TEST_CONFIG.playbooks[0]
-        )
-        tc31_steps = _steps(fpf_tc31_fsdb_enable_recover.TEST_CONFIG.playbooks[0])
-        tc30_service_steps = [
-            step
-            for step in tc30_steps
-            if step.name == taac_types.StepName.SERVICE_INTERRUPTION_STEP
-        ]
-        tc31_service_steps = [
-            step
-            for step in tc31_steps
-            if step.name == taac_types.StepName.SERVICE_INTERRUPTION_STEP
-        ]
-        self.assertEqual(len(tc30_service_steps), 1)
-        self.assertEqual(len(tc31_service_steps), 1)
-        self.assertIn("NOT re-enabled", tc30_service_steps[0].description)
-        self.assertIn("recover", tc31_service_steps[0].description)
 
     def test_stsw_drain_reinject_is_split_and_has_scoped_cleanup(self):
         tc35_steps = _steps(fpf_tc35_stsw_undrain_reinject.TEST_CONFIG.playbooks[0])
@@ -459,8 +419,6 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
 
     def test_recovered_disruption_longevity_qualifies_before_soak(self):
         recovered = (
-            fpf_tc29_fsdb_gr_stop30_reenable,
-            fpf_tc31_fsdb_enable_recover,
             fpf_tc33_gtsw_stsw_links_down,
             fpf_tc35_stsw_undrain_reinject,
             fpf_tc40_cont_interface_flaps,
@@ -533,16 +491,6 @@ class TestTwsharedCampaignConfigs(unittest.TestCase):
                     set(gate_params["prod_prefix_expectations_by_host"]),
                     expected_prod_hosts,
                 )
-
-        tc30_longevity = fpf_tc30_fsdb_gr_stop180_no_reenable.TEST_CONFIG.playbooks[-1]
-        self.assertEqual(list(tc30_longevity.prechecks or []), [])
-        self.assertNotIn(
-            "record_fpf_recovered_baseline_time",
-            {
-                _step_params(step).get("custom_step_name")
-                for step in _steps(tc30_longevity)
-            },
-        )
 
     def test_tc46_has_exact_8k_checkpoint_before_withdrawal(self):
         playbook = fpf_tc46_scale_down_8k_4k.TEST_CONFIG.playbooks[0]

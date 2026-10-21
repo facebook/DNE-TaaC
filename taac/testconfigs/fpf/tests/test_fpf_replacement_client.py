@@ -14,7 +14,6 @@ from taac.testconfigs.fpf import (
     fpf_hardening_common,
     fpf_shared_injection_suite,
     fpf_tc21_prod_prefix_drain_link,
-    fpf_tc25_wedge_agent_restart,
     fpf_tc35_stsw_undrain_reinject,
     fpf_tc36_stsw_all_connections_down,
     fpf_tc54_stsw_device_drain,
@@ -79,7 +78,7 @@ class FpfReplacementClientTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "absolute path"):
                 fpf_hardening_common.fpf_ib_binary()
 
-    def test_binary_override_reaches_shared_and_tc25_setup_and_ensure(self) -> None:
+    def test_binary_override_reaches_shared_setup_and_ensure(self) -> None:
         binary_path = "/tmp/fpf_ib_write_bw"
         traffic_env = {
             **ENV,
@@ -94,11 +93,9 @@ class FpfReplacementClientTest(unittest.TestCase):
                 importlib.reload(fpf_tc36_stsw_all_connections_down)
                 importlib.reload(fpf_tc54_stsw_device_drain)
                 importlib.reload(fpf_shared_injection_suite)
-                importlib.reload(fpf_tc25_wedge_agent_restart)
 
                 for config in (
                     fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config(),
-                    fpf_tc25_wedge_agent_restart.create_fpf_tc25_test_config(),
                 ):
                     with self.subTest(config=config.name):
                         setup = _task_params(config, "fpf_start_ib_traffic")
@@ -124,22 +121,18 @@ class FpfReplacementClientTest(unittest.TestCase):
             importlib.reload(fpf_tc36_stsw_all_connections_down)
             importlib.reload(fpf_tc54_stsw_device_drain)
             importlib.reload(fpf_shared_injection_suite)
-            importlib.reload(fpf_tc25_wedge_agent_restart)
 
-    def test_exact_environment_imports_shared_tc25_and_global_tc21(self) -> None:
+    def test_exact_environment_imports_shared_and_global_tc21(self) -> None:
         try:
             with patch.dict(os.environ, ENV):
                 importlib.reload(fpf_hardening_common)
                 importlib.reload(fpf_shared_injection_suite)
-                importlib.reload(fpf_tc25_wedge_agent_restart)
                 importlib.reload(fpf_tc21_prod_prefix_drain_link)
 
                 shared = fpf_shared_injection_suite.create_fpf_shared_injection_suite_test_config()
-                tc25 = fpf_tc25_wedge_agent_restart.create_fpf_tc25_test_config()
                 tc21 = fpf_tc21_prod_prefix_drain_link.create_fpf_tc21_test_config()
 
                 self.assertEqual(fpf_shared_injection_suite.GPU_HOSTS, HOSTS)
-                self.assertEqual(fpf_tc25_wedge_agent_restart.GPU_HOSTS, HOSTS)
                 self.assertEqual(fpf_tc21_prod_prefix_drain_link.GPU_HOSTS, HOSTS)
                 self.assertEqual(
                     fpf_tc21_prod_prefix_drain_link.REMOTE_PREFIXES,
@@ -161,13 +154,6 @@ class FpfReplacementClientTest(unittest.TestCase):
                     {host: ["2401:db00:292a:a27c::/64"] for host in HOSTS},
                 )
 
-                tc25_params = _collector_params(tc25)
-                self.assertEqual(tc25_params["hosts"], HOSTS)
-                self.assertEqual(
-                    tc25_params["prod_prefixes"],
-                    ["2401:db00:292a:a27c::/64"],
-                )
-                self.assertNotIn("prod_prefixes_by_host", tc25_params)
                 self.assertEqual(
                     _collector_params(tc21)["prod_prefixes"],
                     [
@@ -178,7 +164,6 @@ class FpfReplacementClientTest(unittest.TestCase):
         finally:
             importlib.reload(fpf_hardening_common)
             importlib.reload(fpf_shared_injection_suite)
-            importlib.reload(fpf_tc25_wedge_agent_restart)
             importlib.reload(fpf_tc21_prod_prefix_drain_link)
 
 

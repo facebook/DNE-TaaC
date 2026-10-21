@@ -611,18 +611,6 @@ def _tc24(*, spray, skip_ssh) -> list:
     )
 
 
-def _tc25(*, spray, skip_ssh) -> list:
-    return _service_restart_playbook(
-        spray=spray,
-        skip_ssh=skip_ssh,
-        service=taac_types.Service.AGENT,
-        name="fpf_tc25_wedge_agent_restart",
-        affected_rib="bgp",
-        settle_after_restart_sec=120,
-        reconvergence_sla_sec=90.0,
-    )
-
-
 def _tc04(*, spray, skip_ssh) -> list:
     return _service_restart_playbook(
         spray=spray,

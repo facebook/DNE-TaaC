@@ -44,38 +44,11 @@ from taac.testconfigs.fpf.fpf_tc19_device_drain import (
 from taac.testconfigs.fpf.fpf_tc21_prod_prefix_drain_link import (
     TEST_CONFIG as FPF_TC21_PROD_PREFIX_DRAIN_LINK,
 )
-from taac.testconfigs.fpf.fpf_tc22_prod_prefix_drain_device import (
-    TEST_CONFIG as FPF_TC22_PROD_PREFIX_DRAIN_DEVICE,
-)
-from taac.testconfigs.fpf.fpf_tc23_bgp_restart import (
-    TEST_CONFIG as FPF_TC23_BGP_RESTART,
-)
-from taac.testconfigs.fpf.fpf_tc24_fsdb_restart import (
-    TEST_CONFIG as FPF_TC24_FSDB_RESTART,
-)
-from taac.testconfigs.fpf.fpf_tc25_wedge_agent_restart import (
-    TEST_CONFIG as FPF_TC25_WEDGE_AGENT_RESTART,
-)
 from taac.testconfigs.fpf.fpf_tc26_qsfp_service_restart import (
     TEST_CONFIG as FPF_TC26_QSFP_SERVICE_RESTART,
 )
-from taac.testconfigs.fpf.fpf_tc27_agent_coldboot import (
-    TEST_CONFIG as FPF_TC27_AGENT_COLDBOOT,
-)
-from taac.testconfigs.fpf.fpf_tc28_fsdb_kill import (
-    TEST_CONFIG as FPF_TC28_FSDB_KILL,
-)
-from taac.testconfigs.fpf.fpf_tc29_fsdb_gr_stop30_reenable import (
-    TEST_CONFIG as FPF_TC29_FSDB_GR_STOP30_REENABLE,
-)
 from taac.testconfigs.fpf.fpf_tc29b_fsdb_gr_remote_withdraw import (
     TEST_CONFIG as FPF_TC29B_FSDB_GR_REMOTE_WITHDRAW,
-)
-from taac.testconfigs.fpf.fpf_tc30_fsdb_gr_stop180_no_reenable import (
-    TEST_CONFIG as FPF_TC30_FSDB_GR_STOP180_NO_REENABLE,
-)
-from taac.testconfigs.fpf.fpf_tc31_fsdb_enable_recover import (
-    TEST_CONFIG as FPF_TC31_FSDB_ENABLE_RECOVER,
 )
 from taac.testconfigs.fpf.fpf_tc32_downlink_flaps import (
     TEST_CONFIG as FPF_TC32_DOWNLINK_FLAPS,
@@ -168,17 +141,8 @@ __all__ = [
     "FPF_TC17_LINK_DRAIN",
     "FPF_TC19_DEVICE_DRAIN",
     "FPF_TC21_PROD_PREFIX_DRAIN_LINK",
-    "FPF_TC22_PROD_PREFIX_DRAIN_DEVICE",
-    "FPF_TC23_BGP_RESTART",
-    "FPF_TC24_FSDB_RESTART",
-    "FPF_TC25_WEDGE_AGENT_RESTART",
     "FPF_TC26_QSFP_SERVICE_RESTART",
-    "FPF_TC27_AGENT_COLDBOOT",
-    "FPF_TC28_FSDB_KILL",
-    "FPF_TC29_FSDB_GR_STOP30_REENABLE",
     "FPF_TC29B_FSDB_GR_REMOTE_WITHDRAW",
-    "FPF_TC30_FSDB_GR_STOP180_NO_REENABLE",
-    "FPF_TC31_FSDB_ENABLE_RECOVER",
     "FPF_TC32_DOWNLINK_FLAPS",
     "FPF_TC33_GTSW_STSW_LINKS_DOWN",
     "FPF_TC35_STSW_UNDRAIN_REINJECT",
