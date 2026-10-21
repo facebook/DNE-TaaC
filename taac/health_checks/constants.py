@@ -111,9 +111,11 @@ SERVICES_EXPECTED_TO_RESTART_DURING_AGENT_WARMBOOT: t.List[str] = sorted(
 # Two distinct reasons a check lands here:
 #   - LLDP_CHECK / PORT_STATE_CHECK expand a disabled A-end to BOTH ends of a
 #     circuit, so they assert on every link in the topology.
-#   - PORT_TRANSCEIVER_CHECK / PORT_TX_RX_CHECK / PORT_FLAP_CHECK default to
-#     every topology interface and have no expected-down set at all, so they
-#     cannot be told a link is down on purpose.
+#   - PORT_TX_RX_CHECK / PORT_FLAP_CHECK default to every topology interface
+#     and have no expected-down set at all, so they cannot be told a link is
+#     down on purpose. PORT_TRANSCEIVER_CHECK can be told via `interfaces` +
+#     `expected_present`, but still defaults to every topology interface
+#     when neither is passed.
 CIRCUIT_HEALTH_CHECK_NAMES: t.Set["hc_types.CheckName"] = {
     hc_types.CheckName.LLDP_CHECK,
     hc_types.CheckName.PORT_STATE_CHECK,
