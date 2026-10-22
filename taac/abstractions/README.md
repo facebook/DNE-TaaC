@@ -339,6 +339,13 @@ Adjacencies are NOT learned — they are injected into KvStore via
 graph and programs FibAgent normally. From FibAgent's perspective the
 synthetic routes are indistinguishable from real ones.
 
+The EBB full-scale TestConfig factory also translates `OpenRMode.STANDALONE`
+into the `testbed_isolation:bypass` lifecycle-policy tag. The setup
+orchestrator honors that tag like an explicit `--skip-testbed-isolation`
+request during both setup and teardown. This preserves the physical helper
+link that brings up the synthetic OpenR Port-Channel without relying on DUT
+hostnames or callers remembering an extra CLI flag.
+
 ### 4.3. Component call-chain
 
 How each `PhysicalInventory` field is consumed by the STANDALONE

@@ -42,7 +42,10 @@ from taac.abstractions.topology import (
     PrefixSet,
     RoutingDeviceConfig,
 )
-from taac.constants import BgpPlusPlusProfile
+from taac.constants import (
+    BgpPlusPlusProfile,
+    TESTBED_ISOLATION_BYPASS_TAG,
+)
 from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_attribute_churn_playbook,
     get_bgp_ebb_cold_start_playbook,
@@ -1737,6 +1740,11 @@ def create_bgp_ebb_full_scale_test_config(  # noqa: C901
         skip_ixia_protocol_verification=True,
         log_collection_timeout=600,
         basset_pool="dne.test",
+        tags=(
+            [TESTBED_ISOLATION_BYPASS_TAG]
+            if openr_mode is OpenRMode.STANDALONE
+            else None
+        ),
         endpoints=compiled.endpoints,
         host_os_type_map=compiled.host_os_type_map,
         startup_checks=[],

@@ -10,6 +10,7 @@ import typing as t
 
 from taac.constants import (  # oss-rewrite (force ShipIt re-export to taac.* root)
     FbossPackage,
+    TESTBED_ISOLATION_BYPASS_TAG,
     TestTopology,
 )
 from taac.ixia.abstract_traffic_generator import (
@@ -69,6 +70,13 @@ _DEFAULT_IXIA_RECOVERY: taac_types.IxiaRecovery = taac_types.IxiaRecovery(
 )
 
 
+def test_config_skips_testbed_isolation(
+    test_config: taac_types.TestConfig,
+) -> bool:
+    """Return whether the TestConfig owns an isolation-bypass policy."""
+    return TESTBED_ISOLATION_BYPASS_TAG in (test_config.tags or ())
+
+
 class TestSetupOrchestrator:
     def __init__(
         self,
@@ -105,7 +113,12 @@ class TestSetupOrchestrator:
         self._skip_ixia_cleanup = skip_ixia_cleanup
         self._skip_post_setup_wait = skip_post_setup_wait
         self._skip_basset_reservation = skip_basset_reservation
-        self._skip_testbed_isolation = skip_testbed_isolation
+        self._test_config_skips_testbed_isolation = test_config_skips_testbed_isolation(
+            test_config
+        )
+        self._skip_testbed_isolation = (
+            skip_testbed_isolation or self._test_config_skips_testbed_isolation
+        )
         self._desired_pkg_versions = desired_pkg_versions or {}
         self._dsf_sequential_update = dsf_sequential_update
         self._allow_disruptive_configs = allow_disruptive_configs
@@ -1034,7 +1047,14 @@ class TestSetupOrchestrator:
                 f"\033[33m{time.time() - _iso_start:.0f}s\033[0m"
             )
         else:
-            _log("\033[2m[SETUP] Phase 3: Skipping test bed isolation\033[0m")
+            reason = (
+                "TestConfig policy"
+                if self._test_config_skips_testbed_isolation
+                else "runner option"
+            )
+            _log(
+                f"\033[2m[SETUP] Phase 3: Skipping test bed isolation ({reason})\033[0m"
+            )
 
         # Step 4: EOS image deployment + Package updates
         if self._eos_image_id:

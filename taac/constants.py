@@ -126,6 +126,7 @@ FAILED_HC_STATUSES: t.List[hc_types.HealthCheckStatus] = [
 ]
 
 ISOLATE_TEST_BED_CONNECTIVITY_PATCHER_NAME: str = "isolate_test_bed_connectivity"
+TESTBED_ISOLATION_BYPASS_TAG: str = "testbed_isolation:bypass"
 TAAC_TEST_CONFIG_CONFIGERATOR_PATH: str = "neteng/taac/test_configs/{test_config_name}"
 
 

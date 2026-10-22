@@ -15,6 +15,10 @@ from taac.abstractions.topologies.ebb_full_scale import (
     EBB_PARENT_NETWORKS_IXIA03,
 )
 from taac.abstractions.topology.model import BoundTopology
+from taac.constants import (
+    BgpPlusPlusProfile,
+    TESTBED_ISOLATION_BYPASS_TAG,
+)
 from taac.testconfigs.routing.factories import (
     bgp_ebb_full_scale as factory,
 )
@@ -117,6 +121,28 @@ class BgpEbbFullScaleFactoryTest(unittest.TestCase):
             "ipv6": "ROUTE+POOL(V6)",
         },
     )
+
+    def test_openr_mode_owns_testbed_isolation_policy(self) -> None:
+        for profile, expected_bypass in (
+            (BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R, True),
+            (BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R, False),
+        ):
+            with self.subTest(profile=profile):
+                topology = _compiled_topology()
+                with mock.patch.object(
+                    factory, "ebb_full_scale_topology", return_value=topology
+                ):
+                    config = factory.create_bgp_ebb_full_scale_test_config(
+                        _inventory(),
+                        name="ISOLATION_POLICY_TEST",
+                        profile=profile,
+                        setup_only=True,
+                    )
+
+                self.assertEqual(
+                    expected_bypass,
+                    TESTBED_ISOLATION_BYPASS_TAG in (config.tags or ()),
+                )
 
     def test_all_ebb_playbooks_use_bound_bgp_mon_network(self) -> None:
         bgp_mon_parent_network = "2401:db00:e50d:44:a"
