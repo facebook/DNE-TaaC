@@ -15,14 +15,35 @@ from taac.health_checks.device_health_checks.bgp_rib_fib_consistency_health_chec
 from taac.health_check.health_check import types as hc_types
 
 
-def _rib(cidr: str, best: bool = True) -> MagicMock:
+def _rib(cidr: str, best: bool = True, local: bool = False) -> MagicMock:
+    """A RIB entry; ``local`` makes its best path the locally originated one."""
     net, bits = cidr.split("/")
     fam = socket.AF_INET6 if ":" in net else socket.AF_INET
     e = MagicMock()
     e.prefix.prefix_bin = socket.inet_pton(fam, net)
     e.prefix.num_bits = int(bits)
-    e.best_path = MagicMock() if best else None
+    if not best:
+        e.best_path = None
+        return e
+    # bgpd marks a local route with the unspecified next hop; anything else
+    # is a path learned from a peer.
+    peer_next_hop = "2001:db8::1" if fam == socket.AF_INET6 else "192.0.2.254"
+    e.best_path.next_hop.prefix_bin = (
+        bytes(16 if fam == socket.AF_INET6 else 4)
+        if local
+        else socket.inet_pton(fam, peer_next_hop)
+    )
     return e
+
+
+def _originated(cidr: str, install_to_fib: bool = False) -> MagicMock:
+    net, bits = cidr.split("/")
+    fam = socket.AF_INET6 if ":" in net else socket.AF_INET
+    r = MagicMock()
+    r.prefix.prefix_bin = socket.inet_pton(fam, net)
+    r.prefix.num_bits = int(bits)
+    r.install_to_fib = install_to_fib
+    return r
 
 
 def _fib(cidr: str, client: ClientID = ClientID.BGPD) -> MagicMock:
@@ -44,8 +65,11 @@ class TestBgpRibFibConsistencyHealthCheck(unittest.IsolatedAsyncioTestCase):
         self.check.driver = AsyncMock()
         self.dev = MagicMock(spec=TestDevice)
         self.dev.name = "dut1"
+        self.check.driver.async_get_bgp_originated_routes.return_value = []
 
-    async def _run(self, rib, fib, params=None):
+    async def _run(self, rib, fib, params=None, originated=None):
+        if originated is not None:
+            self.check.driver.async_get_bgp_originated_routes.return_value = originated
         self.check.driver.async_get_bgp_rib_entries.return_value = rib
         self.check.driver.async_get_route_table_details.return_value = fib
         return await self.check._run(
@@ -112,3 +136,74 @@ class TestBgpRibFibConsistencyHealthCheck(unittest.IsolatedAsyncioTestCase):
         await self._run([_rib("10.1.0.0/24")], [orphan])
         self.logger.warning.assert_called_once()
         self.assertIn("1/1 FIB rows", self.logger.warning.call_args.args[0])
+
+    async def test_not_installed_originated_networks_are_excluded(self) -> None:
+        # A device's own advertise-only aggregates are best paths with
+        # install_to_fib false, so the FIB never has them.
+        res = await self._run(
+            [
+                _rib("198.51.100.0/24", local=True),
+                _rib("2001:db8:1::/48", local=True),
+                _rib("10.0.0.0/24"),
+            ],
+            [_fib("10.0.0.0/24")],
+            originated=[_originated("198.51.100.0/24"), _originated("2001:db8:1::/48")],
+        )
+        self.assertEqual(res.status, hc_types.HealthCheckStatus.PASS)
+
+    async def test_exclusion_does_not_mask_other_missing_best_paths(self) -> None:
+        res = await self._run(
+            [_rib("198.51.100.0/24", local=True), _rib("10.1.0.0/24")],
+            [],
+            originated=[_originated("198.51.100.0/24")],
+        )
+        self.assertEqual(res.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("1 RIB best paths not in FIB", res.message)
+        self.assertIn("10.1.0.0/24", res.message)
+        self.assertNotIn("198.51.100.0/24", res.message)
+
+    async def test_installed_originated_route_missing_from_fib_fails(self) -> None:
+        res = await self._run(
+            [_rib("198.51.100.0/24", local=True)],
+            [],
+            originated=[_originated("198.51.100.0/24", True)],
+        )
+        self.assertEqual(res.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("198.51.100.0/24", res.message)
+
+    async def test_learned_best_path_for_a_not_installed_network_must_be_in_the_fib(
+        self,
+    ) -> None:
+        # bgpd skips the FIB only while the local route is best; a learned
+        # path that wins is programmed, so its absence is drift.
+        res = await self._run(
+            [_rib("198.51.100.0/24")], [], originated=[_originated("198.51.100.0/24")]
+        )
+        self.assertEqual(res.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("198.51.100.0/24", res.message)
+
+    async def test_exclusion_does_not_apply_to_fib_routes_missing_from_rib(
+        self,
+    ) -> None:
+        # The exclusion only answers "why is this best path not programmed";
+        # a BGP FIB route with no RIB entry is still drift.
+        res = await self._run(
+            [], [_fib("198.51.100.0/24")], originated=[_originated("198.51.100.0/24")]
+        )
+        self.assertEqual(res.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("1 BGP FIB routes not in RIB", res.message)
+
+    async def test_failed_originated_routes_lookup_excludes_nothing_and_warns(
+        self,
+    ) -> None:
+        self.check.driver.async_get_bgp_originated_routes.side_effect = RuntimeError(
+            "bgpd down"
+        )
+        res = await self._run([_rib("198.51.100.0/24")], [])
+        self.assertEqual(res.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("198.51.100.0/24", res.message)
+        self.logger.warning.assert_called_once()
+        self.assertIn(
+            "no install_to_fib=false network is excluded",
+            self.logger.warning.call_args.args[0],
+        )
