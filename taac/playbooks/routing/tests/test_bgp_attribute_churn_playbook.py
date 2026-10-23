@@ -2281,9 +2281,10 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
             if payload.get("custom_step_name") == "bgp_nhg_random_storm"
         )
         stage_ids = [stage.id for stage in playbook.stages or []]
-        self.assertIn("ebb16_fibagent_restart", stage_ids)
+        self.assertNotIn("ebb16_fibagent_restart", stage_ids)
 
         self.assertEqual(48, storm["epoch_count"])
+        self.assertEqual(24, storm["fibagent_restart_after_epoch"])
         self.assertEqual(25, storm["epoch_interval_seconds"])
         self.assertIsNone(storm["inactive_paths_per_afi"])
         self.assertEqual(25, storm["target_membership_width"])

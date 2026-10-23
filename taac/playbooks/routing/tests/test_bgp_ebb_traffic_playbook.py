@@ -182,7 +182,7 @@ class BgpEbbTrafficPlaybookTest(unittest.TestCase):
             if (stage.id or "").startswith("ebb16_stage_loss_after_")
         ]
 
-        self.assertEqual(3, len(snapshots))
+        self.assertEqual(2, len(snapshots))
         for stage in snapshots:
             steps = list(stage.steps or [])
             self.assertEqual(
@@ -232,7 +232,6 @@ class BgpEbbTrafficPlaybookTest(unittest.TestCase):
             [
                 "ebb16_stage_loss_after_nhg_storm",
                 "ebb16_stage_loss_after_longevity",
-                "ebb16_stage_loss_after_ebb16_fibagent_restart",
             ],
             [stage.id for stage in storm_window[1::2]],
         )

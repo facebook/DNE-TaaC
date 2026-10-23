@@ -1269,6 +1269,7 @@ def create_bgp_nhg_random_storm_step(
     epoch_count: int = 48,
     epoch_interval_seconds: int = 25,
     restoration_stage_prefix_count: int | None = None,
+    fibagent_restart_after_epoch: int | None = None,
     description: str | None = None,
 ) -> Step:
     """Create the topology-bound CICD-EBB-16 peer-by-prefix random storm."""
@@ -1365,6 +1366,17 @@ def create_bgp_nhg_random_storm_step(
         staged_restore["restoration_stage_prefix_count"] = (
             restoration_stage_prefix_count
         )
+    if fibagent_restart_after_epoch is not None:
+        if (
+            isinstance(fibagent_restart_after_epoch, bool)
+            or not isinstance(fibagent_restart_after_epoch, int)
+            or not 0 < fibagent_restart_after_epoch < epoch_count
+        ):
+            raise ValueError(
+                "fibagent_restart_after_epoch must be a positive integer below "
+                "epoch_count"
+            )
+        staged_restore["fibagent_restart_after_epoch"] = fibagent_restart_after_epoch
     return create_custom_step(
         params_dict={
             "custom_step_name": "bgp_nhg_random_storm",

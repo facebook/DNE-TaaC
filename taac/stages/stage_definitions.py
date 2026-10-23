@@ -2031,6 +2031,7 @@ def create_bgp_nhg_random_storm_stage(
     epoch_count: int = 48,
     epoch_interval_seconds: int = 25,
     restoration_stage_prefix_count: int | None = None,
+    fibagent_restart_after_epoch: int | None = None,
 ) -> Stage:
     """Create C16 as one failure-safe, topology-bound random-storm step."""
     return Stage(
@@ -2063,6 +2064,7 @@ def create_bgp_nhg_random_storm_stage(
                 epoch_count=epoch_count,
                 epoch_interval_seconds=epoch_interval_seconds,
                 restoration_stage_prefix_count=restoration_stage_prefix_count,
+                fibagent_restart_after_epoch=fibagent_restart_after_epoch,
             )
         ]
     )
