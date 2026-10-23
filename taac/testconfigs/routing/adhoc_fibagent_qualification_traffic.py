@@ -62,6 +62,9 @@ def _build_nrqeb009_ebb16_traffic_test_config() -> TestConfig:
             get_bgp_ebb_nexthop_group_count_threshold_traffic_playbook(
                 control_plane.playbooks[0],
                 traffic_item_names=EBB16_PREFIX_CONTINUITY_TRAFFIC_ITEMS,
+                # Five 30-prefix blocks per AFI per stage keep the restoration
+                # transient under the 104,856-entry FecLevel2 table.
+                restoration_stage_prefix_count=150,
             )
         ],
     )

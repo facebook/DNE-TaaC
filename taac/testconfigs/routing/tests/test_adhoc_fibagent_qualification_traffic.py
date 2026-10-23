@@ -68,6 +68,7 @@ class AdhocFibagentQualificationTrafficTest(unittest.TestCase):
         self.assertEqual(1000, storm["fibagent_nhg_watermark_low"])
         self.assertTrue(storm["enable_control_plane_validation"])
         self.assertTrue(storm["defer_control_plane_invariant_failures"])
+        self.assertEqual(150, storm["restoration_stage_prefix_count"])
 
     def test_config_is_not_scheduled_by_conveyor(self) -> None:
         scheduled_names = {

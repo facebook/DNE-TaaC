@@ -148,8 +148,10 @@ def _defer_traffic_start(step: taac_types.Step) -> taac_types.Step:
     )
 
 
-def _defer_storm_control_plane_invariant_failures(
+def _configure_storm_for_traffic(
     stages: tuple[taac_types.Stage, ...],
+    traffic_item_names: tuple[str, ...],
+    restoration_stage_prefix_count: int | None,
 ) -> list[taac_types.Stage]:
     copied_stages: list[taac_types.Stage] = []
     storm_step_count = 0
@@ -161,6 +163,11 @@ def _defer_storm_control_plane_invariant_failures(
             json_params = json.loads(params.json_params or "{}") if params else {}
             if json_params.get("custom_step_name") == "bgp_nhg_random_storm":
                 json_params["defer_control_plane_invariant_failures"] = True
+                json_params["traffic_loss_item_names"] = list(traffic_item_names)
+                if restoration_stage_prefix_count is not None:
+                    json_params["restoration_stage_prefix_count"] = (
+                        restoration_stage_prefix_count
+                    )
                 step = step(
                     step_params=(
                         params(json_params=json.dumps(json_params))
@@ -197,6 +204,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_traffic_playbook(
     *,
     traffic_item_names: tuple[str, ...],
     stable_state_duration_seconds: int = 30,
+    restoration_stage_prefix_count: int | None = None,
 ) -> taac_types.Playbook:
     """Copy EBB16 and add bounded pre-storm and end-to-end traffic windows."""
     if (
@@ -212,8 +220,10 @@ def get_bgp_ebb_nexthop_group_count_threshold_traffic_playbook(
     ):
         raise ValueError("EBB16 traffic requires the Phase 1 control-plane playbook")
     traffic_storm_stages = _with_per_stage_loss_snapshots(
-        _defer_storm_control_plane_invariant_failures(
-            tuple(control_plane_playbook.stages or [])
+        _configure_storm_for_traffic(
+            tuple(control_plane_playbook.stages or []),
+            traffic_item_names,
+            restoration_stage_prefix_count,
         ),
         traffic_item_names,
     )

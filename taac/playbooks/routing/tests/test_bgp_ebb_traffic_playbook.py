@@ -136,8 +136,13 @@ class BgpEbbTrafficPlaybookTest(unittest.TestCase):
             "defer_control_plane_invariant_failures",
             control_storm,
         )
+        self.assertNotIn("traffic_loss_item_names", control_storm)
         self.assertEqual(
-            {**control_storm, "defer_control_plane_invariant_failures": True},
+            {
+                **control_storm,
+                "defer_control_plane_invariant_failures": True,
+                "traffic_loss_item_names": list(_TRAFFIC_ITEMS),
+            },
             traffic_storm,
         )
 
