@@ -25,6 +25,9 @@ _EXPECTED_RECOVERED_RESOURCE_MNEMONICS = (
     "ROUTING_MPLS_TUNNEL_RESOURCE",
 )
 _STORM_PACKET_LOSS_THRESHOLD_PERCENT = "0.1"
+# Non-storm stages are recorded for attribution only; 100% loss can never
+# exceed this, so the check always passes while still logging the loss.
+_RECORD_ONLY_PACKET_LOSS_THRESHOLD_PERCENT = "100"
 
 
 def _traffic_liveness_check(
@@ -62,6 +65,70 @@ def _packet_loss_check(
         clear_traffic_stats=False,
         check_id=check_id,
     )
+
+
+def _contains_storm_step(stage: taac_types.Stage) -> bool:
+    return any(
+        json.loads(step.step_params.json_params or "{}").get("custom_step_name")
+        == "bgp_nhg_random_storm"
+        for step in stage.steps or []
+        if step.step_params is not None
+    )
+
+
+def _with_per_stage_loss_snapshots(
+    stages: list[taac_types.Stage],
+    traffic_item_names: tuple[str, ...],
+) -> list[taac_types.Stage]:
+    # The IXIA loss check stops traffic and clears counters, so each snapshot
+    # restarts traffic and opens a fresh window for the next stage.
+    traffic_regex = _traffic_item_regex(traffic_item_names)
+    with_snapshots: list[taac_types.Stage] = []
+    for index, stage in enumerate(stages, start=1):
+        is_storm = _contains_storm_step(stage)
+        label = stage.id or ("nhg_storm" if is_storm else f"stage_{index}")
+        # Only the storm window has a loss budget; other stages are recorded
+        # so loss can be attributed without failing the run.
+        threshold = (
+            _STORM_PACKET_LOSS_THRESHOLD_PERCENT
+            if is_storm
+            else _RECORD_ONLY_PACKET_LOSS_THRESHOLD_PERCENT
+        )
+        with_snapshots.append(stage)
+        with_snapshots.append(
+            create_steps_stage(
+                stage_id=f"ebb16_stage_loss_after_{label}",
+                description=f"Record EBB16 traffic loss during {label}",
+                steps=[
+                    create_validation_step(
+                        point_in_time_checks=[
+                            _packet_loss_check(
+                                traffic_item_names,
+                                check_id=f"ebb16_stage_loss_after_{label}",
+                                metric=hc_types.PacketLossMetric.PERCENTAGE,
+                                threshold=threshold,
+                            )
+                        ],
+                        description=f"Record EBB16 traffic loss during {label}",
+                        start_traffic=False,
+                        fail_on_failure=False,
+                    ),
+                    create_ixia_api_step(
+                        api_name="start_traffic_items",
+                        args_dict={"traffic_item_regex": traffic_regex},
+                        description=f"Restart EBB16 traffic after {label}",
+                        start_traffic=False,
+                    ),
+                    create_ixia_api_step(
+                        api_name="clear_traffic_stats",
+                        args_dict={"wait_for_refresh": True},
+                        description=f"Open the EBB16 loss window after {label}",
+                        start_traffic=False,
+                    ),
+                ],
+            )
+        )
+    return with_snapshots
 
 
 def _traffic_item_regex(traffic_item_names: tuple[str, ...]) -> str:
@@ -144,8 +211,11 @@ def get_bgp_ebb_nexthop_group_count_threshold_traffic_playbook(
         "bgp_ebb_nexthop_group_count_threshold_playbook"
     ):
         raise ValueError("EBB16 traffic requires the Phase 1 control-plane playbook")
-    traffic_storm_stages = _defer_storm_control_plane_invariant_failures(
-        tuple(control_plane_playbook.stages or [])
+    traffic_storm_stages = _with_per_stage_loss_snapshots(
+        _defer_storm_control_plane_invariant_failures(
+            tuple(control_plane_playbook.stages or [])
+        ),
+        traffic_item_names,
     )
     stable_loss_check = _packet_loss_check(
         traffic_item_names,
@@ -262,6 +332,8 @@ def get_bgp_ebb_nexthop_group_count_threshold_traffic_playbook(
             for check in (control_plane_playbook.postchecks or [])
         ],
         cleanup_steps=[
+            # Fallback for a storm step that raises: the per-stage snapshot after
+            # the storm never runs, so this is the only reading of that window.
             # The runner folds this recorded MID_TEST failure into the final
             # verdict. Keep it non-raising so restoration and traffic stop run.
             create_validation_step(

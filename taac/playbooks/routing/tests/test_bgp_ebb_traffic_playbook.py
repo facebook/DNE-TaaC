@@ -166,6 +166,48 @@ class BgpEbbTrafficPlaybookTest(unittest.TestCase):
             ],
         )
 
+    def test_per_stage_loss_snapshots_record_and_restart_traffic(self) -> None:
+        traffic = get_bgp_ebb_nexthop_group_count_threshold_traffic_playbook(
+            _control_plane_playbook(),
+            traffic_item_names=_TRAFFIC_ITEMS,
+        )
+        snapshots = [
+            stage
+            for stage in traffic.stages or []
+            if (stage.id or "").startswith("ebb16_stage_loss_after_")
+        ]
+
+        self.assertEqual(3, len(snapshots))
+        for stage in snapshots:
+            steps = list(stage.steps or [])
+            self.assertEqual(
+                ["start_traffic_items", "clear_traffic_stats"],
+                [_api_name(step) for step in steps[1:]],
+            )
+            self.assertEqual(
+                "^(?:EBB16_IPV4_PREFIX_CONTINUITY|EBB16_IPV6_PREFIX_CONTINUITY)$",
+                json.loads(str(_step_params(steps[1])["args_json"]))[
+                    "traffic_item_regex"
+                ],
+            )
+            step = steps[0]
+            self.assertFalse(_step_params(step).get("fail_on_failure", False))
+            check = _validation_input(step).point_in_time_checks[0]
+            self.assertEqual(hc_types.CheckName.IXIA_PACKET_LOSS_CHECK, check.name)
+            if check.input_json is None:
+                self.fail("EBB16 loss snapshot has no typed input")
+            loss_input = json_to_thrift(
+                check.input_json, hc_types.IxiaPacketLossHealthCheckIn
+            )
+            self.assertFalse(loss_input.clear_traffic_stats)
+            self.assertEqual(
+                list(_TRAFFIC_ITEMS), list(loss_input.thresholds[0].names or [])
+            )
+            self.assertEqual(
+                "0.1" if stage.id == "ebb16_stage_loss_after_nhg_storm" else "100",
+                loss_input.thresholds[0].str_value,
+            )
+
     def test_stable_and_storm_measurement_windows_are_ordered(self) -> None:
         control_plane = _control_plane_playbook()
         traffic = get_bgp_ebb_nexthop_group_count_threshold_traffic_playbook(
@@ -176,9 +218,18 @@ class BgpEbbTrafficPlaybookTest(unittest.TestCase):
 
         self.assertEqual("ebb16_control_plane_prechecks", stages[0].id)
         self.assertEqual("ebb16_traffic_stable_state", stages[1].id)
+        storm_window = stages[2:-1]
         self.assertEqual(
             [stage.id for stage in control_plane.stages or []],
-            [stage.id for stage in stages[2:-1]],
+            [stage.id for stage in storm_window[0::2]],
+        )
+        self.assertEqual(
+            [
+                "ebb16_stage_loss_after_nhg_storm",
+                "ebb16_stage_loss_after_longevity",
+                "ebb16_stage_loss_after_ebb16_fibagent_restart",
+            ],
+            [stage.id for stage in storm_window[1::2]],
         )
         self.assertEqual("ebb16_traffic_final_liveness", stages[-1].id)
         final_liveness_step = list(stages[-1].steps or [])[0]
