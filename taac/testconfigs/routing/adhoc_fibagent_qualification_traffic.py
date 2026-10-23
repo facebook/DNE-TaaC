@@ -41,6 +41,10 @@ def _build_nrqeb009_ebb16_traffic_test_config() -> TestConfig:
         playbooks_selected=["bgp_ebb_nexthop_group_count_threshold_playbook"],
         profile=BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
         enable_update_group=True,
+        # The launcher keeps whatever level the previous run wrote. DBG1 keeps
+        # the per-route updates the FibAgentBgp analysis uses; DBG5 keepalive
+        # tracing filled the 6.3 GB /var/log tmpfs within one storm epoch.
+        bgpcpp_logging_config_override="DBG1;default:async=true",
         parent_networks=EBB_PARENT_NETWORKS_IXIA03,
         next_hops=EBB_NEXT_HOPS_IXIA03,
         port_map=EBB_FULL_SCALE_PORT_MAP_WITH_BGPMON,

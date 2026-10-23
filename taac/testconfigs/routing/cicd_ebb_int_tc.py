@@ -171,6 +171,9 @@ NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG = create_bgp_ebb_full_scale_test_confi
     ],
     profile=_OPENR_STANDALONE,
     enable_update_group=True,
+    # Production EBB runs DBG1; DBG5 keepalive tracing grew past the log
+    # check's FCR read limit (5.9 GB in one EBB16 run).
+    bgpcpp_logging_config_override="DBG1;default:async=true",
     parent_networks=EBB_PARENT_NETWORKS_IXIA03,
     next_hops=EBB_NEXT_HOPS_IXIA03,
 )

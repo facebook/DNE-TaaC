@@ -4,11 +4,31 @@ import json
 import unittest
 
 from ixia.ixia import types as ixia_types
+from taac.abstractions.eos_bgpcpp_setup_tasks import (
+    create_bgpcpp_logging_setup_task,
+)
 from taac.testconfigs.routing import cicd_ebb_int_tc
 from taac.testconfigs.routing.adhoc_fibagent_qualification_traffic import (
     NRQEB009_EBB16_FIBAGENT_QUALIFICATION_TRAFFIC_UG_ADHOC,
 )
+from taac.testconfigs.routing.util.bgp_ebb_constants import (
+    EBB_BGPCPP_LOGGING_CONFIG,
+)
 from taac.test_as_a_config.types import TestConfig
+
+
+def _shell_commands(config: TestConfig) -> list[str]:
+    return [
+        command
+        for task in config.setup_tasks or []
+        if task.task_name == "run_commands_on_shell"
+        for command in json.loads(task.params.json_params or "{}").get("cmds", [])
+    ]
+
+
+def _logging_command(logging_config: str) -> str:
+    task = create_bgpcpp_logging_setup_task("nrqeb009.ash6", logging_config)
+    return json.loads(task.params.json_params or "{}")["cmds"][0]
 
 
 class AdhocFibagentQualificationTrafficTest(unittest.TestCase):
@@ -73,6 +93,16 @@ class AdhocFibagentQualificationTrafficTest(unittest.TestCase):
         self.assertNotIn(
             "ebb16_fibagent_restart", [stage.id for stage in playbook.stages]
         )
+
+    def test_both_ebb16_configs_run_bgpcpp_at_dbg1(self) -> None:
+        for config in (
+            cicd_ebb_int_tc.NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+            NRQEB009_EBB16_FIBAGENT_QUALIFICATION_TRAFFIC_UG_ADHOC,
+        ):
+            with self.subTest(config=config.name):
+                commands = _shell_commands(config)
+                self.assertIn(_logging_command("DBG1;default:async=true"), commands)
+                self.assertNotIn(_logging_command(EBB_BGPCPP_LOGGING_CONFIG), commands)
 
     def test_config_is_not_scheduled_by_conveyor(self) -> None:
         scheduled_names = {
