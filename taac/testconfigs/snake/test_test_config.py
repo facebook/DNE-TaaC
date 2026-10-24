@@ -25,6 +25,7 @@ import typing as t
 
 from ixia.ixia import types as ixia_types
 from taac.health_checks.healthcheck_definitions import (
+    create_device_core_dumps_check,
     create_ixia_packet_loss_check,
     create_port_state_check,
 )
@@ -216,8 +217,9 @@ def gen_snake_test_config(
 
     Generates IXIA traffic items + per-loop PTP unicast (two-step)
     configs from the supplied ``snake_configs``, then composes the full
-    snake playbook suite via ``gen_snake_playbooks`` (with common
-    health checks shared between prechecks and postchecks).
+    snake playbook suite via ``gen_snake_playbooks`` (with common link and
+    traffic checks shared between prechecks and postchecks, plus post-only
+    core-dump validation).
 
     Args:
         name: Name registered in ``TestConfig.name``.
@@ -409,6 +411,8 @@ def gen_snake_test_config(
     if packet_loss_sleep_time != 10:
         # post-check: keep clear_traffic_stats=False, only adjust the drain window
         common_postchecks = _override_packet_loss(common_hcs, clear_traffic_stats=False)
+
+    common_postchecks = [*common_postchecks, create_device_core_dumps_check()]
 
     qsfp_service_restart_postchecks = None
     if qsfp_service_restart_use_recovery_window:
