@@ -52,6 +52,7 @@ from taac.testconfigs.routing.cicd_ebb_int_tc import (
     NRQEB008_SC5_UPDATE_PACKING_TEST_CONFIG_UG,
     NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+    NRQEB009_SC8_POLICY_EVALUATION_TEST_CONFIG_UG,
     NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
     NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG,
     NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
@@ -122,6 +123,8 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     # serialized only after the first-wave node on the same physical device.
     NRQEB006_SC4_TRANSIENT_MEMORY_PEER_SCALE_TEST_CONFIG_UG,
     NRQEB007_SC6_CHURN_PROCESSING_TEST_CONFIG_UG,
+    # NRQEB009 EBB-23 onboarding target. CLI-resolvable for E2E, not scheduled.
+    NRQEB009_SC8_POLICY_EVALUATION_TEST_CONFIG_UG,
     # Legacy retained scale-and-characteristic selectors; these are not the
     # first-wave Conveyor bindings above.
     BAG011_QUEUE_MEMORY_MONITOR_TEST_CONFIG_UG,

@@ -43,6 +43,7 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config,
     create_bgp_ebb_characteristic_transient_memory_route_scale_test_config,
     create_bgp_ebb_queue_memory_monitor_test_config,
+    create_bgp_ebb_separable_policy_evaluation_test_config,
     create_bgp_ebb_update_packing_test_config,
 )
 from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
@@ -257,6 +258,16 @@ NRQEB007_SC6_CHURN_PROCESSING_TEST_CONFIG_UG = (
     )
 )
 
+# NRQEB009 onboarding target for EBB-23. Registered for ad-hoc E2E first; a
+# Conveyor node is intentionally deferred until repeated-run calibration.
+NRQEB009_SC8_POLICY_EVALUATION_TEST_CONFIG_UG = (
+    create_bgp_ebb_separable_policy_evaluation_test_config(
+        NRQEB009_ASH6,
+        enable_update_group=True,
+        name_override="NRQEB009_SC8_POLICY_EVALUATION_TEST_CONFIG_UG",
+    )
+)
+
 
 # Legacy retained scale-and-characteristic selectors. They stay registered for
 # compatibility but are not the first-wave Conveyor bindings above.
@@ -298,6 +309,7 @@ __all__ = [
     "NRQEB008_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
     "BAG012_UPDATE_PACKING_TEST_CONFIG_UG",
     "BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
+    "NRQEB009_SC8_POLICY_EVALUATION_TEST_CONFIG_UG",
     "NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
     "NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG",
     "NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG",
