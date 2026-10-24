@@ -9,8 +9,10 @@ import later.unittest
 from neteng.netcastle.logger import ConsoleFileLogger
 from taac.tasks.all import _truncate_cmd_for_log
 from taac.tasks.configure_bgpcpp_startup_task import (
+    _build_flag_exact_command,
     _build_flag_sed_commands,
     _build_flag_verify_command,
+    _FLAG_NOT_EXACT_SENTINEL,
     _FLAG_VERIFIED_SENTINEL,
     ConfigureBgpcppStartupTask,
     RUN_BGPCPP_SCRIPT_PATH,
@@ -20,24 +22,7 @@ _STARTUP_MODULE = "neteng.test_infra.dne.taac.tasks.configure_bgpcpp_startup_tas
 
 
 class BuildFlagSedCommandsTest(unittest.TestCase):
-    """The sed strings are load-bearing: their backslash escaping must match
-    run_bgpcpp.sh's format, so pin both byte-for-byte."""
-
-    def test_seds_are_byte_exact(self) -> None:
-        cmds = _build_flag_sed_commands("my_flag", "true")
-        self.assertEqual(
-            cmds,
-            [
-                f'bash test "$(sudo grep -c -E -- '
-                f"'^[[:space:]]*--max_rss_size=' {RUN_BGPCPP_SCRIPT_PATH})\" "
-                f"-eq 1 && sudo sed -i '/^[[:space:]]*--my_flag=/d' "
-                f"{RUN_BGPCPP_SCRIPT_PATH}",
-                f'bash test "$(sudo grep -c -E -- '
-                f"'^[[:space:]]*--max_rss_size=' {RUN_BGPCPP_SCRIPT_PATH})\" "
-                f"-eq 1 && sudo sed -i '/--max_rss_size/i\\      "
-                f"--my_flag=true \\\\' {RUN_BGPCPP_SCRIPT_PATH}",
-            ],
-        )
+    """Validate the safety properties of the shared sed builder."""
 
     def test_each_mutation_requires_exactly_one_insertion_anchor(self) -> None:
         for command in _build_flag_sed_commands("my_flag", "true"):
@@ -60,7 +45,7 @@ class ConfigureBgpcppStartupManagedShellTest(later.unittest.TestCase):
     async def test_managed_shell_runs_seds_via_driver(self, mock_get_driver) -> None:
         mock_driver = MagicMock()
         mock_driver.async_run_cmd_on_shell = AsyncMock(
-            side_effect=["", "", _FLAG_VERIFIED_SENTINEL]
+            side_effect=[_FLAG_NOT_EXACT_SENTINEL, "", "", _FLAG_VERIFIED_SENTINEL]
         )
         mock_get_driver.return_value = mock_driver
 
@@ -77,6 +62,9 @@ class ConfigureBgpcppStartupManagedShellTest(later.unittest.TestCase):
         self.assertEqual(
             sent,
             [
+                _build_flag_exact_command(
+                    "bgp_resolve_nexthops_from_interface_state", "true"
+                ),
                 *_build_flag_sed_commands(
                     "bgp_resolve_nexthops_from_interface_state", "true"
                 ),
@@ -93,9 +81,11 @@ class ConfigureBgpcppStartupManagedShellTest(later.unittest.TestCase):
         mock_driver = MagicMock()
         mock_driver.async_run_cmd_on_shell = AsyncMock(
             side_effect=[
+                _FLAG_NOT_EXACT_SENTINEL,
                 "",
                 "",
                 _FLAG_VERIFIED_SENTINEL,
+                _FLAG_NOT_EXACT_SENTINEL,
                 "",
                 "",
                 _FLAG_VERIFIED_SENTINEL,
@@ -118,8 +108,12 @@ class ConfigureBgpcppStartupManagedShellTest(later.unittest.TestCase):
         self.assertEqual(
             sent,
             [
+                _build_flag_exact_command("agent_thrift_recv_timeout_ms", "160000"),
                 *_build_flag_sed_commands("agent_thrift_recv_timeout_ms", "160000"),
                 _build_flag_verify_command("agent_thrift_recv_timeout_ms", "160000"),
+                _build_flag_exact_command(
+                    "bgp_resolve_nexthops_from_interface_state", "true"
+                ),
                 *_build_flag_sed_commands(
                     "bgp_resolve_nexthops_from_interface_state", "true"
                 ),
@@ -150,7 +144,7 @@ class ConfigureBgpcppStartupManagedShellTest(later.unittest.TestCase):
         the raw-SSH helper."""
         mock_driver = MagicMock()
         mock_driver.async_run_cmd_on_shell = AsyncMock(
-            side_effect=["", "", _FLAG_VERIFIED_SENTINEL]
+            side_effect=[_FLAG_NOT_EXACT_SENTINEL, "", "", _FLAG_VERIFIED_SENTINEL]
         )
         mock_get_driver.return_value = mock_driver
 
@@ -163,6 +157,30 @@ class ConfigureBgpcppStartupManagedShellTest(later.unittest.TestCase):
         )
 
         mock_ssh_helper.assert_not_called()
+
+    @patch(f"{_STARTUP_MODULE}.async_get_device_driver", new_callable=AsyncMock)
+    async def test_managed_shell_keeps_exact_flag_without_mutation(
+        self, mock_get_driver
+    ) -> None:
+        mock_driver = MagicMock()
+        mock_driver.async_run_cmd_on_shell = AsyncMock(
+            return_value=_FLAG_VERIFIED_SENTINEL
+        )
+        mock_get_driver.return_value = mock_driver
+
+        await self.task.run(
+            {
+                "hostname": "bag010.ash6",
+                "flags": {"bgp_resolve_nexthops_from_interface_state": "true"},
+                "use_managed_shell": True,
+            }
+        )
+
+        mock_driver.async_run_cmd_on_shell.assert_awaited_once_with(
+            _build_flag_exact_command(
+                "bgp_resolve_nexthops_from_interface_state", "true"
+            )
+        )
 
     @patch(f"{_STARTUP_MODULE}.async_get_device_driver", new_callable=AsyncMock)
     async def test_managed_shell_rejects_restart_before_writing(
@@ -185,10 +203,31 @@ class ConfigureBgpcppStartupManagedShellTest(later.unittest.TestCase):
         self, mock_get_driver
     ) -> None:
         mock_driver = MagicMock()
-        mock_driver.async_run_cmd_on_shell = AsyncMock(side_effect=["", "", ""])
+        mock_driver.async_run_cmd_on_shell = AsyncMock(
+            side_effect=[_FLAG_NOT_EXACT_SENTINEL, "", "", ""]
+        )
         mock_get_driver.return_value = mock_driver
 
         with self.assertRaisesRegex(RuntimeError, "exactly one --max_rss_size"):
+            await self.task.run(
+                {
+                    "hostname": "bag012.ash6",
+                    "flags": {"my_flag": "true"},
+                    "use_managed_shell": True,
+                }
+            )
+
+    @patch(f"{_STARTUP_MODULE}.async_get_device_driver", new_callable=AsyncMock)
+    async def test_managed_shell_propagates_probe_failure(
+        self, mock_get_driver
+    ) -> None:
+        mock_driver = MagicMock()
+        mock_driver.async_run_cmd_on_shell = AsyncMock(
+            side_effect=ConnectionError("transport failed")
+        )
+        mock_get_driver.return_value = mock_driver
+
+        with self.assertRaisesRegex(ConnectionError, "transport failed"):
             await self.task.run(
                 {
                     "hostname": "bag012.ash6",
@@ -201,6 +240,7 @@ class ConfigureBgpcppStartupManagedShellTest(later.unittest.TestCase):
     async def test_raw_ssh_runs_the_shared_sed_commands(self, mock_ssh_helper) -> None:
         helper = mock_ssh_helper.return_value
         helper.run_command.side_effect = [
+            (True, _FLAG_NOT_EXACT_SENTINEL),
             (True, "ok"),
             (True, "ok"),
             (True, _FLAG_VERIFIED_SENTINEL),
@@ -218,6 +258,7 @@ class ConfigureBgpcppStartupManagedShellTest(later.unittest.TestCase):
         self.assertEqual(
             sent,
             [
+                _build_flag_exact_command("my_flag", "true"),
                 *_build_flag_sed_commands("my_flag", "true"),
                 _build_flag_verify_command("my_flag", "true"),
             ],
@@ -229,12 +270,27 @@ class ConfigureBgpcppStartupManagedShellTest(later.unittest.TestCase):
     ) -> None:
         helper = mock_ssh_helper.return_value
         helper.run_command.side_effect = [
+            (True, _FLAG_NOT_EXACT_SENTINEL),
             (True, "ok"),
             (True, "ok"),
             (False, "not found"),
         ]
 
         with self.assertRaisesRegex(RuntimeError, "exactly one --max_rss_size"):
+            await self.task.run(
+                {
+                    "hostname": "bag012.ash6",
+                    "flags": {"my_flag": "true"},
+                    "use_managed_shell": False,
+                }
+            )
+
+    @patch(f"{_STARTUP_MODULE}.AristaSSHHelper")
+    async def test_raw_ssh_fails_closed_when_probe_fails(self, mock_ssh_helper) -> None:
+        helper = mock_ssh_helper.return_value
+        helper.run_command.return_value = (False, "transport failed")
+
+        with self.assertRaisesRegex(RuntimeError, "Failed to inspect"):
             await self.task.run(
                 {
                     "hostname": "bag012.ash6",

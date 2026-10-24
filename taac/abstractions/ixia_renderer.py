@@ -71,6 +71,7 @@ class UnsupportedIxiaRenderingError(ValueError):
 class _IxiaRenderingCapability(str, Enum):
     INITIAL_IPV6 = "initial_ipv6"
     COMPACT_NAMED_IPV6 = "compact_named_ipv6"
+    SHARED_EXTERNAL_DUAL_STACK = "shared_external_dual_stack"
     PARTITIONED_DUAL_STACK = "partitioned_dual_stack"
     PARTITIONED_DUAL_STACK_WITH_MONITOR = "partitioned_dual_stack_with_monitor"
 
@@ -389,6 +390,8 @@ def _validate_capability(
         _validate_initial_ipv6_capability(request)
     elif capability is _IxiaRenderingCapability.COMPACT_NAMED_IPV6:
         _validate_compact_named_ipv6_capability(request)
+    elif capability is _IxiaRenderingCapability.SHARED_EXTERNAL_DUAL_STACK:
+        _validate_shared_external_dual_stack_capability(request)
     else:
         _validate_partitioned_dual_stack_capability(
             request,
@@ -424,6 +427,10 @@ def _select_capability(
         ((IxiaBgpCapability.IPV6_UNICAST,), 64),
         ((IxiaBgpCapability.IPV4_UNICAST,), 31),
     }
+    if session_shapes == partitioned_dual_stack_shapes and _is_shared_external_shape(
+        request
+    ):
+        return _IxiaRenderingCapability.SHARED_EXTERNAL_DUAL_STACK
     if session_shapes == partitioned_dual_stack_shapes:
         return _IxiaRenderingCapability.PARTITIONED_DUAL_STACK
     if session_shapes == partitioned_dual_stack_shapes | {
@@ -433,10 +440,26 @@ def _select_capability(
     _unsupported("IXIA plan is outside the shared renderer semantic capabilities")
 
 
+def _is_shared_external_shape(request: TrafficGeneratorRenderRequest) -> bool:
+    groups = request.plan.device_groups
+    sessions = request.plan.bgp_sessions
+    return (
+        len(request.plan.ports) == 1
+        and bool(groups)
+        and len(sessions) == len(groups)
+        and tuple(session.device_group_id for session in sessions)
+        == tuple(group.resource_id for group in groups)
+        and all(
+            session.relationship is PeerRelationship.EXTERNAL for session in sessions
+        )
+    )
+
+
 def _is_partitioned_dual_stack_capability(
     capability: _IxiaRenderingCapability,
 ) -> bool:
     return capability in {
+        _IxiaRenderingCapability.SHARED_EXTERNAL_DUAL_STACK,
         _IxiaRenderingCapability.PARTITIONED_DUAL_STACK,
         _IxiaRenderingCapability.PARTITIONED_DUAL_STACK_WITH_MONITOR,
     }
@@ -649,6 +672,63 @@ def _validate_partitioned_dual_stack_capability(
                 relationship,
                 mutation_group_ids,
             )
+    _validate_partitioned_advertisements(request, sessions_by_group)
+    _validate_partitioned_presentation_uniqueness(request)
+
+
+def _validate_shared_external_dual_stack_capability(
+    request: TrafficGeneratorRenderRequest,
+) -> None:
+    if (
+        len(request.plan.ports) != 1
+        or not request.plan.device_groups
+        or len(request.plan.bgp_sessions) != len(request.plan.device_groups)
+        or any(
+            not activation.emit_basic_port_configs
+            for activation in request.endpoint_activations
+        )
+    ):
+        _unsupported(
+            "shared external dual-stack lowering requires one active port "
+            "and one session per group"
+        )
+    sessions_by_group = _sessions_by_group(request)
+    if tuple(session.device_group_id for session in request.plan.bgp_sessions) != tuple(
+        group.resource_id for group in request.plan.device_groups
+    ):
+        _unsupported("shared external dual-stack sessions must follow group plan order")
+    port = request.plan.ports[0]
+    groups = _plan_order_port_groups(request, port)
+    if len(groups) != len(request.plan.device_groups) or any(
+        sessions_by_group[group.resource_id].relationship
+        is not PeerRelationship.EXTERNAL
+        for group in groups
+    ):
+        _unsupported(
+            "shared external dual-stack lowering requires all groups on its "
+            "single external port"
+        )
+    mutation_group_ids = frozenset(
+        advertisement.device_group_id
+        for advertisement in request.plan.advertisements
+        if advertisement.requires_route_mutation
+    )
+    _validate_unique_partitioned_group_indices(request, port)
+    for group in groups:
+        session = sessions_by_group[group.resource_id]
+        _validate_partitioned_session(
+            group,
+            session,
+            PeerRelationship.EXTERNAL,
+            requires_route_mutation=group.resource_id in mutation_group_ids,
+        )
+        _validate_partitioned_named_identity(request, group, session)
+    _validate_partitioned_peer_windows(
+        groups,
+        sessions_by_group,
+        PeerRelationship.EXTERNAL,
+        mutation_group_ids,
+    )
     _validate_partitioned_advertisements(request, sessions_by_group)
     _validate_partitioned_presentation_uniqueness(request)
 

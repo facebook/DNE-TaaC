@@ -708,13 +708,21 @@ def _ebb_full_scale_pre_ixia_setup_tasks(
             action="disable",
         )
     ]
-    ixia_interfaces = [
+    candidate_ixia_interfaces = [
         (interfaces.ebgp, "IXIA_MIMIC_EBGP"),
         (interfaces.ibgp, "IXIA_MIMIC_IBGP"),
     ]
     if interfaces.include_bgpmon:
         assert interfaces.bgpmon is not None
-        ixia_interfaces.append((interfaces.bgpmon, "IXIA_MIMIC_BGP_MON"))
+        candidate_ixia_interfaces.append((interfaces.bgpmon, "IXIA_MIMIC_BGP_MON"))
+
+    ixia_interfaces = []
+    seen_interface_roles = set()
+    for interface in candidate_ixia_interfaces:
+        if interface in seen_interface_roles:
+            continue
+        seen_interface_roles.add(interface)
+        ixia_interfaces.append(interface)
 
     for interface_name, description in ixia_interfaces:
         tasks.append(
@@ -1150,6 +1158,7 @@ def _characteristic_setup_suffix_phases(
     setup_args: _EbbFullScaleSetupArgs,
     peer_plan: BgpPeerPlan,
     router_id: str | None,
+    local_as_4_byte: int | None,
     finalization_tasks: t.Sequence[t.Any],
 ) -> tuple[EosBgpCppSetupPhase, ...]:
     device_name = setup_args.interfaces.device_name
@@ -1157,6 +1166,7 @@ def _characteristic_setup_suffix_phases(
         hostname=device_name,
         router_id=router_id,
         peers=_bgpcpp_peer_configs(bound, peer_plan),
+        local_as_4_byte=local_as_4_byte,
     )
     return (
         EosBgpCppSetupPhase(
@@ -1201,6 +1211,7 @@ def _characteristic_setup_phases(
     bgpcpp_configerator_path: str,
     enable_update_group: bool,
     openr_mode: OpenRMode,
+    bgpcpp_local_as_4_byte: int | None = None,
     finalization_tasks: t.Sequence[t.Any] = (),
 ) -> tuple[EosBgpCppSetupPhase, ...]:
     setup_args = _EbbFullScaleSetupArgs(
@@ -1232,9 +1243,57 @@ def _characteristic_setup_phases(
             setup_args=setup_args,
             peer_plan=_eos_bgpcpp_peer_plan(bound),
             router_id=router_id,
+            local_as_4_byte=bgpcpp_local_as_4_byte,
             finalization_tasks=finalization_tasks,
         ),
     )
+
+
+def build_eos_bgpcpp_characteristic_setup_tasks(
+    bound: BoundTopology,
+    *,
+    device_name: str,
+    bgp_asn: int,
+    ebgp_interface: str,
+    ibgp_interface: str,
+    router_id: str | None,
+    bgpcpp_configerator_path: str,
+    enable_update_group: bool,
+    openr_mode: OpenRMode,
+    bgpcpp_local_as_4_byte: int | None = None,
+    component_startup_prefix_tasks: t.Sequence[t.Any] = (),
+    finalization_tasks: t.Sequence[t.Any] = (),
+) -> list[t.Any]:
+    """Build EOS BGP++ characteristic setup from explicit bound intent."""
+    phases = _characteristic_setup_phases(
+        bound,
+        device_name=device_name,
+        bgp_asn=bgp_asn,
+        ebgp_interface=ebgp_interface,
+        ibgp_interface=ibgp_interface,
+        router_id=router_id,
+        bgpcpp_configerator_path=bgpcpp_configerator_path,
+        enable_update_group=enable_update_group,
+        openr_mode=openr_mode,
+        bgpcpp_local_as_4_byte=bgpcpp_local_as_4_byte,
+        finalization_tasks=finalization_tasks,
+    )
+    if component_startup_prefix_tasks:
+        startup_phase_index = next(
+            index
+            for index, phase in enumerate(phases)
+            if phase.owner is EosBgpCppSetupPhaseOwner.COMPONENT_STARTUP
+        )
+        phases = tuple(
+            replace(
+                phase,
+                tasks=(*component_startup_prefix_tasks, *phase.tasks),
+            )
+            if index == startup_phase_index
+            else phase
+            for index, phase in enumerate(phases)
+        )
+    return [task for phase in phases for task in phase.tasks]
 
 
 def _ebb_required_legacy_ixia_names(
@@ -4519,6 +4578,12 @@ def _eos_bgpcpp_peer_plan(bound: BoundTopology) -> BgpPeerPlan:
     )
 
 
+def build_eos_bgpcpp_peer_plan(bound: BoundTopology) -> BgpPeerPlan:
+    """Project the exact peer records installed by the EOS BGP++ compiler."""
+    _validate_bound_provenance_for_compile(bound)
+    return _eos_bgpcpp_peer_plan(bound)
+
+
 def _bgpcpp_peer_configs(
     bound: BoundTopology,
     plan: BgpPeerPlan,
@@ -4775,11 +4840,13 @@ def _eos_bgpcpp_teardown_plan(
     interface_plan: InterfacePlan,
     component_runtime_plan: MetaComponentRuntimePlan | None,
     openr_inputs: _EosBgpCppOpenRInputs,
+    *,
+    allow_profile_free: bool = False,
 ) -> TeardownPlan:
     if (
         bound.logical_topology.legacy_profile not in _EOS_BGPCPP_TEARDOWN_PROFILES
         or _primary_dut_endpoint(bound).setup_mode != "full"
-    ):
+    ) and not allow_profile_free:
         return TeardownPlan(tasks=())
 
     hostname = _teardown_hostname(bound)
@@ -4843,6 +4910,22 @@ def _eos_bgpcpp_teardown_plan(
         tasks=tuple(tasks),
         cleaned_interfaces=tuple(reversed(configured_interfaces)),
         disabled_components=tuple(reversed(enabled_components)),
+    )
+
+
+def build_eos_bgpcpp_characteristic_teardown_tasks(
+    bound: BoundTopology,
+) -> list[t.Any]:
+    """Build EOS BGP++ characteristic teardown from bound device intent."""
+    _validate_bound_provenance_for_compile(bound)
+    return list(
+        _eos_bgpcpp_teardown_plan(
+            bound,
+            _eos_bgpcpp_interface_plan(bound),
+            None,
+            _eos_bgpcpp_openr_inputs(bound),
+            allow_profile_free=True,
+        ).tasks
     )
 
 
@@ -4926,7 +5009,7 @@ class EosBgpCppCompiler(TopologyCompiler):
         endpoints = self.build_endpoints(bound)
         host_os_type_map = self.build_host_os_type_map(bound)
         interface_plan = _eos_bgpcpp_interface_plan(bound)
-        bgp_peer_plan = _eos_bgpcpp_peer_plan(bound)
+        bgp_peer_plan = build_eos_bgpcpp_peer_plan(bound)
         bgp_policy_plan = _eos_bgpcpp_policy_plan(bound)
         component_runtime_plan = self.build_component_runtime_plan(bound)
         setup_phases = list(
@@ -5594,15 +5677,7 @@ def _preserve_ug_backpressure_task_artifacts(
 
 
 def _uses_profile_free_eos_compiler(bound: BoundTopology) -> bool:
-    return (
-        _is_profile_free_bounded_ecmp(bound)
-        or _is_profile_free_ebb_full_scale(bound)
-        or _is_profile_free_egress_peer_scale(bound)
-        or _is_profile_free_ipv6_update_packing(bound)
-        or _is_profile_free_ug_add_peer_dynamic(bound)
-        or _is_profile_free_ug_backpressure(bound)
-        or _is_profile_free_ug_new_peer_join(bound)
-    )
+    return bound.logical_topology.legacy_profile is None
 
 
 # The legacy BOUNDED_ECMP task config places IPv4 iBGP at index 1 and its

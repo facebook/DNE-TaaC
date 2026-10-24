@@ -61,6 +61,77 @@ THRIFT_ACL_FILES = [
     "/usr/facebook/thrift_acls/FibAgent_lab.json",
 ]
 
+# BAG images carry the authoritative, release-matched production ACL schemas,
+# but some images do not materialize their lab aliases.  The policy-evaluation
+# qualification profile uses these image-local files only as schema seeds and
+# then adds the existing TAAC user allowlist to every permission below.
+LAB_THRIFT_ACL_SOURCE_CANDIDATES = {
+    "/usr/facebook/thrift_acls/Bgpd_lab.json": (
+        "/usr/facebook/thrift_acls/Bgpd_prod_plane1.json",
+    ),
+    "/usr/facebook/thrift_acls/FibAgent.json": (
+        "/usr/facebook/thrift_acls/FibAgent_prod_plane1.json",
+    ),
+    "/usr/facebook/thrift_acls/FibAgent_lab.json": (
+        "/usr/facebook/thrift_acls/FibAgent_prod_plane1.json",
+    ),
+}
+POLICY_EVALUATION_THRIFT_ACL_MARKER = (
+    "/tmp/taac_policy_evaluation_created_thrift_acls.json"
+)
+
+# Some BAG images install the fb-bgpcpp RPM and binary but omit the package's
+# launcher.  ProcMgr still points the Bgp daemon at this path, so daemon enable
+# otherwise reports success while the process never starts.  Keep the fallback
+# byte-for-byte compatible with the package launcher shape expected by
+# ``configure_bgpcpp_startup`` (in particular, the final --max_rss_size line).
+POLICY_EVALUATION_BGPCPP_STARTUP_PATH = "/usr/sbin/run_bgpcpp.sh"
+POLICY_EVALUATION_BGPCPP_BINARY_PATH = "/usr/sbin/bgpcpp"
+POLICY_EVALUATION_BGPCPP_STARTUP_MARKER = (
+    "/tmp/taac_policy_evaluation_created_bgpcpp_startup.json"
+)
+POLICY_EVALUATION_BGPCPP_STARTUP_FLAGS = {
+    "bgp_resolve_nexthops_from_interface_state": "true",
+}
+POLICY_EVALUATION_BGPCPP_STARTUP_CONTENT = """\
+#!/bin/bash
+# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
+
+export CONFIGERATOR_PRETEND_NOT_PROD=1
+export LC_ALL="C"
+
+BGPCPP="bgpcpp"
+CONFIG=/mnt/flash/bgpcpp_config
+POLICY=/mnt/flash/bgpcpp_policy
+ROUTE_REGISTRY_PREFIX_LIST=/mnt/flash/bgpcpp_route_registry_prefix_list
+CONFIG_BACKUP=/mnt/flash/bgpcpp_config_backup
+LOGGING='DBG1;default:async=true'
+VERBOSITY=1
+MAX_RSS_SIZE=20
+POLICY_CACHE_SIZE=200000
+FIB_AGENT_RCVD_TIMEOUT=80000
+FIB_AGENT_PORT=5913
+
+echo "Starting bgp++ daemon..."
+exec "${BGPCPP}" \\
+      --fbwhoami_strict=false \\
+      --fd_soft_limit=4096 \\
+      --agent_thrift_port="${FIB_AGENT_PORT}" \\
+      --agent_thrift_recv_timeout_ms="${FIB_AGENT_RCVD_TIMEOUT}" \\
+      --config="${CONFIG}" \\
+      --policy="${POLICY}" \\
+      --rp_state_file="${ROUTE_REGISTRY_PREFIX_LIST}"\\
+      --bgp_config_backup="${CONFIG_BACKUP}" \\
+      --logging="${LOGGING}" \\
+      --v "${VERBOSITY}" \\
+      --bgp_policy_cache_size="${POLICY_CACHE_SIZE}" \\
+      --platform=ebb \\
+      --bgp_coro_profiler_enabled=true \\
+      --bgp_coro_profiler_export_ods=true \\
+      --enable_well_known_community_filter=true \\
+      --max_rss_size="${MAX_RSS_SIZE}"
+"""
+
 INTERN_USER_IDS = [
     "1179835461009564",
     "1414546347",
@@ -117,6 +188,657 @@ def _on_device_python_command(script: str) -> str:
     return (
         f"bash printf '%s' {shlex.quote(encoded_script)} | base64 -d | sudo python3 -"
     )
+
+
+def _ownership_receipt_script_prelude(
+    *,
+    marker_path: str,
+    receipt_kind: str,
+    allowed_paths: t.Iterable[str],
+) -> str:
+    return "\n".join(
+        [
+            "import hashlib",
+            "import json",
+            "import os",
+            "import stat",
+            "import tempfile",
+            "import uuid",
+            "from pathlib import Path",
+            f"legacy_marker = Path({marker_path!r})",
+            f"receipt_kind = {receipt_kind!r}",
+            f"allowed_paths = set({tuple(allowed_paths)!r})",
+            'receipt_prefix = legacy_marker.name.removesuffix(".json")',
+            'receipt_glob = f"{receipt_prefix}.*.receipt.json"',
+            "def remove_legacy_marker():",
+            "    try:",
+            "        metadata = legacy_marker.lstat()",
+            "    except FileNotFoundError:",
+            "        return",
+            "    if stat.S_ISDIR(metadata.st_mode):",
+            '        raise RuntimeError(f"legacy marker is a directory: {legacy_marker}")',
+            "    legacy_marker.unlink()",
+            "def metadata_guard(metadata):",
+            "    return (",
+            "        metadata.st_dev,",
+            "        metadata.st_ino,",
+            "        stat.S_IMODE(metadata.st_mode),",
+            "        metadata.st_size,",
+            "        metadata.st_mtime_ns,",
+            "        metadata.st_ctime_ns,",
+            "    )",
+            "def inspect_file(path):",
+            "    descriptor = os.open(",
+            "        path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK",
+            "    )",
+            "    try:",
+            "        before = os.fstat(descriptor)",
+            "        if not stat.S_ISREG(before.st_mode):",
+            '            raise RuntimeError(f"not a regular file: {path}")',
+            "        digest = hashlib.sha256()",
+            "        while chunk := os.read(descriptor, 1024 * 1024):",
+            "            digest.update(chunk)",
+            "        after = os.fstat(descriptor)",
+            "    finally:",
+            "        os.close(descriptor)",
+            "    if metadata_guard(before) != metadata_guard(after):",
+            '        raise RuntimeError(f"file changed while hashing: {path}")',
+            "    current_path = os.lstat(path)",
+            "    if (current_path.st_dev, current_path.st_ino) != (",
+            "        after.st_dev,",
+            "        after.st_ino,",
+            "    ):",
+            '        raise RuntimeError(f"file identity changed while hashing: {path}")',
+            "    return (",
+            "        {",
+            '            "dev": after.st_dev,',
+            '            "ino": after.st_ino,',
+            '            "mode": stat.S_IMODE(after.st_mode),',
+            '            "uid": after.st_uid,',
+            '            "gid": after.st_gid,',
+            '            "size": after.st_size,',
+            '            "mtime_ns": after.st_mtime_ns,',
+            '            "sha256": digest.hexdigest(),',
+            "        },",
+            "        metadata_guard(after),",
+            "    )",
+            "def write_receipt(artifacts):",
+            "    receipt_id = uuid.uuid4().hex",
+            "    receipt = legacy_marker.with_name(",
+            '        f"{receipt_prefix}.{receipt_id}.receipt.json"',
+            "    )",
+            "    payload = (",
+            "        json.dumps(",
+            "            {",
+            '                "version": 1,',
+            '                "receipt_id": receipt_id,',
+            '                "kind": receipt_kind,',
+            '                "artifacts": artifacts,',
+            "            },",
+            "            sort_keys=True,",
+            '            separators=(",", ":"),',
+            "        ).encode()",
+            '        + b"\\n"',
+            "    )",
+            "    descriptor, temporary_name = tempfile.mkstemp(",
+            '        prefix=f".{receipt.name}.", dir=receipt.parent',
+            "    )",
+            "    temporary = Path(temporary_name)",
+            "    try:",
+            "        os.fchmod(descriptor, 0o600)",
+            "        view = memoryview(payload)",
+            "        while view:",
+            "            view = view[os.write(descriptor, view):]",
+            "        os.fsync(descriptor)",
+            "        os.close(descriptor)",
+            "        descriptor = -1",
+            "        os.link(temporary, receipt)",
+            "    finally:",
+            "        if descriptor >= 0:",
+            "            os.close(descriptor)",
+            "        temporary.unlink(missing_ok=True)",
+            "    return receipt",
+            "def restore_tombstone(path, tombstone):",
+            "    try:",
+            "        os.link(tombstone, path, follow_symlinks=False)",
+            "    except OSError as error:",
+            "        return str(error)",
+            "    tombstone.unlink()",
+            "    return None",
+            "def remove_owned_file(path, expected):",
+            "    tombstone = path.with_name(",
+            '        f".{path.name}.taac-cleanup.{uuid.uuid4().hex}"',
+            "    )",
+            "    try:",
+            "        path.rename(tombstone)",
+            "    except FileNotFoundError:",
+            "        return False",
+            "    try:",
+            "        moved, _ = inspect_file(tombstone)",
+            "    except (OSError, RuntimeError) as error:",
+            "        restore_error = restore_tombstone(path, tombstone)",
+            "        raise RuntimeError(",
+            '            f"moved object could not be verified: {path}; "',
+            '            f"restore_error={restore_error}"',
+            "        ) from error",
+            "    if moved != expected:",
+            "        restore_error = restore_tombstone(path, tombstone)",
+            "        raise RuntimeError(",
+            '            f"moved object ownership changed: {path}; "',
+            '            f"restore_error={restore_error}"',
+            "        )",
+            "    tombstone.unlink()",
+            "    return True",
+            "def rollback_installed(installed):",
+            "    refused = []",
+            "    for path_string, expected in installed.items():",
+            "        path = Path(path_string)",
+            "        try:",
+            "            remove_owned_file(path, expected)",
+            "        except RuntimeError as error:",
+            '            refused.append(f"{path}: {error}")',
+            "    if refused:",
+            '        raise RuntimeError(f"refused materialization rollback: {refused}")',
+            "def valid_artifact_record(record):",
+            "    if not isinstance(record, dict) or set(record) != {",
+            '        "dev",',
+            '        "ino",',
+            '        "mode",',
+            '        "uid",',
+            '        "gid",',
+            '        "size",',
+            '        "mtime_ns",',
+            '        "sha256",',
+            "    }:",
+            "        return False",
+            "    if any(",
+            "        type(record[field]) is not int or record[field] < 0",
+            "        for field in (",
+            '            "dev",',
+            '            "ino",',
+            '            "mode",',
+            '            "uid",',
+            '            "gid",',
+            '            "size",',
+            '            "mtime_ns",',
+            "        )",
+            "    ):",
+            "        return False",
+            '    digest = record["sha256"]',
+            "    return (",
+            "        isinstance(digest, str)",
+            "        and len(digest) == 64",
+            '        and set(digest) <= set("0123456789abcdef")',
+            "    )",
+            "def load_receipt(receipt):",
+            "    descriptor = os.open(",
+            "        receipt, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK",
+            "    )",
+            "    try:",
+            "        before = os.fstat(descriptor)",
+            "        if (",
+            "            not stat.S_ISREG(before.st_mode)",
+            "            or stat.S_IMODE(before.st_mode) != 0o600",
+            "            or before.st_uid != os.geteuid()",
+            "            or before.st_nlink != 1",
+            "            or before.st_size > 65536",
+            "        ):",
+            '            raise RuntimeError(f"invalid receipt file: {receipt}")',
+            "        payload = os.read(descriptor, 65537)",
+            "        after = os.fstat(descriptor)",
+            "    finally:",
+            "        os.close(descriptor)",
+            "    if len(payload) > 65536 or metadata_guard(before) != metadata_guard(after):",
+            '        raise RuntimeError(f"receipt changed while reading: {receipt}")',
+            "    current_path = os.lstat(receipt)",
+            "    if (current_path.st_dev, current_path.st_ino) != (",
+            "        after.st_dev,",
+            "        after.st_ino,",
+            "    ):",
+            '        raise RuntimeError(f"receipt identity changed while reading: {receipt}")',
+            "    data = json.loads(payload)",
+            "    if not isinstance(data, dict) or set(data) != {",
+            '        "version",',
+            '        "receipt_id",',
+            '        "kind",',
+            '        "artifacts",',
+            "    }:",
+            '        raise RuntimeError(f"invalid receipt schema: {receipt}")',
+            '    if data["version"] != 1 or data["kind"] != receipt_kind:',
+            '        raise RuntimeError(f"unexpected receipt identity: {receipt}")',
+            '    receipt_id = data["receipt_id"]',
+            "    try:",
+            "        canonical_id = uuid.UUID(hex=receipt_id).hex",
+            "    except (AttributeError, TypeError, ValueError) as error:",
+            '        raise RuntimeError(f"invalid receipt id: {receipt}") from error',
+            '    expected_name = f"{receipt_prefix}.{canonical_id}.receipt.json"',
+            "    if receipt_id != canonical_id or receipt.name != expected_name:",
+            '        raise RuntimeError(f"receipt name/id mismatch: {receipt}")',
+            '    artifacts = data["artifacts"]',
+            "    if not isinstance(artifacts, dict) or not artifacts:",
+            '        raise RuntimeError(f"empty receipt: {receipt}")',
+            "    unexpected = set(artifacts) - allowed_paths",
+            "    if unexpected:",
+            '        raise RuntimeError(f"unexpected receipt paths: {sorted(unexpected)}")',
+            "    if not all(valid_artifact_record(record) for record in artifacts.values()):",
+            '        raise RuntimeError(f"invalid artifact record: {receipt}")',
+            "    return artifacts",
+            "def quarantine_receipt(receipt):",
+            "    conflict = receipt.with_name(",
+            '        f"{receipt.name}.{uuid.uuid4().hex}.conflict"',
+            "    )",
+            "    receipt.replace(conflict)",
+            "    return conflict",
+            "",
+        ]
+    )
+
+
+def _build_cleanup_materialized_files_script(
+    *,
+    allowed_paths: t.Iterable[str],
+    marker_path: str,
+    receipt_kind: str,
+    label: str,
+) -> str:
+    return "\n".join(
+        [
+            _ownership_receipt_script_prelude(
+                marker_path=marker_path,
+                receipt_kind=receipt_kind,
+                allowed_paths=allowed_paths,
+            ),
+            "remove_legacy_marker()",
+            "receipts = sorted(legacy_marker.parent.glob(receipt_glob))",
+            "if not receipts:",
+            f'    print("No TAAC-created {label} receipts to clean")',
+            "receipt_artifacts = {}",
+            "for receipt in receipts:",
+            "    try:",
+            "        receipt_artifacts[receipt] = load_receipt(receipt)",
+            "    except (OSError, RuntimeError, ValueError) as error:",
+            "        conflict = quarantine_receipt(receipt)",
+            "        raise RuntimeError(",
+            '            f"quarantined invalid receipt {conflict}: {error}"',
+            "        ) from error",
+            "records_by_path = {}",
+            "receipts_by_path = {}",
+            "for receipt, artifacts in receipt_artifacts.items():",
+            "    for path_string, expected in artifacts.items():",
+            "        records_by_path.setdefault(path_string, []).append(expected)",
+            "        receipts_by_path.setdefault(path_string, set()).add(receipt)",
+            "preflight = {}",
+            "conflict_paths = {}",
+            "for path_string, expected_records in records_by_path.items():",
+            "    path = Path(path_string)",
+            "    try:",
+            "        current, guard = inspect_file(path)",
+            "    except FileNotFoundError:",
+            "        preflight[path_string] = None",
+            "        continue",
+            "    except (OSError, RuntimeError) as error:",
+            "        conflict_paths[path_string] = str(error)",
+            "        continue",
+            "    matching = [record for record in expected_records if record == current]",
+            "    if not matching:",
+            '        conflict_paths[path_string] = "ownership changed"',
+            "        continue",
+            "    preflight[path_string] = matching[0]",
+            "if conflict_paths:",
+            "    conflict_receipts = {",
+            "        receipt",
+            "        for path_string in conflict_paths",
+            "        for receipt in receipts_by_path[path_string]",
+            "    }",
+            "    quarantined = [",
+            "        quarantine_receipt(receipt) for receipt in conflict_receipts",
+            "    ]",
+            "    raise RuntimeError(",
+            '        f"refused cleanup for {conflict_paths}; quarantined {quarantined}"',
+            "    )",
+            "for path_string, expected in preflight.items():",
+            "    if expected is None:",
+            "        continue",
+            "    path = Path(path_string)",
+            "    try:",
+            "        removed = remove_owned_file(path, expected)",
+            "    except RuntimeError as error:",
+            "        conflicts = [",
+            "            quarantine_receipt(receipt)",
+            "            for receipt in receipts_by_path[path_string]",
+            "        ]",
+            "        raise RuntimeError(",
+            '            f"refused cleanup after concurrent change; receipts {conflicts}"',
+            "        ) from error",
+            "    if removed:",
+            f'        print(f"REMOVED TAAC-created {label} {{path}}")',
+            "for receipt in receipts:",
+            "    receipt.unlink()",
+            "",
+        ]
+    )
+
+
+def _build_cleanup_materialized_files_cmd(
+    *,
+    allowed_paths: t.Iterable[str],
+    marker_path: str,
+    receipt_kind: str,
+    label: str,
+) -> str:
+    return _on_device_python_command(
+        _build_cleanup_materialized_files_script(
+            allowed_paths=allowed_paths,
+            marker_path=marker_path,
+            receipt_kind=receipt_kind,
+            label=label,
+        )
+    )
+
+
+def _bgpcpp_startup_content_with_flags(
+    content: str,
+    startup_flags: t.Mapping[str, str],
+) -> str:
+    lines = content.splitlines(keepends=True)
+    for flag_name, flag_value in startup_flags.items():
+        if not flag_name or any(
+            not (character.isalnum() or character == "_") for character in flag_name
+        ):
+            raise ValueError(f"invalid BGP++ startup flag name: {flag_name!r}")
+        if not flag_value or any(character in "\x00\r\n\\" for character in flag_value):
+            raise ValueError(f"invalid BGP++ startup flag value: {flag_value!r}")
+        assignment = f"--{flag_name}="
+        lines = [line for line in lines if not line.lstrip().startswith(assignment)]
+        anchors = [
+            index
+            for index, line in enumerate(lines)
+            if line.lstrip().startswith("--max_rss_size=")
+        ]
+        if len(anchors) != 1:
+            raise ValueError(
+                "BGP++ startup content must have one --max_rss_size anchor"
+            )
+        lines.insert(anchors[0], f"      --{flag_name}={flag_value} \\\n")
+    return "".join(lines)
+
+
+def build_materialize_missing_lab_thrift_acl_files_cmd(
+    *,
+    destination_sources: t.Mapping[str, t.Sequence[str]] = (
+        LAB_THRIFT_ACL_SOURCE_CANDIDATES
+    ),
+    marker_path: str = POLICY_EVALUATION_THRIFT_ACL_MARKER,
+) -> str:
+    """Materialize missing lab ACL aliases and record object ownership."""
+    normalized_sources = {
+        destination: tuple(sources)
+        for destination, sources in destination_sources.items()
+    }
+    script = "\n".join(
+        [
+            _ownership_receipt_script_prelude(
+                marker_path=marker_path,
+                receipt_kind="lab_thrift_acl",
+                allowed_paths=normalized_sources,
+            ),
+            "import shutil",
+            f"destination_sources = {normalized_sources!r}",
+            f"user_ids = {INTERN_USER_IDS!r}",
+            "remove_legacy_marker()",
+            "installed = {}",
+            "try:",
+            "    for destination, candidates in destination_sources.items():",
+            "        destination_path = Path(destination)",
+            "        try:",
+            "            existing = destination_path.lstat()",
+            "        except FileNotFoundError:",
+            "            existing = None",
+            "        if existing is not None:",
+            "            if not stat.S_ISREG(existing.st_mode):",
+            '                raise RuntimeError(f"ACL destination is not a regular file: {destination}")',
+            '            print(f"KEEP {destination}: already present")',
+            "            continue",
+            "        source_path = next(",
+            "            (",
+            "                Path(candidate)",
+            "                for candidate in candidates",
+            "                if Path(candidate).is_file()",
+            "            ),",
+            "            None,",
+            "        )",
+            "        if source_path is None:",
+            '            raise RuntimeError(f"no image ACL schema for {destination}: {candidates}")',
+            "        descriptor, temporary_name = tempfile.mkstemp(",
+            '            prefix=f".{destination_path.name}.taac-policy-evaluation.",',
+            "            dir=destination_path.parent,",
+            "        )",
+            "        os.close(descriptor)",
+            "        temporary_path = Path(temporary_name)",
+            "        claimed = False",
+            "        try:",
+            "            shutil.copy2(source_path, temporary_path)",
+            "            data = json.loads(temporary_path.read_text())",
+            "            modified = False",
+            '            for permission in data.get("permissions", []):',
+            '                entries = permission.setdefault("entries", [])',
+            "                existing_ids = {",
+            '                    entry.get("identity", {}).get("id_data")',
+            "                    for entry in entries",
+            "                }",
+            "                for user_id in user_ids:",
+            "                    if user_id not in existing_ids:",
+            "                        entries.append(",
+            "                            {",
+            '                                "identity": {',
+            '                                    "id_type": "USER",',
+            '                                    "id_data": user_id,',
+            "                                }",
+            "                            }",
+            "                        )",
+            "                        modified = True",
+            "            if modified:",
+            "                temporary_path.write_text(json.dumps(data, indent=4))",
+            "            expected, _ = inspect_file(temporary_path)",
+            "            try:",
+            "                os.link(temporary_path, destination_path)",
+            "                claimed = True",
+            "                installed[destination] = expected",
+            "            except FileExistsError:",
+            "                raced = destination_path.lstat()",
+            "                if not stat.S_ISREG(raced.st_mode):",
+            '                    raise RuntimeError(f"ACL destination is not a regular file: {destination}")',
+            '                print(f"KEEP {destination}: created concurrently")',
+            "            if claimed:",
+            "                current, _ = inspect_file(destination_path)",
+            "                if current != expected:",
+            "                    raise RuntimeError(",
+            '                        f"ACL ownership changed during materialization: {destination}"',
+            "                    )",
+            '                print(f"MATERIALIZED {destination} from {source_path}")',
+            "        finally:",
+            "            temporary_path.unlink(missing_ok=True)",
+            "    if installed:",
+            "        write_receipt(installed)",
+            "except Exception as error:",
+            "    try:",
+            "        rollback_installed(installed)",
+            "    except RuntimeError as rollback_error:",
+            "        raise rollback_error from error",
+            "    raise",
+            "",
+        ]
+    )
+    return _on_device_python_command(script)
+
+
+def build_cleanup_materialized_lab_thrift_acl_files_cmd(
+    *,
+    destinations: t.Iterable[str] | None = None,
+    marker_path: str = POLICY_EVALUATION_THRIFT_ACL_MARKER,
+) -> str:
+    """Remove only lab ACL aliases whose ownership receipts still match."""
+    allowed_destinations = tuple(
+        LAB_THRIFT_ACL_SOURCE_CANDIDATES if destinations is None else destinations
+    )
+    return _build_cleanup_materialized_files_cmd(
+        allowed_paths=allowed_destinations,
+        marker_path=marker_path,
+        receipt_kind="lab_thrift_acl",
+        label="ACL alias",
+    )
+
+
+def build_materialize_missing_bgpcpp_startup_cmd(
+    *,
+    startup_path: str = POLICY_EVALUATION_BGPCPP_STARTUP_PATH,
+    binary_path: str = POLICY_EVALUATION_BGPCPP_BINARY_PATH,
+    marker_path: str = POLICY_EVALUATION_BGPCPP_STARTUP_MARKER,
+    content: str = POLICY_EVALUATION_BGPCPP_STARTUP_CONTENT,
+    startup_flags: t.Mapping[str, str] | None = None,
+) -> str:
+    """Create the package-compatible launcher and record object ownership."""
+    materialized_content = (
+        content
+        if startup_flags is None
+        else _bgpcpp_startup_content_with_flags(content, startup_flags)
+    )
+    script = "\n".join(
+        [
+            _ownership_receipt_script_prelude(
+                marker_path=marker_path,
+                receipt_kind="bgpcpp_startup",
+                allowed_paths=(startup_path,),
+            ),
+            f"startup = Path({startup_path!r})",
+            f"binary = Path({binary_path!r})",
+            f"content = {materialized_content!r}",
+            "remove_legacy_marker()",
+            "installed = {}",
+            "try:",
+            "    try:",
+            "        existing = startup.lstat()",
+            "    except FileNotFoundError:",
+            "        existing = None",
+            "    if existing is not None:",
+            "        if not stat.S_ISREG(existing.st_mode):",
+            '            raise RuntimeError(f"BGP++ startup path is not a regular file: {startup}")',
+            '        print(f"KEEP {startup}: already present")',
+            "    else:",
+            "        if not binary.is_file() or not os.access(binary, os.X_OK):",
+            '            raise RuntimeError(f"missing executable BGP++ binary: {binary}")',
+            "        descriptor, temporary_name = tempfile.mkstemp(",
+            '            prefix=f".{startup.name}.taac-policy-evaluation.",',
+            "            dir=startup.parent,",
+            "        )",
+            "        os.close(descriptor)",
+            "        temporary = Path(temporary_name)",
+            "        claimed = False",
+            "        try:",
+            "            temporary.write_text(content)",
+            "            temporary.chmod(0o755)",
+            "            expected, _ = inspect_file(temporary)",
+            "            try:",
+            "                os.link(temporary, startup)",
+            "                claimed = True",
+            "                installed[str(startup)] = expected",
+            "            except FileExistsError:",
+            "                raced = startup.lstat()",
+            "                if not stat.S_ISREG(raced.st_mode):",
+            '                    raise RuntimeError(f"BGP++ startup path is not a regular file: {startup}")',
+            '                print(f"KEEP {startup}: created concurrently")',
+            "            if claimed:",
+            "                current, _ = inspect_file(startup)",
+            "                if current != expected:",
+            "                    raise RuntimeError(",
+            '                        f"launcher ownership changed during materialization: {startup}"',
+            "                    )",
+            '                print(f"MATERIALIZED {startup} for {binary}")',
+            "        finally:",
+            "            temporary.unlink(missing_ok=True)",
+            "    if installed:",
+            "        write_receipt(installed)",
+            "except Exception as error:",
+            "    try:",
+            "        rollback_installed(installed)",
+            "    except RuntimeError as rollback_error:",
+            "        raise rollback_error from error",
+            "    raise",
+            "",
+        ]
+    )
+    return _on_device_python_command(script)
+
+
+def build_cleanup_materialized_bgpcpp_startup_cmd(
+    *,
+    startup_path: str = POLICY_EVALUATION_BGPCPP_STARTUP_PATH,
+    marker_path: str = POLICY_EVALUATION_BGPCPP_STARTUP_MARKER,
+) -> str:
+    """Remove only a launcher whose ownership receipt still matches."""
+    return _build_cleanup_materialized_files_cmd(
+        allowed_paths=(startup_path,),
+        marker_path=marker_path,
+        receipt_kind="bgpcpp_startup",
+        label="BGP++ launcher",
+    )
+
+
+def build_cleanup_materialized_policy_evaluation_files_cmd(
+    *,
+    startup_path: str = POLICY_EVALUATION_BGPCPP_STARTUP_PATH,
+    startup_marker_path: str = POLICY_EVALUATION_BGPCPP_STARTUP_MARKER,
+    acl_destinations: t.Iterable[str] | None = None,
+    acl_marker_path: str = POLICY_EVALUATION_THRIFT_ACL_MARKER,
+) -> str:
+    """Attempt launcher and ACL cleanup independently, then report failures."""
+    allowed_acl_destinations = tuple(
+        LAB_THRIFT_ACL_SOURCE_CANDIDATES
+        if acl_destinations is None
+        else acl_destinations
+    )
+    cleanup_scripts = (
+        (
+            "BGP++ launcher",
+            _build_cleanup_materialized_files_script(
+                allowed_paths=(startup_path,),
+                marker_path=startup_marker_path,
+                receipt_kind="bgpcpp_startup",
+                label="BGP++ launcher",
+            ),
+        ),
+        (
+            "ACL aliases",
+            _build_cleanup_materialized_files_script(
+                allowed_paths=allowed_acl_destinations,
+                marker_path=acl_marker_path,
+                receipt_kind="lab_thrift_acl",
+                label="ACL alias",
+            ),
+        ),
+    )
+    script = "\n".join(
+        [
+            "import traceback",
+            f"cleanup_scripts = {cleanup_scripts!r}",
+            "failures = []",
+            "for cleanup_label, cleanup_script in cleanup_scripts:",
+            "    try:",
+            "        exec(compile(cleanup_script, cleanup_label, 'exec'), {})",
+            "    except Exception as error:",
+            "        failures.append(",
+            "            f'{cleanup_label}: {type(error).__name__}: {error}\\n'",
+            "            + traceback.format_exc()",
+            "        )",
+            "if failures:",
+            "    raise RuntimeError(",
+            "        'policy-evaluation cleanup failed after all attempts: '",
+            "        + '; '.join(failures)",
+            "    )",
+            "",
+        ]
+    )
+    return _on_device_python_command(script)
 
 
 _REQUIRE_THRIFT_ACL_FILES_SCRIPT = "\n".join(

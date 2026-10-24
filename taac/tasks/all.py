@@ -84,6 +84,8 @@ IPNetwork = t.Union[IPv4Network, IPv6Network]
 
 _BGPCPP_UPDATE_GROUP_STATE_VALIDATION_ATTEMPTS = 3
 _BGPCPP_UPDATE_GROUP_STATE_VALIDATION_RETRY_DELAY_SECONDS = 10
+_ARISTA_DAEMON_START_VALIDATION_ATTEMPTS = 15
+_ARISTA_DAEMON_START_VALIDATION_RETRY_DELAY_SECONDS = 2
 
 
 class WaitForAgentConvergenceTask(BaseTask):
@@ -1681,13 +1683,7 @@ class AristaDaemonControlTask(BaseTask):
                         process_cmd
                     )
                 )
-                # If we can get daemon info, it's likely running
-                # Check for indicators that daemon is active
-                is_running = (
-                    "Running" in process_output
-                    or "Active" in process_output
-                    or "PID" in process_output
-                )
+                is_running = self._daemon_process_is_running(process_output)
                 process_info = process_output.strip()
             except Exception:
                 # If show daemon command fails, daemon is likely not running
@@ -1710,6 +1706,18 @@ class AristaDaemonControlTask(BaseTask):
                 "process_info": f"Error: {str(e)}",
                 "daemon_config": (),
             }
+
+    @staticmethod
+    def _daemon_process_is_running(process_output: str) -> bool:
+        return bool(
+            re.search(
+                r"^(?:Process|Agent):\s+\S+\s+"
+                r"\(running(?:\s+with\s+PID\s+\d+)?\)"
+                r"(?:[ \t]+[^\r\n]*)?$",
+                process_output,
+                re.IGNORECASE | re.MULTILINE,
+            )
+        )
 
     @staticmethod
     def _extract_daemon_config(
@@ -1791,11 +1799,15 @@ class AristaDaemonControlTask(BaseTask):
 
         await driver.async_execute_show_or_configure_cmd_on_shell(cmd, configure=True)
 
-        # Verify daemon was enabled successfully
-        await asyncio.sleep(2)  # Brief pause to allow daemon to start
-        post_enable_status = await self._check_daemon_running_status(
-            driver, daemon_name
-        )
+        post_enable_status: t.Dict[str, t.Any] = {}
+        for attempt in range(1, _ARISTA_DAEMON_START_VALIDATION_ATTEMPTS + 1):
+            post_enable_status = await self._check_daemon_running_status(
+                driver, daemon_name
+            )
+            if post_enable_status.get("is_running", False):
+                break
+            if attempt < _ARISTA_DAEMON_START_VALIDATION_ATTEMPTS:
+                await asyncio.sleep(_ARISTA_DAEMON_START_VALIDATION_RETRY_DELAY_SECONDS)
         self.logger.info(
             f"Post-enable status for daemon {daemon_name}: "
             f"exists={post_enable_status.get('daemon_exists', False)}, "
@@ -1807,6 +1819,11 @@ class AristaDaemonControlTask(BaseTask):
                 f"daemon {daemon_name} configuration was not created properly"
             )
             raise Exception(f"daemon {daemon_name} was not enabled successfully")
+        if not post_enable_status.get("is_running", False):
+            process_info = post_enable_status.get("process_info", "unknown")
+            raise RuntimeError(
+                f"daemon {daemon_name} did not reach running state: {process_info}"
+            )
 
         self.logger.info(f"Daemon {daemon_name} enabled successfully")
 

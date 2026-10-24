@@ -34,6 +34,80 @@ RETRY_UTILS_PATH = "neteng.test_infra.dne.taac.utils.oss_taac_lib_utils"
 
 
 class AristaDaemonControlTaskTest(later.unittest.TestCase):
+    async def test_enable_does_not_treat_shutdown_pid_as_running(self) -> None:
+        driver = MagicMock()
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
+            side_effect=[
+                "daemon Bgp\n   exec /usr/sbin/run_bgpcpp.sh\n   no shutdown",
+                "Process: Bgp (shutdown with PID 3139)",
+                "",
+                "daemon Bgp\n   exec /usr/sbin/run_bgpcpp.sh\n   no shutdown",
+                "Process: Bgp (running)",
+            ]
+        )
+        task = AristaDaemonControlTask(logger=MagicMock())
+
+        with patch(
+            f"{ALL_PATH}.async_get_device_driver",
+            new_callable=AsyncMock,
+            return_value=driver,
+        ):
+            await task.run(
+                {
+                    "hostname": "nrqeb009.ash6",
+                    "daemon_name": "Bgp",
+                    "action": "enable",
+                }
+            )
+
+        driver.async_execute_show_or_configure_cmd_on_shell.assert_has_awaits(
+            [
+                call("show running-config section daemon"),
+                call("show daemon Bgp"),
+                call(
+                    "daemon Bgp\nexec /usr/sbin/run_bgpcpp.sh\nno shutdown",
+                    configure=True,
+                ),
+                call("show running-config section daemon"),
+                call("show daemon Bgp"),
+            ]
+        )
+
+    async def test_enable_accepts_running_agent_status(self) -> None:
+        driver = MagicMock()
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
+            side_effect=[
+                "daemon FibGrpc\n   exec /usr/bin/EosSdkRpc\n   no shutdown",
+                "Agent: FibGrpc (shutdown)",
+                "",
+                "daemon FibGrpc\n   exec /usr/bin/EosSdkRpc\n   no shutdown",
+                "Agent: FibGrpc (running with PID 8132) uptime 3d CPU 0.1%",
+            ]
+        )
+        task = AristaDaemonControlTask(logger=MagicMock())
+
+        with patch(
+            f"{ALL_PATH}.async_get_device_driver",
+            new_callable=AsyncMock,
+            return_value=driver,
+        ):
+            await task.run(
+                {
+                    "hostname": "nrqeb009.ash6",
+                    "daemon_name": "FibGrpc",
+                    "action": "enable",
+                    "exec_script": "/usr/bin/EosSdkRpc",
+                }
+            )
+
+        self.assertEqual(
+            call(
+                "daemon FibGrpc\nexec /usr/bin/EosSdkRpc\nno shutdown",
+                configure=True,
+            ),
+            driver.async_execute_show_or_configure_cmd_on_shell.await_args_list[2],
+        )
+
     async def test_enable_is_noop_when_daemon_is_already_healthy(self) -> None:
         driver = MagicMock()
         driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock()
@@ -87,6 +161,48 @@ class AristaDaemonControlTaskTest(later.unittest.TestCase):
         driver.async_execute_show_or_configure_cmd_on_shell.assert_awaited_once_with(
             "daemon Bgp\nexec /usr/sbin/run_bgpcpp.sh\nno shutdown",
             configure=True,
+        )
+
+    async def test_enable_fails_when_daemon_never_starts(self) -> None:
+        driver = MagicMock()
+
+        async def execute(command: str, configure: bool = False) -> str:
+            if configure:
+                return ""
+            if command == "show running-config section daemon":
+                return "daemon Bgp\n   exec /usr/sbin/run_bgpcpp.sh"
+            if command == "show daemon Bgp":
+                return "Process: Bgp (shutdown)"
+            raise AssertionError(f"Unexpected command: {command}")
+
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
+            side_effect=execute
+        )
+        task = AristaDaemonControlTask(logger=MagicMock())
+
+        with (
+            patch(
+                f"{ALL_PATH}.async_get_device_driver",
+                new_callable=AsyncMock,
+                return_value=driver,
+            ),
+            patch(f"{ALL_PATH}.asyncio.sleep", new_callable=AsyncMock),
+            self.assertRaisesRegex(RuntimeError, "did not reach running state"),
+        ):
+            await task.run(
+                {
+                    "hostname": "nrqeb009.ash6",
+                    "daemon_name": "Bgp",
+                    "action": "enable",
+                }
+            )
+
+        self.assertEqual(
+            1,
+            sum(
+                await_call.kwargs.get("configure", False)
+                for await_call in driver.async_execute_show_or_configure_cmd_on_shell.await_args_list
+            ),
         )
 
 
