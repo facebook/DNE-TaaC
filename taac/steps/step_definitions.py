@@ -30,6 +30,10 @@ from taac.abstractions.churn.workloads import (
     LongevityCommunityChurn,
     MultipathChurn,
 )
+from taac.abstractions.eos_bgpcpp_setup_tasks import (
+    build_bgpcpp_policy_overlay_cmd,
+    POLICY_EVALUATION_SOURCE_CONFIG_PATH,
+)
 
 TAAC_OSS = os.environ.get("TAAC_OSS", "").lower() in ("1", "true", "yes")
 
@@ -7093,10 +7097,42 @@ def create_file_from_config_step(
     )
 
 
+def create_validate_bgpcpp_config_step(
+    *,
+    device_name: str,
+    config_path: str = "/mnt/flash/bgpcpp_config",
+    description: str | None = None,
+) -> Step:
+    return create_run_task_step(
+        task_name="validate_bgpcpp_config_on_device",
+        params_dict={"hostname": device_name, "config_path": config_path},
+        description=description or f"Validate BGP++ config on {device_name}",
+    )
+
+
+def create_validate_bgpcpp_update_group_state_step(
+    *,
+    device_name: str,
+    expect_enabled: bool,
+    description: str | None = None,
+) -> Step:
+    return create_run_task_step(
+        task_name="validate_bgpcpp_update_group_state",
+        params_dict={
+            "hostname": device_name,
+            "expect_enabled": expect_enabled,
+        },
+        description=(
+            description or f"Validate BGP++ update-group state on {device_name}"
+        ),
+    )
+
+
 def create_run_commands_on_shell_step(
     device_name: str,
     cmds: t.List[str],
     description: t.Optional[str] = None,
+    validate_output: bool = False,
 ) -> Step:
     """
     Create a step to run shell commands on a device.
@@ -7105,6 +7141,7 @@ def create_run_commands_on_shell_step(
         device_name: Name of the device (hostname)
         cmds: List of shell commands to execute
         description: Custom description for the step
+        validate_output: Fail the step when a shell command fails
 
     Returns:
         Step object for running shell commands
@@ -7112,12 +7149,15 @@ def create_run_commands_on_shell_step(
     if description is None:
         description = f"Run shell commands on {device_name}"
 
+    params_dict: dict[str, t.Any] = {
+        "hostname": device_name,
+        "cmds": cmds,
+    }
+    if validate_output:
+        params_dict["validate_output"] = True
     return create_run_task_step(
         task_name="run_commands_on_shell",
-        params_dict={
-            "hostname": device_name,
-            "cmds": cmds,
-        },
+        params_dict=params_dict,
         description=description,
     )
 
@@ -8981,6 +9021,232 @@ def create_sc_8_setup_steps(
         )
     )
 
+    return steps
+
+
+def create_policy_evaluation_sweep_control_step(
+    *,
+    action: str,
+    state_key: str,
+    prefix_counts: t.Sequence[int] | None = None,
+    max_absolute_overhead_us: float | None = None,
+    max_slope_overhead_us_per_10k: float | None = None,
+    check_name: str = "policy_evaluation_overhead",
+    description: str | None = None,
+) -> Step:
+    """Create the initialize or final paired policy-verdict step."""
+    if action not in {"initialize", "evaluate"}:
+        raise ValueError("policy-evaluation control action must be initialize or evaluate")
+    params: dict[str, t.Any] = {
+        "custom_step_name": "policy_evaluation_sweep",
+        "action": action,
+        "state_key": state_key,
+    }
+    if action == "evaluate":
+        if (
+            prefix_counts is None
+            or max_absolute_overhead_us is None
+            or max_slope_overhead_us_per_10k is None
+        ):
+            raise ValueError("policy-evaluation evaluate action requires all gate inputs")
+        if not check_name.strip():
+            raise ValueError("policy-evaluation check_name must be non-empty")
+        params.update(
+            {
+                "prefix_counts": list(prefix_counts),
+                "max_absolute_overhead_us": max_absolute_overhead_us,
+                "max_slope_overhead_us_per_10k": (
+                    max_slope_overhead_us_per_10k
+                ),
+                "check_name": check_name,
+            }
+        )
+    return create_custom_step(params_dict=params, description=description)
+
+
+def create_policy_evaluation_point_steps(
+    *,
+    device_name: str,
+    arm: str,
+    policy_name: str,
+    policy_configerator_path: str,
+    prefix_count: int,
+    prefix_capacity: int,
+    prefix_pool_names_by_afi: t.Mapping[str, str],
+    peer_group_names_by_afi: t.Mapping[str, str],
+    peer_counts_by_afi: t.Mapping[str, int],
+    expected_peers: t.Sequence[t.Mapping[str, t.Any]],
+    expected_local_as_4_byte: int,
+    expect_update_group_enabled: bool,
+    allowed_prefix_counts: t.Sequence[int],
+    state_key: str,
+    evidence_label_prefix: str = "policy-evaluation",
+) -> t.List[Step]:
+    """Create one fresh, exact-route policy measurement point."""
+    if arm not in {"baseline", "candidate"}:
+        raise ValueError("policy-evaluation arm must be baseline or candidate")
+    if not 0 < prefix_count <= prefix_capacity:
+        raise ValueError("policy-evaluation prefix_count exceeds pool capacity")
+    required_afis = ("ipv4", "ipv6")
+    for label, handles in (
+        ("prefix_pool_names_by_afi", prefix_pool_names_by_afi),
+        ("peer_group_names_by_afi", peer_group_names_by_afi),
+        ("peer_counts_by_afi", peer_counts_by_afi),
+    ):
+        if set(handles) != set(required_afis):
+            raise ValueError(
+                f"policy-evaluation {label} must contain exactly {required_afis}"
+            )
+    if any(
+        not prefix_pool_names_by_afi[afi] or not peer_group_names_by_afi[afi]
+        for afi in required_afis
+    ):
+        raise ValueError("policy-evaluation runtime handles must be non-empty")
+    if len({prefix_pool_names_by_afi[afi] for afi in required_afis}) != 2 or len(
+        {peer_group_names_by_afi[afi] for afi in required_afis}
+    ) != 2:
+        raise ValueError("policy-evaluation runtime handles must be distinct by AFI")
+    if any(peer_counts_by_afi[afi] <= 0 for afi in required_afis):
+        raise ValueError("policy-evaluation peer counts must be positive")
+    if not evidence_label_prefix.strip():
+        raise ValueError("policy-evaluation evidence_label_prefix must be non-empty")
+    normalized_allowed_counts = tuple(dict.fromkeys(allowed_prefix_counts))
+    if (
+        prefix_capacity not in normalized_allowed_counts
+        or prefix_count not in normalized_allowed_counts
+        or any(
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or not 0 < count <= prefix_capacity
+            for count in normalized_allowed_counts
+        )
+    ):
+        raise ValueError(
+            "policy-evaluation allowed_prefix_counts must contain the point and "
+            "capacity and consist of positive counts within capacity"
+        )
+
+    steps: list[Step] = [
+        create_daemon_control_step(
+            device_name=device_name,
+            daemon_name="Bgp",
+            action="disable",
+            description=f"Reset BGP policy counters for {arm} {prefix_count:,}",
+        )
+    ]
+    for afi in required_afis:
+        pool_name = prefix_pool_names_by_afi[afi]
+        steps.append(
+            create_prepare_compact_bgp_prefix_pool_step(
+                device_name=device_name,
+                prefix_pool_regex=rf"^{re.escape(pool_name)}$",
+                target_number_of_addresses=prefix_count,
+                allowed_current_number_of_addresses=normalized_allowed_counts,
+                safe_number_of_addresses=prefix_capacity,
+                description=(
+                    f"Withdraw and resize {afi} pool to {prefix_count:,}"
+                ),
+            )
+        )
+
+    steps.extend(
+        [
+            create_file_from_config_step(
+                device_name=device_name,
+                configerator_path=policy_configerator_path,
+                file_path=POLICY_EVALUATION_SOURCE_CONFIG_PATH,
+                description=f"Stage {arm} BGP policy source",
+            ),
+            create_run_commands_on_shell_step(
+                device_name=device_name,
+                cmds=[
+                    build_bgpcpp_policy_overlay_cmd(
+                        source_config_path=POLICY_EVALUATION_SOURCE_CONFIG_PATH,
+                        policy_name=policy_name,
+                        peer_group_names=tuple(
+                            peer_group_names_by_afi[afi] for afi in required_afis
+                        ),
+                        expected_peers=expected_peers,
+                        expected_local_as_4_byte=expected_local_as_4_byte,
+                        expect_update_group_enabled=expect_update_group_enabled,
+                    )
+                ],
+                description=f"Apply {arm} policy-only BGP config overlay",
+                validate_output=True,
+            ),
+            create_validate_bgpcpp_config_step(
+                device_name=device_name,
+                description=f"Validate {arm} policy-only BGP config",
+            ),
+        ]
+    )
+    for afi in required_afis:
+        pool_name = prefix_pool_names_by_afi[afi]
+        steps.append(
+            create_advertise_withdraw_prefixes_step(
+                device_name=device_name,
+                advertise=True,
+                prefix_pool_regex=rf"^{re.escape(pool_name)}$",
+                prefix_start_index=0,
+                prefix_end_index=prefix_count,
+                expected_prefix_pool_count=1,
+                expected_number_of_addresses=prefix_count,
+                expected_prefix_pool_names=[pool_name],
+                strict_range=True,
+                verify_readback=True,
+                evidence_label=(
+                    f"{evidence_label_prefix}-{arm}-{prefix_count}-{afi}-advertise"
+                ),
+                description=f"Advertise {prefix_count:,} {afi} routes",
+            )
+        )
+    steps.extend(
+        [
+            create_daemon_control_step(
+                device_name=device_name,
+                daemon_name="Bgp",
+                action="enable",
+                description=f"Start BGP for {arm} {prefix_count:,} measurement",
+            ),
+            create_validate_bgpcpp_update_group_state_step(
+                device_name=device_name,
+                expect_enabled=expect_update_group_enabled,
+                description=(
+                    f"Verify {arm} update-group state after policy overlay"
+                ),
+            ),
+            create_verify_received_routes_step(
+                device_name=device_name,
+                expected_count_histogram_by_afi={
+                    afi: {prefix_count: peer_counts_by_afi[afi]}
+                    for afi in required_afis
+                },
+                exact_peer_group_names=[
+                    peer_group_names_by_afi[afi] for afi in required_afis
+                ],
+                convergence_soft_threshold_seconds=300,
+                convergence_hard_timeout_seconds=600,
+                convergence_poll_interval_seconds=10,
+                description=(
+                    f"Prove exact dual-stack {prefix_count:,}-route {arm} workload"
+                ),
+            ),
+            create_custom_step(
+                params_dict={
+                    "custom_step_name": "policy_evaluation_sweep",
+                    "action": "collect",
+                    "state_key": state_key,
+                    "hostname": device_name,
+                    "arm": arm,
+                    "policy_name": policy_name,
+                    "prefix_count": prefix_count,
+                },
+                description=(
+                    f"Collect {arm} policy cost at {prefix_count:,} routes per AFI"
+                ),
+            ),
+        ]
+    )
     return steps
 
 
