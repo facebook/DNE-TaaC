@@ -1059,7 +1059,7 @@ def _get_bgp_ebb_full_scale_playbooks(
     nhg_storm_min_paused_fibagent_samples: int = 1,
     nhg_storm_min_confirmed_pause_fap_samples: int = 3,
     nhg_storm_control_plane_sample_interval_seconds: int = 5,
-    nhg_storm_control_plane_read_timeout_seconds: int = 60,
+    nhg_storm_control_plane_read_timeout_seconds: int = 180,
 ) -> list[Playbook]:
     device_config = bound.device_config
     if device_config is None:
@@ -1545,7 +1545,7 @@ def create_bgp_ebb_full_scale_test_config(  # noqa: C901
     nhg_storm_target_membership_width: int | None = 25,
     nhg_storm_min_confirmed_pause_fap_samples: int = 3,
     nhg_storm_control_plane_sample_interval_seconds: int = 5,
-    nhg_storm_control_plane_read_timeout_seconds: int = 60,
+    nhg_storm_control_plane_read_timeout_seconds: int = 180,
     fibagent_bgp_nhg_watermark_high: int = EBB_FIBAGENT_BGP_NHG_WATERMARK_HIGH,
     fibagent_bgp_nhg_watermark_low: int = EBB_FIBAGENT_BGP_NHG_WATERMARK_LOW,
     setup_only: bool = False,

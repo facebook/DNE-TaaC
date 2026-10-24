@@ -2587,7 +2587,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_playbook(
     minimum_confirmed_pause_fap_samples: int = 3,
     minimum_observed_multiway_groups: int = 1,
     control_plane_sample_interval_seconds: int = 5,
-    control_plane_read_timeout_seconds: int = 60,
+    control_plane_read_timeout_seconds: int = 180,
     nexthop_group_poll_interval_seconds: int = 60,
     nexthop_group_min_samples: int = 6,
     nexthop_group_min_consecutive_samples: int = 3,
