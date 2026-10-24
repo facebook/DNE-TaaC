@@ -107,6 +107,8 @@ from taac.steps.step_definitions import (
     create_igp_metric_churn_step,
     create_longevity_step,
     create_openr_route_action_step,
+    create_policy_evaluation_point_steps,
+    create_policy_evaluation_sweep_control_step,
     create_route_registry_cleanup_step,
     create_route_registry_prefix_list_setup_steps,
     create_validation_step,
@@ -185,6 +187,7 @@ __all__ = [
     "get_bgp_ebb_transient_memory_peer_scale_playbook",
     "get_bgp_ebb_churn_processing_playbook",
     "get_bgp_ebb_bounded_ecmp_sc9_playbook",
+    "get_bgp_ebb_separable_policy_evaluation_playbook",
 ]
 
 
@@ -2904,6 +2907,91 @@ def get_bgp_ebb_update_packing_playbook(
                 ],
             )
         ],
+    )
+
+
+def get_bgp_ebb_separable_policy_evaluation_playbook(
+    *,
+    device_name: str,
+    prefix_counts: t.Sequence[int],
+    prefix_capacity: int,
+    prefix_pool_names_by_afi: t.Mapping[str, str],
+    peer_group_names_by_afi: t.Mapping[str, str],
+    peer_counts_by_afi: t.Mapping[str, int],
+    expected_peers: t.Sequence[t.Mapping[str, t.Any]],
+    expected_local_as_4_byte: int,
+    expect_update_group_enabled: bool,
+    max_absolute_overhead_us: float,
+    max_slope_overhead_us_per_10k: float,
+) -> Playbook:
+    """Build CICD-EBB-23: Policy Eval Overhead Sweep.
+
+    See `fbcode/neteng/test_infra/routing_qualification/catalogs/taac/bgp_ebb_catalog.yaml` for the test contract and current gaps.
+    """
+    state_key = "ebb23_policy_evaluation"
+    arm_specs = (
+        (
+            "baseline",
+            "ACCEPT_ALL",
+            "taac/arista_performance_scaling_test_bgpcpp_configs/"
+            "bgpcpp_config_test_case8_accept_all",
+        ),
+        (
+            "candidate",
+            "EB-FA-IN",
+            "taac/arista_performance_scaling_test_bgpcpp_configs/"
+            "bgpcpp_config_test_case8_eb_fa_in_no_prefix",
+        ),
+    )
+    steps = [
+        create_policy_evaluation_sweep_control_step(
+            action="initialize",
+            state_key=state_key,
+            description="Initialize paired EBB23 policy-evaluation evidence",
+        )
+    ]
+    for prefix_index, prefix_count in enumerate(prefix_counts):
+        ordered_arm_specs = (
+            arm_specs if prefix_index % 2 == 0 else tuple(reversed(arm_specs))
+        )
+        for arm, policy_name, policy_configerator_path in ordered_arm_specs:
+            steps.extend(
+                create_policy_evaluation_point_steps(
+                    device_name=device_name,
+                    arm=arm,
+                    policy_name=policy_name,
+                    policy_configerator_path=policy_configerator_path,
+                    prefix_count=prefix_count,
+                    prefix_capacity=prefix_capacity,
+                    prefix_pool_names_by_afi=prefix_pool_names_by_afi,
+                    peer_group_names_by_afi=peer_group_names_by_afi,
+                    peer_counts_by_afi=peer_counts_by_afi,
+                    expected_peers=expected_peers,
+                    expected_local_as_4_byte=expected_local_as_4_byte,
+                    expect_update_group_enabled=expect_update_group_enabled,
+                    allowed_prefix_counts=prefix_counts,
+                    state_key=state_key,
+                    evidence_label_prefix="ebb23",
+                )
+            )
+    steps.append(
+        create_policy_evaluation_sweep_control_step(
+            action="evaluate",
+            state_key=state_key,
+            prefix_counts=prefix_counts,
+            max_absolute_overhead_us=max_absolute_overhead_us,
+            max_slope_overhead_us_per_10k=max_slope_overhead_us_per_10k,
+            check_name="ebb23_policy_evaluation_overhead",
+            description="Gate paired EBB23 absolute overhead and route-scale slope",
+        )
+    )
+    return Playbook(
+        name="bgp_ebb_separable_policy_evaluation_playbook",
+        description=(
+            "Compare accept-all and complex separable-policy processing cost "
+            "across an equal-attribute route-count sweep"
+        ),
+        stages=[create_steps_stage(steps=steps)],
     )
 
 

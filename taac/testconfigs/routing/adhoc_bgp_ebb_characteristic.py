@@ -26,6 +26,7 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
     create_bgp_ebb_characteristic_route_churn_processing_test_config,
     create_bgp_ebb_characteristic_transient_memory_peer_scale_test_config,
     create_bgp_ebb_characteristic_transient_memory_route_scale_test_config,
+    create_bgp_ebb_separable_policy_evaluation_test_config,
     create_bgp_ebb_update_packing_test_config,
 )
 
@@ -252,6 +253,18 @@ BAG012_ASH6_EBB22_SC6_QUALIFICATION_TEST_CONFIG_UG = (
     )
 )
 
+# Temporary qualification selector for the final scale-and-characteristic
+# case. BAG012 is explicitly assigned for EBB23 E2E; this binding is UG-only,
+# ad-hoc, and not attached to Conveyor until its measured bounds and runtime
+# are reviewed.
+BAG012_ASH6_EBB23_SC8_POLICY_EVALUATION_TEST_CONFIG_UG = (
+    create_bgp_ebb_separable_policy_evaluation_test_config(
+        BAG012_ASH6,
+        enable_update_group=True,
+        name_override="BAG012_ASH6_EBB23_SC8_POLICY_EVALUATION_TEST_CONFIG_UG",
+    )
+)
+
 # ═══════════════════════════════════════════════════════════════════════════
 #   SC9 : BOUNDED NUMBER OF PROGRAMMED ECMP SETS  (characteristic 9)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -293,5 +306,6 @@ __all__ = [
     "BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG",
     "BAG012_ASH6_EBB20_SC4_QUALIFICATION_TEST_CONFIG_UG",
     "BAG012_ASH6_EBB22_SC6_QUALIFICATION_TEST_CONFIG_UG",
+    "BAG012_ASH6_EBB23_SC8_POLICY_EVALUATION_TEST_CONFIG_UG",
     "BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG",
 ]

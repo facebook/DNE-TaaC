@@ -32,10 +32,22 @@ See ``fbcode/neteng/test_infra/routing_qualification/docs/taac/TESTCONFIGS.md``.
 
 import ipaddress
 import json
+import typing as t
 from collections.abc import Sequence
 from dataclasses import replace
 
 from ixia.ixia import types as ixia_types
+from taac.abstractions.compatibility.eos_bgpcpp_compatibility import (
+    build_cleanup_materialized_policy_evaluation_files_cmd,
+    build_materialize_missing_bgpcpp_startup_cmd,
+    build_materialize_missing_lab_thrift_acl_files_cmd,
+    POLICY_EVALUATION_BGPCPP_STARTUP_FLAGS,
+)
+from taac.abstractions.compiler import (
+    build_eos_bgpcpp_characteristic_setup_tasks,
+    build_eos_bgpcpp_characteristic_teardown_tasks,
+    build_eos_bgpcpp_peer_plan,
+)
 from taac.abstractions.eos_bgpcpp_setup_tasks import (
     openr_mode_for_bgpcpp_profile,
 )
@@ -68,7 +80,19 @@ from taac.abstractions.topologies.ipv6_update_packing import (
     IPV6_UPDATE_PACKING_PEER_GROUPS,
     IPV6_UPDATE_PACKING_PORT_MAP,
 )
+from taac.abstractions.topologies.separable_policy_evaluation import (
+    SEPARABLE_POLICY_EVALUATION,
+    SEPARABLE_POLICY_EVALUATION_AS_NUMBERS,
+    SEPARABLE_POLICY_EVALUATION_PARENT_NETWORKS,
+    SEPARABLE_POLICY_EVALUATION_PARENT_NETWORKS_IXIA03,
+    SEPARABLE_POLICY_EVALUATION_PEER_GROUPS,
+    SEPARABLE_POLICY_EVALUATION_PORT_MAP,
+    SEPARABLE_POLICY_EVALUATION_SWEEP,
+)
 from taac.abstractions.topology import (
+    BgpPeerGroup,
+    BoundDeviceGroup,
+    BoundTopology,
     OpenRMode,
     RoutingDeviceConfig,
 )
@@ -92,6 +116,7 @@ from taac.playbooks.routing.bgp_ebb_playbooks import (
     get_bgp_ebb_bounded_ecmp_sets_playbook,
     get_bgp_ebb_constant_attribute_storage_playbook,
     get_bgp_ebb_queue_memory_monitoring_playbook,
+    get_bgp_ebb_separable_policy_evaluation_playbook,
     get_bgp_ebb_transient_memory_peer_scale_playbook,
     get_bgp_ebb_transient_memory_route_scale_playbook,
     get_bgp_ebb_update_packing_playbook,
@@ -180,6 +205,265 @@ _EGRESS_PEER_SCALE_PARENT_NETWORKS_BY_CHASSIS = {
     IXIA11_ASH6: EGRESS_PEER_SCALE_PARENT_NETWORKS,
     IXIA03_ASH6: EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
 }
+
+_POLICY_EVALUATION_PARENT_NETWORKS_BY_CHASSIS = {
+    IXIA11_ASH6: SEPARABLE_POLICY_EVALUATION_PARENT_NETWORKS,
+    IXIA03_ASH6: SEPARABLE_POLICY_EVALUATION_PARENT_NETWORKS_IXIA03,
+}
+
+
+class _PolicyEvaluationAutomationContract(t.NamedTuple):
+    """Runtime handles derived from one bound policy-evaluation topology."""
+
+    ebgp_interface: str
+    prefix_pool_names_by_afi: t.Mapping[str, str]
+    peer_group_names_by_afi: t.Mapping[str, str]
+    peer_counts_by_afi: t.Mapping[str, int]
+    peer_configs_by_afi: t.Mapping[str, t.Mapping[str, t.Any]]
+    prefix_capacity: int
+    local_as_4_byte: int
+    enable_update_group: bool
+
+
+def _bound_peer_group_name(group: BoundDeviceGroup) -> str:
+    peer_group = group.peer_group
+    name = peer_group.name if isinstance(peer_group, BgpPeerGroup) else peer_group
+    if not isinstance(name, str) or not name:
+        raise ValueError(
+            f"policy-evaluation group {group.name!r} has no bound peer-group name"
+        )
+    return name
+
+
+def _policy_evaluation_automation_contract(  # noqa: C901
+    bound: BoundTopology,
+) -> _PolicyEvaluationAutomationContract:
+    peer_plan = build_eos_bgpcpp_peer_plan(bound)
+    groups_by_afi: dict[str, BoundDeviceGroup] = {}
+    for topology_afi, automation_afi in (("v4", "ipv4"), ("v6", "ipv6")):
+        matches = tuple(
+            group
+            for group in bound.device_groups
+            if group.role == "ebgp" and group.afi == topology_afi
+        )
+        if len(matches) != 1:
+            raise ValueError(
+                "policy evaluation requires exactly one bound eBGP group for "
+                f"{automation_afi}; got {[group.name for group in matches]}"
+            )
+        groups_by_afi[automation_afi] = matches[0]
+
+    pool_names: dict[str, str] = {}
+    peer_group_names: dict[str, str] = {}
+    peer_counts: dict[str, int] = {}
+    peer_configs: dict[str, t.Mapping[str, t.Any]] = {}
+    capacities: set[int] = set()
+    local_asns: set[int] = set()
+    port_assignments: set[tuple[str, str, int]] = set()
+    for afi, group in groups_by_afi.items():
+        assignment = group.port_assignment
+        if (
+            assignment is None
+            or assignment.logical_role != "ebgp"
+            or not group.legacy_ixia_device_group_name
+            or not group.legacy_ixia_bgp_peer_name
+            or group.legacy_ixia_device_group_index is None
+            or group.remote_asn is None
+            or not group.parent_network
+            or len(group.a_ips) != 1
+            or len(group.z_ips) != 1
+        ):
+            raise ValueError(
+                f"policy-evaluation {afi} group {group.name!r} has incomplete "
+                "dual-stack eBGP, IXIA, ASN, or route inputs"
+            )
+        if len(group.prefix_advertisements) != 1:
+            raise ValueError(
+                f"policy-evaluation {afi} group {group.name!r} must expose one "
+                "route advertisement"
+            )
+        advertisement = group.prefix_advertisements[0].spec
+        pool_name = advertisement.legacy_ixia_name
+        if not pool_name:
+            raise ValueError(
+                f"policy-evaluation {afi} group {group.name!r} has no IXIA "
+                "prefix-pool handle"
+            )
+        planned_peers = tuple(
+            peer for peer in peer_plan.peers if peer.device_group == group.name
+        )
+        if group.peer_count != 1 or len(planned_peers) != 1:
+            raise ValueError(
+                f"policy-evaluation {afi} group {group.name!r} must expose one "
+                "compiled DUT peer"
+            )
+        if group.local_asn is None:
+            raise ValueError(
+                f"policy-evaluation {afi} group {group.name!r} has no local ASN"
+            )
+        planned_peer = planned_peers[0]
+        peer_group_name = _bound_peer_group_name(group)
+        if (
+            planned_peer.remote_asn is None
+            or planned_peer.peer_group_name != peer_group_name
+        ):
+            raise ValueError(
+                f"policy-evaluation {afi} group {group.name!r} has an incomplete "
+                "compiled peer identity"
+            )
+        pool_names[afi] = pool_name
+        peer_group_names[afi] = peer_group_name
+        peer_counts[afi] = group.peer_count
+        peer_configs[afi] = planned_peer.bgpcpp_config()
+        capacities.add(advertisement.allocation.prefixes_per_peer)
+        local_asns.add(group.local_asn)
+        port_assignments.add(
+            (
+                assignment.dut_interface,
+                assignment.ixia_port,
+                assignment.physical_inventory_index,
+            )
+        )
+
+    for label, handles in (
+        ("IXIA prefix-pool", pool_names),
+        ("BGP peer-group", peer_group_names),
+        (
+            "BGP peer address",
+            {afi: peer["peer_addr"] for afi, peer in peer_configs.items()},
+        ),
+    ):
+        if len(set(handles.values())) != 2:
+            raise ValueError(
+                f"policy evaluation requires distinct {label} handles by AFI; "
+                f"got {handles}"
+            )
+    if len(capacities) != 1 or len(local_asns) != 1:
+        raise ValueError(
+            "policy evaluation requires one shared prefix capacity and local ASN"
+        )
+    if len(port_assignments) != 1:
+        raise ValueError(
+            "policy evaluation IPv4 and IPv6 groups must share one IXIA port"
+        )
+    device_config = bound.device_config
+    if device_config is None:
+        raise ValueError("policy evaluation requires a bound device config")
+    if device_config.openr_mode is not OpenRMode.NONE:
+        raise ValueError("policy evaluation requires OpenRMode.NONE")
+    ebgp_interface, _ixia_port, _inventory_index = port_assignments.pop()
+    return _PolicyEvaluationAutomationContract(
+        ebgp_interface=ebgp_interface,
+        prefix_pool_names_by_afi=pool_names,
+        peer_group_names_by_afi=peer_group_names,
+        peer_counts_by_afi=peer_counts,
+        peer_configs_by_afi=peer_configs,
+        prefix_capacity=capacities.pop(),
+        local_as_4_byte=local_asns.pop(),
+        enable_update_group=device_config.update_group_enable,
+    )
+
+
+def _resolve_policy_evaluation_parent_networks(
+    parent_networks: dict[str, str] | None,
+    *,
+    ixia_chassis_ip: str,
+) -> dict[str, str]:
+    expected = _POLICY_EVALUATION_PARENT_NETWORKS_BY_CHASSIS.get(ixia_chassis_ip)
+    if parent_networks is None:
+        if expected is None:
+            raise ValueError(
+                "unsupported IXIA chassis for policy-evaluation parent networks: "
+                f"{ixia_chassis_ip}"
+            )
+        resolved = expected
+    else:
+        resolved = parent_networks
+    required_keys = frozenset().union(
+        *(
+            frozenset(canonical)
+            for canonical in _POLICY_EVALUATION_PARENT_NETWORKS_BY_CHASSIS.values()
+        )
+    )
+    missing_keys = sorted(required_keys - resolved.keys())
+    if missing_keys:
+        raise ValueError(
+            f"policy-evaluation parent_networks missing required keys: {missing_keys}"
+        )
+    selected = {key: resolved[key] for key in sorted(required_keys)}
+    if expected is not None and selected != expected:
+        raise ValueError(
+            "policy-evaluation parent_networks do not match IXIA chassis "
+            f"{ixia_chassis_ip}"
+        )
+    return selected
+
+
+def _policy_evaluation_setup_tasks(
+    bound: BoundTopology,
+    physical_inventory: PhysicalInventory,
+    automation: _PolicyEvaluationAutomationContract,
+) -> list[taac_types.Task]:
+    device_name = physical_inventory.device_name
+    materialize_acl_task = create_run_commands_on_shell_task(
+        hostname=device_name,
+        cmds=[build_materialize_missing_lab_thrift_acl_files_cmd()],
+        set_outer_hostname=True,
+        ixia_needed=True,
+        validate_output=True,
+    )
+    materialize_startup_task = create_run_commands_on_shell_task(
+        hostname=device_name,
+        cmds=[
+            build_materialize_missing_bgpcpp_startup_cmd(
+                startup_flags=POLICY_EVALUATION_BGPCPP_STARTUP_FLAGS
+            )
+        ],
+        set_outer_hostname=True,
+        ixia_needed=True,
+        validate_output=True,
+    )
+    bgp_asn = physical_inventory.dut_bgp_as
+    configerator_path = physical_inventory.bgpcpp_configerator_path
+    if bgp_asn is None or configerator_path is None:
+        raise ValueError("policy evaluation requires BGP ASN and configerator path")
+    return build_eos_bgpcpp_characteristic_setup_tasks(
+        bound,
+        device_name=device_name,
+        bgp_asn=bgp_asn,
+        ebgp_interface=automation.ebgp_interface,
+        ibgp_interface=automation.ebgp_interface,
+        router_id=getattr(physical_inventory, "router_id", None),
+        bgpcpp_configerator_path=configerator_path,
+        enable_update_group=automation.enable_update_group,
+        openr_mode=OpenRMode.NONE,
+        bgpcpp_local_as_4_byte=automation.local_as_4_byte,
+        component_startup_prefix_tasks=(
+            materialize_acl_task,
+            materialize_startup_task,
+        ),
+        finalization_tasks=(
+            create_bgp_clear_route_filter_task(
+                hostname=device_name,
+                set_outer_hostname=True,
+                ixia_needed=True,
+            ),
+        ),
+    )
+
+
+def _policy_evaluation_teardown_tasks(
+    bound: BoundTopology,
+    physical_inventory: PhysicalInventory,
+) -> list[taac_types.Task]:
+    cleanup_task = create_run_commands_on_shell_task(
+        hostname=physical_inventory.device_name,
+        cmds=[build_cleanup_materialized_policy_evaluation_files_cmd()],
+        set_outer_hostname=True,
+        ixia_needed=True,
+        validate_output=True,
+    )
+    return [*build_eos_bgpcpp_characteristic_teardown_tasks(bound), cleanup_task]
 
 
 def _resolve_egress_peer_scale_parent_networks(  # noqa: C901
@@ -2740,6 +3024,91 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
         playbooks=[
             get_bgp_ebb_bounded_ecmp_sc9_playbook(
                 device_name=device_name,
+            )
+        ],
+    )
+
+
+def create_bgp_ebb_separable_policy_evaluation_test_config(
+    physical_inventory: PhysicalInventory,
+    name_override: str | None = None,
+    enable_update_group: bool = True,
+    profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
+    parent_networks: dict[str, str] | None = None,
+    max_absolute_overhead_us: float = 5_000_000,
+    max_slope_overhead_us_per_10k: float = 1_000_000,
+) -> taac_types.TestConfig:
+    """Build the paired CICD-EBB-23 policy-evaluation TestConfig.
+
+    This is deliberately separate from the retained EB02/EB04 compatibility
+    TestConfigs: those two Playbooks are observational and their serialized
+    identities must remain unchanged.
+    """
+    assert physical_inventory.ixia_ports, (
+        "factory requires IXIA port map on physical_inventory"
+    )
+    assert physical_inventory.bgpcpp_configerator_path, (
+        "factory requires bgpcpp_configerator_path on physical_inventory"
+    )
+    assert physical_inventory.dut_bgp_as is not None, (
+        "factory requires dut_bgp_as on physical_inventory"
+    )
+    resolved_parent_networks = _resolve_policy_evaluation_parent_networks(
+        parent_networks,
+        ixia_chassis_ip=physical_inventory.ixia_chassis_ip,
+    )
+    bound = SEPARABLE_POLICY_EVALUATION.bind_to_inventory(
+        physical_inventory=physical_inventory,
+        port_map=SEPARABLE_POLICY_EVALUATION_PORT_MAP,
+        parent_networks=resolved_parent_networks,
+        peer_groups=SEPARABLE_POLICY_EVALUATION_PEER_GROUPS,
+        as_numbers=SEPARABLE_POLICY_EVALUATION_AS_NUMBERS,
+        device_config_override=RoutingDeviceConfig(
+            openr_mode=openr_mode_for_bgpcpp_profile(profile),
+            update_group_enable=enable_update_group,
+        ),
+    )
+    automation = _policy_evaluation_automation_contract(bound)
+    compiled = bound.compile()
+    setup_tasks = _policy_evaluation_setup_tasks(
+        bound,
+        physical_inventory,
+        automation,
+    )
+    teardown_tasks = _policy_evaluation_teardown_tasks(bound, physical_inventory)
+    return TestConfig(
+        name=name_override
+        or _derive_test_config_name(
+            physical_inventory,
+            "SC8_POLICY_EVALUATION",
+            enable_update_group=enable_update_group,
+        ),
+        skip_ixia_protocol_verification=True,
+        log_collection_timeout=600,
+        basset_pool="dne.test",
+        endpoints=compiled.endpoints,
+        host_driver_args=physical_inventory.host_driver_args,
+        oss_mock_device_data=physical_inventory.oss_mock_device_data,
+        host_os_type_map=compiled.host_os_type_map,
+        startup_checks=[],
+        setup_tasks=setup_tasks,
+        teardown_tasks=teardown_tasks,
+        basic_port_configs=compiled.basic_port_configs,
+        playbooks=[
+            get_bgp_ebb_separable_policy_evaluation_playbook(
+                device_name=physical_inventory.device_name,
+                prefix_counts=SEPARABLE_POLICY_EVALUATION_SWEEP,
+                prefix_capacity=automation.prefix_capacity,
+                prefix_pool_names_by_afi=automation.prefix_pool_names_by_afi,
+                peer_group_names_by_afi=automation.peer_group_names_by_afi,
+                peer_counts_by_afi=automation.peer_counts_by_afi,
+                expected_peers=tuple(
+                    automation.peer_configs_by_afi[afi] for afi in ("ipv4", "ipv6")
+                ),
+                expected_local_as_4_byte=automation.local_as_4_byte,
+                expect_update_group_enabled=automation.enable_update_group,
+                max_absolute_overhead_us=max_absolute_overhead_us,
+                max_slope_overhead_us_per_10k=(max_slope_overhead_us_per_10k),
             )
         ],
     )

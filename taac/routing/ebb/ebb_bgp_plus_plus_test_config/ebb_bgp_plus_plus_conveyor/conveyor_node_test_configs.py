@@ -29,6 +29,7 @@ from taac.testconfigs.routing.adhoc_bgp_ebb_characteristic import (
     BAG010_ASH6_SC6_CHURN_PROCESSING_TEST_UPDATE_GROUP_CONFIG,
     BAG012_ASH6_EBB20_SC4_QUALIFICATION_TEST_CONFIG_UG,
     BAG012_ASH6_EBB22_SC6_QUALIFICATION_TEST_CONFIG_UG,
+    BAG012_ASH6_EBB23_SC8_POLICY_EVALUATION_TEST_CONFIG_UG,
     BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG,
 )
 
@@ -127,6 +128,8 @@ EBB_BGP_PLUS_PLUS_CONVEYOR_NODE_TEST_CONFIGS = [
     BAG012_UPDATE_PACKING_TEST_CONFIG_UG,
     BAG013_ASH6_SC9_BOUNDED_ECMP_SETS_TEST_UPDATE_GROUP_CONFIG,
     BAG013_BOUNDED_ECMP_SETS_TEST_CONFIG_UG,
+    # BAG012 qualification-only EBB23 paired policy sweep. Not scheduled.
+    BAG012_ASH6_EBB23_SC8_POLICY_EVALUATION_TEST_CONFIG_UG,
     # BGP++ Update Group "new peer join" qualification (specs 2.4.1 + 2.4.2
     # + 2.4.3 combined into one TestConfig with 3 playbooks sharing the
     # 21-eBGP + 4-iBGP testbed). Ad-hoc; not yet wired into a conveyor stage
