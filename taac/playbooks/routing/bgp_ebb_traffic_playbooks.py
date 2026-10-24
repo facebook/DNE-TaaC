@@ -152,6 +152,7 @@ def _configure_storm_for_traffic(
     stages: tuple[taac_types.Stage, ...],
     traffic_item_names: tuple[str, ...],
     restoration_stage_prefix_count: int | None,
+    per_prefix_loss_tracking: bool,
 ) -> list[taac_types.Stage]:
     copied_stages: list[taac_types.Stage] = []
     storm_step_count = 0
@@ -168,6 +169,8 @@ def _configure_storm_for_traffic(
                     json_params["restoration_stage_prefix_count"] = (
                         restoration_stage_prefix_count
                     )
+                if per_prefix_loss_tracking:
+                    json_params["per_prefix_loss_tracking"] = True
                 step = step(
                     step_params=(
                         params(json_params=json.dumps(json_params))
@@ -205,6 +208,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_traffic_playbook(
     traffic_item_names: tuple[str, ...],
     stable_state_duration_seconds: int = 30,
     restoration_stage_prefix_count: int | None = None,
+    per_prefix_loss_tracking: bool = False,
 ) -> taac_types.Playbook:
     """Copy EBB16 and add bounded pre-storm and end-to-end traffic windows."""
     if (
@@ -224,6 +228,7 @@ def get_bgp_ebb_nexthop_group_count_threshold_traffic_playbook(
             tuple(control_plane_playbook.stages or []),
             traffic_item_names,
             restoration_stage_prefix_count,
+            per_prefix_loss_tracking,
         ),
         traffic_item_names,
     )

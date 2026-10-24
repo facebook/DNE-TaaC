@@ -7,6 +7,7 @@ Run on demand with ``--test-config``. It is deliberately kept out of
 Conveyor nodes draw from.
 """
 
+from ixia.ixia import types as ixia_types
 from taac.abstractions.physical_inventory import NRQEB009_ASH6
 from taac.abstractions.topologies.ebb16_ebbfs_with_traffic import (
     ebb16_ebbfs_with_traffic_topology,
@@ -26,6 +27,11 @@ from taac.testconfigs.routing.factories.bgp_ebb_full_scale import (
     create_bgp_ebb_full_scale_test_config,
 )
 from taac.test_as_a_config.types import TestConfig
+
+_DESTINATION_TRACKING = {
+    ixia_types.TrafficType.IPV4: ixia_types.TrafficStatsTrackingType.IPV4_DST_ADDR,
+    ixia_types.TrafficType.IPV6: ixia_types.TrafficStatsTrackingType.IPV6_DST_ADDR,
+}
 
 
 def _build_nrqeb009_ebb16_traffic_test_config() -> TestConfig:
@@ -62,6 +68,17 @@ def _build_nrqeb009_ebb16_traffic_test_config() -> TestConfig:
             "EBB16 traffic qualification requires one control-plane playbook"
         )
     return control_plane(
+        # Per-destination tracking gives one Ixia flow per storm prefix, so
+        # loss can be matched against FibAgentBgp's per-prefix log lines.
+        basic_traffic_item_configs=[
+            item(
+                tracking_types=[
+                    ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM,
+                    _DESTINATION_TRACKING[item.traffic_type],
+                ]
+            )
+            for item in control_plane.basic_traffic_item_configs or []
+        ],
         playbooks=[
             get_bgp_ebb_nexthop_group_count_threshold_traffic_playbook(
                 control_plane.playbooks[0],
@@ -69,6 +86,7 @@ def _build_nrqeb009_ebb16_traffic_test_config() -> TestConfig:
                 # Five 30-prefix blocks per AFI per stage keep the restoration
                 # transient under the 104,856-entry FecLevel2 table.
                 restoration_stage_prefix_count=150,
+                per_prefix_loss_tracking=True,
             )
         ],
     )

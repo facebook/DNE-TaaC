@@ -60,6 +60,19 @@ class AdhocFibagentQualificationTrafficTest(unittest.TestCase):
             [item.dest_endpoints[0].name for item in items],
         )
         self.assertEqual([10, 10], [item.line_rate for item in items])
+        self.assertEqual(
+            [
+                [
+                    ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM,
+                    ixia_types.TrafficStatsTrackingType.IPV4_DST_ADDR,
+                ],
+                [
+                    ixia_types.TrafficStatsTrackingType.TRAFFIC_ITEM,
+                    ixia_types.TrafficStatsTrackingType.IPV6_DST_ADDR,
+                ],
+            ],
+            [list(item.tracking_types or []) for item in items],
+        )
 
     def test_config_keeps_phase1_storm_contract_in_copied_playbook(self) -> None:
         config = NRQEB009_EBB16_FIBAGENT_QUALIFICATION_TRAFFIC_UG_ADHOC
@@ -90,6 +103,7 @@ class AdhocFibagentQualificationTrafficTest(unittest.TestCase):
         self.assertTrue(storm["defer_control_plane_invariant_failures"])
         self.assertEqual(150, storm["restoration_stage_prefix_count"])
         self.assertEqual(10, storm["fibagent_restart_after_epoch"])
+        self.assertTrue(storm["per_prefix_loss_tracking"])
         self.assertNotIn(
             "ebb16_fibagent_restart", [stage.id for stage in playbook.stages]
         )

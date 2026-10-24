@@ -74,6 +74,7 @@ VIEW_TO_IDENTIFIER: t.Dict[str, str] = {
 }
 
 TRAFFIC_ITEM_VIEW = "Traffic Item Statistics"
+FLOW_STATISTICS_VIEW = "Flow Statistics"
 
 PTP_DRILL_DOWN_VIEW = "PTP Drill Down"
 
@@ -399,6 +400,40 @@ class TaacIxia(Ixia, Thread, AbstractTrafficGenerator):
                 raw = row[column]
                 stat[key] = float(t.cast(t.Any, raw)) if raw != "" else 0.0
         return stat
+
+    def get_flow_packet_loss_statistics(self) -> t.List[t.Dict[str, object]]:
+        """Return cumulative loss per tracked flow from "Flow Statistics".
+
+        Each row is one traffic item and destination address when the item
+        tracks by destination; the caller diffs readings to attribute loss.
+        """
+        view = self.get_or_create_stat_view(FLOW_STATISTICS_VIEW, timeout=120)
+        stats: t.List[t.Dict[str, object]] = []
+        with self.stat_view_snapshot():
+            for row in self._get_stat_view_rows(view):
+                # IPv4 and IPv6 items share the view, so each row carries both
+                # destination columns and only its own family's is populated.
+                destination = next(
+                    (
+                        row[column]
+                        for column in row.Columns
+                        if column.endswith("Destination Address") and row[column]
+                    ),
+                    None,
+                )
+                if destination is None:
+                    continue
+                stats.append(
+                    {
+                        "traffic_item": row["Traffic Item"],
+                        "destination": destination,
+                        "frame_delta": float(row["Frames Delta"] or 0),
+                        "packet_loss_duration": float(
+                            row["Packet Loss Duration (ms)"] or 0
+                        ),
+                    }
+                )
+        return stats
 
     # No retry — sampler-only; the next tick is the retry. See
     # `get_packet_loss_statistics`.
