@@ -160,7 +160,6 @@ def retryable(
     print_ex: bool = False,
     debug: bool = False,
     max_duration: Optional[float] = None,
-    # pyre-fixme[34]: `Variable[F (bound to typing.Callable[..., typing.Any])]` isn't
     #  present in the function's parameters.
 ) -> Callable[[F], F]:
     """
@@ -243,7 +242,6 @@ def async_retryable(
     exception_to_raise: Optional[
         Exception
     ] = None,  # Custom exception to raise on failure
-    # pyre-fixme[34]: `Variable[AsyncF (bound to typing.Callable[...,
     #  typing.Coroutine[typing.Any, typing.Any, typing.Any]])]` isn't present in the
     #  function's parameters.
 ) -> Callable[[AsyncF], AsyncF]:
@@ -392,7 +390,6 @@ def memoize_forever(func: F) -> F:
 
 def memoize_timed(
     timeout_sec: float = 60.0,
-    # pyre-fixme[34]: `Variable[F (bound to typing.Callable[..., typing.Any])]` isn't
     #  present in the function's parameters.
 ) -> Callable[[F], F]:
     """
@@ -442,7 +439,6 @@ def memoize_timed(
 
 def async_memoize_timed(
     timeout_sec: float = 60.0,
-    # pyre-fixme[34]: `Variable[AsyncF (bound to typing.Callable[...,
     #  typing.Coroutine[typing.Any, typing.Any, typing.Any]])]` isn't present in the
     #  function's parameters.
 ) -> Callable[[AsyncF], AsyncF]:
@@ -779,7 +775,6 @@ def lazy_import(module_path: str) -> Any:
 
 def memoize_timed_herd(
     timeout_sec: float = 60.0,
-    # pyre-fixme[34]: `Variable[AsyncF (bound to typing.Callable[...,
     #  typing.Coroutine[typing.Any, typing.Any, typing.Any]])]` isn't present in the
     #  function's parameters.
 ) -> Callable[[AsyncF], AsyncF]:

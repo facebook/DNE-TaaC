@@ -70,7 +70,6 @@ def memoize_forever(func: AsyncF) -> AsyncF:
 
 def memoize_timed(
     timeout_sec: float = 60.0,
-    # pyre-fixme[34]: `Variable[AsyncF (bound to typing.Callable[...,
     #  typing.Coroutine[typing.Any, typing.Any, typing.Any]])]` isn't present in the
     #  function's parameters.
 ) -> Callable[[AsyncF], AsyncF]:

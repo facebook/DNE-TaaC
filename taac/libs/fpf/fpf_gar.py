@@ -77,8 +77,8 @@ def _binary_prefix_to_str(prefix: object) -> str | None:
 def _agent_prefix_to_str(route: object) -> str | None:
     try:
         dest = route.dest  # pyre-ignore[16]
-        prefix_bin = dest.ip.addr  # pyre-ignore[16]
-        num_bits = int(dest.prefixLength)  # pyre-ignore[16]
+        prefix_bin = dest.ip.addr
+        num_bits = int(dest.prefixLength)
         family = socket.AF_INET if len(prefix_bin) == 4 else socket.AF_INET6
         address = socket.inet_ntop(family, prefix_bin)
         return str(ipaddress.ip_network(f"{address}/{num_bits}", strict=False))
@@ -123,7 +123,7 @@ def _community_to_str(community: object) -> str:
     if isinstance(community, str):
         return community
     if hasattr(community, "asn") and hasattr(community, "value"):
-        return f"{community.asn}:{community.value}"  # pyre-ignore[16]
+        return f"{community.asn}:{community.value}"
     if isinstance(community, int):
         return f"{(community >> 16) & 0xFFFF}:{community & 0xFFFF}"
     if isinstance(community, (tuple, list)) and len(community) == 2:

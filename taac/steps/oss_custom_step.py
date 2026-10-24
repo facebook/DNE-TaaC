@@ -259,7 +259,6 @@ class OssCustomStep(StepBase[taac_types.CustomStepInput]):
         hosts = params.get("neighbor_hosts")
         pattern = params.get("neighbor_pattern")
 
-        # pyre-fixme[16]
         lldp = await self.driver.async_get_lldp_neighbors()
         if hosts:
             wanted = {h.split(".")[0].lower() for h in hosts}

@@ -744,7 +744,6 @@ class CoopUnregisterPatchersTask(BaseTask):
         are installed. Either way only the daemons whose config changed restart."""
         for config_name in get_default_configs(hostname):
             if await driver.async_coop_list_patchers(config_name):
-                # pyre-fixme[16]: `AbstractSwitch` has no attribute
                 #  `async_apply_patchers`.
                 await driver.async_apply_patchers()
                 return

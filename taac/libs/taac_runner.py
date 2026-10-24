@@ -2540,7 +2540,6 @@ class TaacRunner:
             # pyrefly: ignore [missing-attribute]
             test_device = self.topology.get_device_by_name(dut)
             dut_playbooks = self._playbooks_for_device(
-                # pyrefly: ignore [bad-argument-type]
                 enabled_playbooks,
                 test_device,
             )
@@ -2549,12 +2548,10 @@ class TaacRunner:
                 self.logger.info("")
                 self.logger.info(f"\033[1m\033[36m{'=' * 70}\033[0m")
                 self.logger.info(
-                    # pyrefly: ignore [missing-attribute]
                     f"\033[1m\033[36m  [{pb_idx}/{total_playbooks}] "
                     f"{playbook.name} | {dut}\033[0m"
                 )
                 self.logger.info(f"\033[1m\033[36m{'=' * 70}\033[0m")
-                # pyrefly: ignore [bad-assignment]
                 self._current_playbook = playbook
                 try:
                     # Cross-playbook IXIA health gate. Fires the in-band 5xx
@@ -2574,13 +2571,10 @@ class TaacRunner:
                             ),
                             testconfig_name=self.test_config.name,
                         )
-                    # pyrefly: ignore [bad-argument-type]
                     await self.run_test_case(playbook, test_device)
                 except Exception as e:
-                    # pyrefly: ignore [missing-attribute]
                     failed_playbooks.append((playbook.name, dut, e))
                     self.logger.error(
-                        # pyrefly: ignore [missing-attribute]
                         f"\033[31m  Playbook '{playbook.name}' failed on "
                         f"{dut}: {e}\033[0m"
                     )
