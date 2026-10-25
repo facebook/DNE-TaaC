@@ -69,7 +69,7 @@ from taac.test_as_a_config.types import (
 # -> asserts none restarted) fails the test. Same service/daemon set as
 # ``create_standard_postchecks`` so empty-group churn is held to the same
 # no-restart bar as the rest of the EBB suite.
-_CRASH_GATE_SERVICES: t.List[str] = ["Bgp", "FibAgent", "FibAgentBgp"]
+_CRASH_GATE_SERVICES: t.List[str] = ["Bgpcpp", "FibAgent", "FibAgentBgp"]
 _CRASH_GATE_DAEMONS: t.List[str] = ["FibBgpGrpc"]
 
 

@@ -434,7 +434,7 @@ def _assemble_playbook(
     bounded_postchecks = _bounded_checks(postchecks, **check_args)
     update_group_check = _exact_update_group_check(**check_args)
     bounded_postchecks.append(
-        create_service_restart_check(services=["Bgp"], daemons=["FibBgpGrpc"])
+        create_service_restart_check(services=["Bgpcpp"], daemons=["FibBgpGrpc"])
     )
     return Playbook(
         name="bgp_ug_bgp_peer_flapping",

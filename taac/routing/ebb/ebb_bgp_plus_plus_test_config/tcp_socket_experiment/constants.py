@@ -233,7 +233,7 @@ FIBAGENT_CONF_DEPLOY_CMD = (
 # NOTE: Openr excluded — not used in this experiment
 # =============================================================================
 BGPCPP_DAEMONS = [
-    "Bgp",
+    "Bgpcpp",
     "FibAgent",
     "FibAgentBgp",
     "FibBgpGrpc",

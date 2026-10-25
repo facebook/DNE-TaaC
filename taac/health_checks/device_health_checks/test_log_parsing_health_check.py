@@ -247,7 +247,7 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
 
     def _arista_params(self, **overrides):
         params = {
-            "agent_name": "Bgp",
+            "agent_name": "Bgpcpp",
             "exclude_regex": "Memory Limit Reached",
         }
         params.update(overrides)
@@ -276,7 +276,7 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
         archived_logs.assert_awaited_once_with(
             self.health_check.driver,
-            "Bgp",
+            "Bgpcpp",
             "26775",
             start_time=100,
             end_time=200,
@@ -307,7 +307,7 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("exclude regex", result.message)
         archived_logs.assert_awaited_once_with(
             self.health_check.driver,
-            "Bgp",
+            "Bgpcpp",
             "26775",
             start_time=100,
             end_time=200,
@@ -375,7 +375,7 @@ class LogParsingHealthCheckTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(hc_types.HealthCheckStatus.ERROR, result.status)
-        self.assertIn("No live or archived Bgp logs", result.message)
+        self.assertIn("No live or archived Bgpcpp logs", result.message)
 
     async def test_arista_rejects_inverted_time_window(self):
         get_pid = AsyncMock(return_value="26775")

@@ -425,7 +425,7 @@ def create_standard_postchecks(
             breach remains a failure while observation continues to capture the
             actual convergence time.
         services_to_check: List of EOS Sand agents to check via 'show agent uptime'
-            (optional, defaults to ["Bgp", "FibAgent", "FibAgentBgp"])
+            (optional, defaults to ["Bgpcpp", "FibAgent", "FibAgentBgp"])
         daemons_to_check: List of EOS daemons to check via 'show daemon'. Daemons
             are distinct from Sand agents and must be checked with a different EOS
             command. (optional, defaults to ["FibBgpGrpc"])
@@ -487,7 +487,7 @@ def create_standard_postchecks(
         postcheck_thresholds = get_postcheck_thresholds()
 
     if services_to_check is None:
-        services_to_check = ["Bgp", "FibAgent", "FibAgentBgp"]
+        services_to_check = ["Bgpcpp", "FibAgent", "FibAgentBgp"]
 
     if daemons_to_check is None:
         daemons_to_check = ["FibBgpGrpc"]
@@ -534,7 +534,7 @@ def create_standard_postchecks(
             # System-level log parsing check
             create_log_parsing_check(
                 json_params={
-                    "agent_name": "Bgp",
+                    "agent_name": "Bgpcpp",
                     "exclude_regex": "Memory Limit Reached",
                 },
                 start_time_jq_var="test_case_start_time",

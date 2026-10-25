@@ -141,9 +141,9 @@ class BgpDaemonRestartPlaybookTest(TestCase):
         self.assertEqual(_all_peer_addresses(), all_peer_snapshot["peer_addrs"])
         self.assertEqual(
             [
-                "Disable Bgp daemon",
+                "Disable Bgpcpp daemon",
                 "Sleep for 5 seconds",
-                "Enable Bgp daemon",
+                "Enable Bgpcpp daemon",
                 "Record daemon restart completion time",
                 "Observe exact BGP lifecycle convergence",
             ],
@@ -153,7 +153,7 @@ class BgpDaemonRestartPlaybookTest(TestCase):
         self.assertEqual(
             {
                 "hostname": "bag012.ash6",
-                "daemon_name": "Bgp",
+                "daemon_name": "Bgpcpp",
                 "action": "disable",
             },
             disable,
@@ -163,7 +163,7 @@ class BgpDaemonRestartPlaybookTest(TestCase):
         self.assertEqual(
             {
                 "hostname": "bag012.ash6",
-                "daemon_name": "Bgp",
+                "daemon_name": "Bgpcpp",
                 "action": "enable",
             },
             enable,
@@ -411,9 +411,9 @@ class BgpDaemonRestartPlaybookTest(TestCase):
         self.assertEqual(1, len(restart_checks))
         restart_check = restart_checks[0]
         restart_payload = json.loads(restart_check.check_params.json_params)
-        self.assertEqual(["Bgp"], restart_payload["expected_restarted_services"])
+        self.assertEqual(["Bgpcpp"], restart_payload["expected_restarted_services"])
         self.assertEqual(
-            ["Bgp", "FibAgent", "FibAgentBgp"], restart_payload["services"]
+            ["Bgpcpp", "FibAgent", "FibAgentBgp"], restart_payload["services"]
         )
         self.assertEqual(["FibBgpGrpc"], restart_payload["daemons"])
         self.assertEqual(

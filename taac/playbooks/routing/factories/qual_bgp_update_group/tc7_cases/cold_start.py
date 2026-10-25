@@ -657,13 +657,13 @@ def _postchecks(
         enforce_absolute_high_watermarks=True,
     )
     post_cold_start_crash_guard = create_service_restart_check(
-        services=["Bgp"],
+        services=["Bgpcpp"],
         daemons=["FibBgpGrpc"],
-        expected_restarted_services=["Bgp"],
+        expected_restarted_services=["Bgpcpp"],
         restart_start_time_jq_var=_RESTART_TIME_VAR,
     )
     no_unexpected_post_restart = create_service_restart_check(
-        services=["Bgp"],
+        services=["Bgpcpp"],
         daemons=["FibBgpGrpc"],
         start_time_jq_var=_RESTART_TIME_VAR,
     )

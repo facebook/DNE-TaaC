@@ -961,7 +961,7 @@ def build_rescale_bgpcpp_config_steps(
     return [
         create_daemon_control_step(
             device_name=device_name,
-            daemon_name="Bgp",
+            daemon_name="Bgpcpp",
             action="disable",
             description=(
                 f"Disable Bgp daemon before rewriting {config_path}"
@@ -980,7 +980,7 @@ def build_rescale_bgpcpp_config_steps(
         ),
         create_daemon_control_step(
             device_name=device_name,
-            daemon_name="Bgp",
+            daemon_name="Bgpcpp",
             action="enable",
             description=f"Re-enable Bgp daemon with {len(peers)} peers configured",
         ),
@@ -1620,7 +1620,7 @@ def get_ebb_device_state_guard_tasks(
             operation_id=component_operation_id,
             startup_path=BGPCPP_STARTUP_PATH,
             file_restores=file_restores,
-            force_restart_daemons=["Bgp"],
+            force_restart_daemons=["Bgpcpp"],
         )
     ]
     return setup_tasks, teardown_tasks
@@ -1957,7 +1957,7 @@ def get_update_packing_setup_tasks(  # noqa: C901
     setup_tasks.append(
         create_arista_daemon_control_task(
             hostname=device_name,
-            daemon_name="Bgp",
+            daemon_name="Bgpcpp",
             action="disable",
             ixia_needed=True,
         )
@@ -1965,7 +1965,7 @@ def get_update_packing_setup_tasks(  # noqa: C901
     setup_tasks.append(
         create_arista_daemon_control_task(
             hostname=device_name,
-            daemon_name="Bgp",
+            daemon_name="Bgpcpp",
             action="enable",
             ixia_needed=True,
         )

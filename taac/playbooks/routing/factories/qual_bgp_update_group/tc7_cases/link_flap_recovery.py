@@ -473,7 +473,7 @@ def create_bgp_ug_link_flap_recovery_playbook(
         expected_group_count=expected_group_count,
     )
     bounded_postchecks.append(
-        create_service_restart_check(services=["Bgp"], daemons=["FibBgpGrpc"])
+        create_service_restart_check(services=["Bgpcpp"], daemons=["FibBgpGrpc"])
     )
     return Playbook(
         name="bgp_ug_link_flap_recovery",

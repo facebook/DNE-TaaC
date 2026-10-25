@@ -38,14 +38,15 @@ class AristaDaemonControlTaskTest(later.unittest.TestCase):
         driver = MagicMock()
         driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
             side_effect=[
-                "daemon Bgp\n   exec /usr/sbin/run_bgpcpp.sh\n   no shutdown",
-                "Process: Bgp (shutdown with PID 3139)",
+                "daemon Bgpcpp\n   exec /usr/sbin/run_bgpcpp.sh\n   no shutdown",
+                "Process: Bgpcpp (shutdown with PID 3139)",
                 "",
-                "daemon Bgp\n   exec /usr/sbin/run_bgpcpp.sh\n   no shutdown",
-                "Process: Bgp (running)",
+                "daemon Bgpcpp\n   exec /usr/sbin/run_bgpcpp.sh\n   no shutdown",
+                "Process: Bgpcpp (running)",
             ]
         )
         task = AristaDaemonControlTask(logger=MagicMock())
+        task._remove_renamed_daemons = AsyncMock()
 
         with patch(
             f"{ALL_PATH}.async_get_device_driver",
@@ -55,7 +56,7 @@ class AristaDaemonControlTaskTest(later.unittest.TestCase):
             await task.run(
                 {
                     "hostname": "nrqeb009.ash6",
-                    "daemon_name": "Bgp",
+                    "daemon_name": "Bgpcpp",
                     "action": "enable",
                 }
             )
@@ -63,13 +64,13 @@ class AristaDaemonControlTaskTest(later.unittest.TestCase):
         driver.async_execute_show_or_configure_cmd_on_shell.assert_has_awaits(
             [
                 call("show running-config section daemon"),
-                call("show daemon Bgp"),
+                call("show daemon Bgpcpp"),
                 call(
-                    "daemon Bgp\nexec /usr/sbin/run_bgpcpp.sh\nno shutdown",
+                    "daemon Bgpcpp\nexec /usr/sbin/run_bgpcpp.sh\nno shutdown",
                     configure=True,
                 ),
                 call("show running-config section daemon"),
-                call("show daemon Bgp"),
+                call("show daemon Bgpcpp"),
             ]
         )
 
@@ -85,6 +86,7 @@ class AristaDaemonControlTaskTest(later.unittest.TestCase):
             ]
         )
         task = AristaDaemonControlTask(logger=MagicMock())
+        task._remove_renamed_daemons = AsyncMock()
 
         with patch(
             f"{ALL_PATH}.async_get_device_driver",
@@ -108,6 +110,31 @@ class AristaDaemonControlTaskTest(later.unittest.TestCase):
             driver.async_execute_show_or_configure_cmd_on_shell.await_args_list[2],
         )
 
+    async def test_enable_removes_stanza_left_under_renamed_daemon(self) -> None:
+        driver = MagicMock()
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock()
+        task = AristaDaemonControlTask(logger=MagicMock())
+        task._check_daemon_exists = AsyncMock(return_value=True)
+
+        await task._remove_renamed_daemons(driver, "Bgpcpp")
+
+        task._check_daemon_exists.assert_awaited_once_with(driver, "Bgp")
+        driver.async_execute_show_or_configure_cmd_on_shell.assert_awaited_once_with(
+            "no daemon Bgp", configure=True
+        )
+
+    async def test_enable_skips_removal_when_old_stanza_is_absent(self) -> None:
+        driver = MagicMock()
+        driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock()
+        task = AristaDaemonControlTask(logger=MagicMock())
+        task._check_daemon_exists = AsyncMock(return_value=False)
+
+        await task._remove_renamed_daemons(driver, "Bgpcpp")
+        await task._remove_renamed_daemons(driver, "FibAgent")
+
+        task._check_daemon_exists.assert_awaited_once_with(driver, "Bgp")
+        driver.async_execute_show_or_configure_cmd_on_shell.assert_not_awaited()
+
     async def test_enable_is_noop_when_daemon_is_already_healthy(self) -> None:
         driver = MagicMock()
         driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock()
@@ -117,14 +144,14 @@ class AristaDaemonControlTaskTest(later.unittest.TestCase):
                 "daemon_exists": True,
                 "is_running": True,
                 "daemon_config": (
-                    "daemon Bgp",
+                    "daemon Bgpcpp",
                     "exec /usr/sbin/run_bgpcpp.sh",
                     "no shutdown",
                 ),
             }
         )
 
-        await task._enable_daemon(driver, "Bgp", "/usr/sbin/run_bgpcpp.sh")
+        await task._enable_daemon(driver, "Bgpcpp", "/usr/sbin/run_bgpcpp.sh")
 
         driver.async_execute_show_or_configure_cmd_on_shell.assert_not_awaited()
 
@@ -138,7 +165,7 @@ class AristaDaemonControlTaskTest(later.unittest.TestCase):
                     "daemon_exists": True,
                     "is_running": True,
                     "daemon_config": (
-                        "daemon Bgp",
+                        "daemon Bgpcpp",
                         "exec /usr/sbin/old_bgpcpp.sh",
                         "no shutdown",
                     ),
@@ -147,7 +174,7 @@ class AristaDaemonControlTaskTest(later.unittest.TestCase):
                     "daemon_exists": True,
                     "is_running": True,
                     "daemon_config": (
-                        "daemon Bgp",
+                        "daemon Bgpcpp",
                         "exec /usr/sbin/run_bgpcpp.sh",
                         "no shutdown",
                     ),
@@ -156,10 +183,10 @@ class AristaDaemonControlTaskTest(later.unittest.TestCase):
         )
 
         with patch(f"{ALL_PATH}.asyncio.sleep", new_callable=AsyncMock):
-            await task._enable_daemon(driver, "Bgp", "/usr/sbin/run_bgpcpp.sh")
+            await task._enable_daemon(driver, "Bgpcpp", "/usr/sbin/run_bgpcpp.sh")
 
         driver.async_execute_show_or_configure_cmd_on_shell.assert_awaited_once_with(
-            "daemon Bgp\nexec /usr/sbin/run_bgpcpp.sh\nno shutdown",
+            "daemon Bgpcpp\nexec /usr/sbin/run_bgpcpp.sh\nno shutdown",
             configure=True,
         )
 
@@ -170,9 +197,9 @@ class AristaDaemonControlTaskTest(later.unittest.TestCase):
             if configure:
                 return ""
             if command == "show running-config section daemon":
-                return "daemon Bgp\n   exec /usr/sbin/run_bgpcpp.sh"
-            if command == "show daemon Bgp":
-                return "Process: Bgp (shutdown)"
+                return "daemon Bgpcpp\n   exec /usr/sbin/run_bgpcpp.sh"
+            if command == "show daemon Bgpcpp":
+                return "Process: Bgpcpp (shutdown)"
             raise AssertionError(f"Unexpected command: {command}")
 
         driver.async_execute_show_or_configure_cmd_on_shell = AsyncMock(
@@ -192,7 +219,7 @@ class AristaDaemonControlTaskTest(later.unittest.TestCase):
             await task.run(
                 {
                     "hostname": "nrqeb009.ash6",
-                    "daemon_name": "Bgp",
+                    "daemon_name": "Bgpcpp",
                     "action": "enable",
                 }
             )

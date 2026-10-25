@@ -156,7 +156,7 @@ def _validate_routing_component_intent(
             "EOS routing-component daemon names must be unique"
         )
     unsupported_options = tuple(
-        option for option in intent.startup_options if option.daemon != "Bgp"
+        option for option in intent.startup_options if option.daemon != "Bgpcpp"
     )
     if unsupported_options:
         raise UnsupportedEosBgpCppLifecycleMaterializationError(

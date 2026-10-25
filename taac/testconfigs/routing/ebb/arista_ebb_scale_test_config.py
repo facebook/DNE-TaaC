@@ -355,7 +355,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ),
                 postchecks=create_standard_postchecks(
                     postcheck_thresholds=postcheck_thresholds,
-                    expected_restarted_services=["Bgp"],
+                    expected_restarted_services=["Bgpcpp"],
                     restart_start_time_jq_var="daemon_restart_time",
                 ),
                 snapshot_checks=create_standard_snapshot_checks(),
@@ -416,7 +416,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ),
                 postchecks=create_standard_postchecks(
                     postcheck_thresholds=postcheck_thresholds,
-                    expected_restarted_services=["Bgp"],
+                    expected_restarted_services=["Bgpcpp"],
                     restart_start_time_jq_var="daemon_restart_time",
                 ),
                 snapshot_checks=create_standard_snapshot_checks(),
@@ -470,7 +470,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ),
                 postchecks=create_standard_postchecks(
                     postcheck_thresholds=postcheck_thresholds,
-                    expected_restarted_services=["Bgp"],
+                    expected_restarted_services=["Bgpcpp"],
                     restart_start_time_jq_var="daemon_restart_time",
                 ),
                 snapshot_checks=create_standard_snapshot_checks(),
@@ -508,7 +508,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 postchecks=create_standard_postchecks(
                     postcheck_thresholds=postcheck_thresholds,
                     fail_on_eor_expired=False,
-                    expected_restarted_services=["Bgp"],
+                    expected_restarted_services=["Bgpcpp"],
                     restart_start_time_jq_var="daemon_restart_time",
                 ),
                 snapshot_checks=create_standard_snapshot_checks(),
@@ -1200,7 +1200,7 @@ def test_config_for_bgp_plus_plus_on_ebb_arista_with_bgp_mon(
                 ),
                 postchecks=create_standard_postchecks(
                     postcheck_thresholds=postcheck_thresholds,
-                    expected_restarted_services=["Bgp"],
+                    expected_restarted_services=["Bgpcpp"],
                     restart_start_time_jq_var="daemon_restart_time",
                 ),
                 snapshot_checks=create_standard_snapshot_checks(),

@@ -473,9 +473,9 @@ def _postchecks(
     )
     bounded.append(
         create_service_restart_check(
-            services=["Bgp", "FibAgent", "FibAgentBgp"],
+            services=["Bgpcpp", "FibAgent", "FibAgentBgp"],
             daemons=["FibBgpGrpc"],
-            expected_restarted_services=["Bgp"],
+            expected_restarted_services=["Bgpcpp"],
             restart_start_time_jq_var="daemon_restart_time",
         )
     )
@@ -498,7 +498,7 @@ def _cleanup_steps(
         *_route_prepare_steps(device_name, pools, "cleanup"),
         create_daemon_control_step(
             device_name=device_name,
-            daemon_name="Bgp",
+            daemon_name="Bgpcpp",
             action="enable",
             description="2.7.4 cleanup: idempotently enable Bgp",
         ),

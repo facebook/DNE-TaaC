@@ -50,7 +50,7 @@ BGPCPP_DAEMONS = [
     "FibAgent",
     "FibAgentBgp",
     "Openr",
-    "Bgp",
+    "Bgpcpp",
 ]
 
 # Ordered phase-3 control-plane recipe. Keep the lists ordered because their
@@ -886,7 +886,7 @@ VERIFY_THRIFT_ACL_USER_IDS_CMD = _on_device_python_command(
     _VERIFY_THRIFT_ACL_USER_IDS_SCRIPT
 )
 
-POST_ACL_RESTART_DAEMONS = ["FibAgent", "FibAgentBgp", "Bgp"]
+POST_ACL_RESTART_DAEMONS = ["FibAgent", "FibAgentBgp", "Bgpcpp"]
 
 EBB_BGPCPP_LOGGING_CONFIG = "DBG5;default:async=true"
 

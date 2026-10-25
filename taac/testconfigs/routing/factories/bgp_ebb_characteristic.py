@@ -909,7 +909,7 @@ def test_config_sc3_transient_memory_route_scale_on_eos(
     setup_tasks.append(
         create_arista_daemon_control_task(
             hostname=device_name,
-            daemon_name="Bgp",
+            daemon_name="Bgpcpp",
             action="disable",
             ixia_needed=True,
         )
@@ -917,7 +917,7 @@ def test_config_sc3_transient_memory_route_scale_on_eos(
     setup_tasks.append(
         create_arista_daemon_control_task(
             hostname=device_name,
-            daemon_name="Bgp",
+            daemon_name="Bgpcpp",
             action="enable",
             ixia_needed=True,
         )
@@ -2111,7 +2111,7 @@ def _validate_sc6_startup_order(setup_tasks: Sequence[taac_types.Task]) -> None:
         for index, task, params in relevant_task_params
         if task.task_name == "arista_daemon_control"
         and isinstance(params, dict)
-        and params.get("daemon_name") == "Bgp"
+        and params.get("daemon_name") == "Bgpcpp"
         and params.get("action") == "enable"
     ]
     if len(timeout_task_indices) != 1:

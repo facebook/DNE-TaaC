@@ -51,7 +51,7 @@ class BgpFibProgrammingCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckI
             )
 
         try:
-            agent_name = "Bgp"
+            agent_name = "Bgpcpp"
             pid = await arista_utils.get_daemon_pid(self.driver, agent_name)
 
         except Exception as e:

@@ -287,7 +287,7 @@ class FibagentRestartPlaybookTest(TestCase):
         self.assertTrue(
             any(value.get("vmhwm_threshold") == 9_999_999_999 for value in payloads)
         )
-        self.assertTrue(any(value.get("services") == ["Bgp"] for value in payloads))
+        self.assertTrue(any(value.get("services") == ["Bgpcpp"] for value in payloads))
         periodic_names = {task.name for task in playbook.periodic_tasks}
         self.assertNotIn("bgp_queue_backpressure_check", periodic_names)
         self.assertTrue(
@@ -335,7 +335,7 @@ class FibagentRestartPlaybookTest(TestCase):
         replacement_params = none_throws(replacement.check_params)
         replacement_payload = json.loads(none_throws(replacement_params.json_params))
 
-        self.assertEqual(["Bgp", "FibAgentBgp"], replacement_payload["services"])
+        self.assertEqual(["Bgpcpp", "FibAgentBgp"], replacement_payload["services"])
         self.assertEqual(["FibBgpGrpc"], replacement_payload["daemons"])
         self.assertEqual("preserve", replacement_payload["custom_marker"])
         self.assertEqual(inherited_jq_params, replacement_params.jq_params)
@@ -370,7 +370,7 @@ class FibagentRestartPlaybookTest(TestCase):
         self.assertEqual(2, len(restart_checks))
         self.assertEqual(bare_check, restart_checks[0])
         self.assertEqual({}, payloads[0])
-        self.assertEqual(["Bgp"], payloads[1]["services"])
+        self.assertEqual(["Bgpcpp"], payloads[1]["services"])
         self.assertEqual(["FibBgpGrpc"], payloads[1]["daemons"])
 
     def test_fibagent_only_check_is_removed_and_bgp_guard_is_added(self) -> None:
@@ -387,7 +387,7 @@ class FibagentRestartPlaybookTest(TestCase):
         ]
 
         self.assertEqual(
-            [{"services": ["Bgp"], "daemons": ["FibBgpGrpc"]}],
+            [{"services": ["Bgpcpp"], "daemons": ["FibBgpGrpc"]}],
             payloads,
         )
 
@@ -402,7 +402,7 @@ class FibagentRestartPlaybookTest(TestCase):
         ]
 
         self.assertEqual(
-            [{"services": ["Bgp"], "daemons": ["FibBgpGrpc"]}],
+            [{"services": ["Bgpcpp"], "daemons": ["FibBgpGrpc"]}],
             payloads,
         )
 
@@ -427,7 +427,7 @@ class FibagentRestartPlaybookTest(TestCase):
         self.assertEqual(2, len(restart_payloads))
         self.assertIn({"services": ["OtherAgent"], "daemons": []}, restart_payloads)
         self.assertIn(
-            {"services": ["Bgp"], "daemons": ["FibBgpGrpc"]},
+            {"services": ["Bgpcpp"], "daemons": ["FibBgpGrpc"]},
             restart_payloads,
         )
 

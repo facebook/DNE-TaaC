@@ -24,7 +24,7 @@ from taac.internal.tasks.eos_compiler_lifecycle_task import (
 
 
 _MODULE = "neteng.test_infra.dne.taac.internal.tasks.eos_compiler_lifecycle_task"
-_STATE_GUARD_DAEMONS = ["FibGrpc", "FibAgent", "Bgp", "BgpTcpdump"]
+_STATE_GUARD_DAEMONS = ["FibGrpc", "FibAgent", "Bgpcpp", "BgpTcpdump"]
 # patternlint-disable-next-line no-dev-shm-usage
 _RIB_POLICY_STATE_PATH = "/dev/shm/bgp_rp_state.txt"
 
@@ -96,14 +96,14 @@ def _routing_component_params(action: str) -> dict[str, object]:
             },
             {"name": "Openr", "enabled": False, "dependencies": []},
             {
-                "name": "Bgp",
+                "name": "Bgpcpp",
                 "enabled": True,
                 "dependencies": ["FibAgent", "FibAgentBgp"],
             },
         ]
         params["startup_options"] = [
             {
-                "daemon": "Bgp",
+                "daemon": "Bgpcpp",
                 "name": "bgp_resolve_nexthops_from_interface_state",
                 "value": "true",
             }
@@ -116,7 +116,7 @@ def _state_guard_component_params(action: str) -> dict[str, object]:
     if action == "routing_component_snapshot":
         params["daemon_names"] = _STATE_GUARD_DAEMONS
     elif action == "routing_component_restore":
-        params["force_restart_daemons"] = ["Bgp"]
+        params["force_restart_daemons"] = ["Bgpcpp"]
         params["file_restores"] = [
             {
                 "operation_id": "routing_config:dut0",
@@ -997,7 +997,7 @@ class EosCompilerLifecycleTaskTest(TestCase):
         snapshot_params["firewall_chains"] = [
             {"family": firewall.family, "chain": firewall.chain}
         ]
-        snapshot_params["daemon_names"] = ["Bgp"]
+        snapshot_params["daemon_names"] = ["Bgpcpp"]
         restore_order: list[str] = []
         restore_directory = AsyncMock(
             side_effect=lambda *_args: restore_order.append("directory")
@@ -1036,7 +1036,7 @@ class EosCompilerLifecycleTaskTest(TestCase):
             ),
             patch(
                 f"{_MODULE}._read_daemon_states",
-                AsyncMock(return_value=(("Bgp", True),)),
+                AsyncMock(return_value=(("Bgpcpp", True),)),
             ),
             patch(f"{_MODULE}._quiesce_daemons_for_restore", AsyncMock()),
             patch(f"{_MODULE}._reconcile_daemon_states", reconcile_daemons),
@@ -1175,7 +1175,7 @@ class EosCompilerLifecycleTaskTest(TestCase):
         daemon_states: dict[str, bool] = {
             "FibGrpc": True,
             "FibAgent": False,
-            "Bgp": True,
+            "Bgpcpp": True,
             "BgpTcpdump": True,
         }
         driver = MagicMock()
@@ -1215,7 +1215,7 @@ class EosCompilerLifecycleTaskTest(TestCase):
         ):
             params = _state_guard_component_params("routing_component_snapshot")
             await task.run(params)
-            daemon_states["Bgp"] = False
+            daemon_states["Bgpcpp"] = False
             driver.async_read_file.return_value = "changed startup"
             await task.run(params)
 
@@ -1245,7 +1245,7 @@ class EosCompilerLifecycleTaskTest(TestCase):
         daemon_states: dict[str, bool] = {
             "FibGrpc": True,
             "FibAgent": False,
-            "Bgp": True,
+            "Bgpcpp": True,
             "BgpTcpdump": True,
         }
         transitions: list[tuple[str, bool]] = []
@@ -1333,7 +1333,7 @@ class EosCompilerLifecycleTaskTest(TestCase):
                 {
                     "FibGrpc": False,
                     "FibAgent": True,
-                    "Bgp": True,
+                    "Bgpcpp": True,
                     "BgpTcpdump": False,
                 }
             )
@@ -1341,10 +1341,10 @@ class EosCompilerLifecycleTaskTest(TestCase):
 
         self.assertEqual(
             [
-                ("Bgp", False),
+                ("Bgpcpp", False),
                 ("FibAgent", False),
                 ("FibGrpc", True),
-                ("Bgp", True),
+                ("Bgpcpp", True),
                 ("BgpTcpdump", True),
             ],
             transitions,
@@ -1353,13 +1353,13 @@ class EosCompilerLifecycleTaskTest(TestCase):
             {
                 "FibGrpc": True,
                 "FibAgent": False,
-                "Bgp": True,
+                "Bgpcpp": True,
                 "BgpTcpdump": True,
             },
             daemon_states,
         )
         self.assertLess(
-            events.index("daemon:Bgp:False"),
+            events.index("daemon:Bgpcpp:False"),
             events.index("file:/mnt/flash/bgpcpp_config"),
         )
         self.assertLess(
@@ -1373,7 +1373,9 @@ class EosCompilerLifecycleTaskTest(TestCase):
         self.assertLess(
             events.index("file:/usr/sbin/run_bgpcpp.sh"), events.index("running-config")
         )
-        self.assertLess(events.index("running-config"), events.index("daemon:Bgp:True"))
+        self.assertLess(
+            events.index("running-config"), events.index("daemon:Bgpcpp:True")
+        )
 
         commands = tuple(
             item.args[0]
@@ -1417,7 +1419,7 @@ class EosCompilerLifecycleTaskTest(TestCase):
             nonlocal daemon_running
             if command.startswith("show daemon"):
                 state = "running with PID 123" if daemon_running else "not running"
-                return f"Process: Bgp ({state})"
+                return f"Process: Bgpcpp ({state})"
             if configure and command.startswith("daemon"):
                 daemon_running = "no shutdown" in command
                 transitions.append(daemon_running)
@@ -1432,9 +1434,9 @@ class EosCompilerLifecycleTaskTest(TestCase):
             shared_data={},
         )
         snapshot_params = _routing_component_params("routing_component_snapshot")
-        snapshot_params["daemon_names"] = ["Bgp"]
+        snapshot_params["daemon_names"] = ["Bgpcpp"]
         restore_params = _routing_component_params("routing_component_restore")
-        restore_params["force_restart_daemons"] = ["Bgp"]
+        restore_params["force_restart_daemons"] = ["Bgpcpp"]
 
         with (
             patch(
@@ -1507,7 +1509,14 @@ class EosCompilerLifecycleTaskTest(TestCase):
         driver = MagicMock()
 
         async def daemon_status(command: str) -> str:
-            names = ("FibBgpGrpc", "FibAgentBgp", "FibGrpc", "FibAgent", "Openr", "Bgp")
+            names = (
+                "FibBgpGrpc",
+                "FibAgentBgp",
+                "FibGrpc",
+                "FibAgent",
+                "Openr",
+                "Bgpcpp",
+            )
             name = next(name for name in names if name in command)
             state = "not running" if name == "Openr" else "running with PID 123"
             return f"Process: {name} ({state})"
@@ -1547,7 +1556,14 @@ class EosCompilerLifecycleTaskTest(TestCase):
         driver = MagicMock()
 
         async def daemon_status(command: str) -> str:
-            names = ("FibBgpGrpc", "FibAgentBgp", "FibGrpc", "FibAgent", "Openr", "Bgp")
+            names = (
+                "FibBgpGrpc",
+                "FibAgentBgp",
+                "FibGrpc",
+                "FibAgent",
+                "Openr",
+                "Bgpcpp",
+            )
             name = next(name for name in names if name in command)
             state = "not running" if name == "Openr" else "running with PID 123"
             return f"Process: {name} ({state})"
@@ -1578,7 +1594,14 @@ class EosCompilerLifecycleTaskTest(TestCase):
         driver = MagicMock()
 
         async def daemon_status(command: str) -> str:
-            names = ("FibBgpGrpc", "FibAgentBgp", "FibGrpc", "FibAgent", "Openr", "Bgp")
+            names = (
+                "FibBgpGrpc",
+                "FibAgentBgp",
+                "FibGrpc",
+                "FibAgent",
+                "Openr",
+                "Bgpcpp",
+            )
             name = next(name for name in names if name in command)
             state = "not running" if name == "Openr" else "running with PID 123"
             return f"Process: {name} ({state})"
@@ -1631,7 +1654,14 @@ class EosCompilerLifecycleTaskTest(TestCase):
         driver = MagicMock()
 
         async def daemon_status(command: str) -> str:
-            names = ("FibBgpGrpc", "FibAgentBgp", "FibGrpc", "FibAgent", "Openr", "Bgp")
+            names = (
+                "FibBgpGrpc",
+                "FibAgentBgp",
+                "FibGrpc",
+                "FibAgent",
+                "Openr",
+                "Bgpcpp",
+            )
             name = next(name for name in names if name in command)
             state = "not running" if name == "Openr" else "running with PID 123"
             return f"Process: {name} ({state})"
@@ -1664,7 +1694,14 @@ class EosCompilerLifecycleTaskTest(TestCase):
         driver = MagicMock()
 
         async def daemon_status(command: str) -> str:
-            names = ("FibBgpGrpc", "FibAgentBgp", "FibGrpc", "FibAgent", "Openr", "Bgp")
+            names = (
+                "FibBgpGrpc",
+                "FibAgentBgp",
+                "FibGrpc",
+                "FibAgent",
+                "Openr",
+                "Bgpcpp",
+            )
             name = next(name for name in names if name in command)
             state = "not running" if name == "Openr" else "running with PID 123"
             return f"Process: {name} ({state})"

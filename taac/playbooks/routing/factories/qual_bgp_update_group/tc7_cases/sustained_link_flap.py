@@ -228,7 +228,7 @@ def _bounded_postchecks(
         expected_afi_by_substring,
     )
     bounded.append(
-        create_service_restart_check(services=["Bgp"], daemons=["FibBgpGrpc"])
+        create_service_restart_check(services=["Bgpcpp"], daemons=["FibBgpGrpc"])
     )
     return bounded
 

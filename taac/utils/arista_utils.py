@@ -530,7 +530,7 @@ def parse_daemon_output(daemon_name: str, output: str) -> DaemonStatus:
     Parse daemon command output to extract status information.
 
     Expected format from 'show daemon <name>':
-    Process: Bgp (running with PID 12765)
+    Process: Bgpcpp (running with PID 12765)
     Uptime: 0:33:54 (Start time: Fri Sep 26 04:40:12 2025)
 
     Args:

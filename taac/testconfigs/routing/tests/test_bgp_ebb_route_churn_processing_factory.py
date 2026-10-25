@@ -324,7 +324,7 @@ class Sc6ThriftTimeoutTest(unittest.TestCase):
             index
             for index, (task, task_params) in enumerate(zip(tasks, params))
             if task.task_name == "arista_daemon_control"
-            and task_params.get("daemon_name") == "Bgp"
+            and task_params.get("daemon_name") == "Bgpcpp"
             and task_params.get("action") == "enable"
         ]
         self.assertEqual(len(flag_indices), 1)
@@ -346,7 +346,8 @@ class Sc6ThriftTimeoutTest(unittest.TestCase):
             task
             for task in tasks
             if task.task_name == "arista_daemon_control"
-            and json.loads(task.params.json_params or "{}").get("daemon_name") == "Bgp"
+            and json.loads(task.params.json_params or "{}").get("daemon_name")
+            == "Bgpcpp"
             and json.loads(task.params.json_params or "{}").get("action") == "enable"
         )
         with self.assertRaisesRegex(ValueError, "must precede"):
@@ -367,7 +368,8 @@ class Sc6ThriftTimeoutTest(unittest.TestCase):
             task
             for task in tasks
             if task.task_name == "arista_daemon_control"
-            and json.loads(task.params.json_params or "{}").get("daemon_name") == "Bgp"
+            and json.loads(task.params.json_params or "{}").get("daemon_name")
+            == "Bgpcpp"
             and json.loads(task.params.json_params or "{}").get("action") == "enable"
         )
         unrelated_tasks = [
@@ -402,7 +404,8 @@ class Sc6ThriftTimeoutTest(unittest.TestCase):
             task
             for task in tasks
             if task.task_name == "arista_daemon_control"
-            and json.loads(task.params.json_params or "{}").get("daemon_name") == "Bgp"
+            and json.loads(task.params.json_params or "{}").get("daemon_name")
+            == "Bgpcpp"
             and json.loads(task.params.json_params or "{}").get("action") == "enable"
         )
         unrelated_task = taac_types.Task(
@@ -436,7 +439,7 @@ class Sc6ThriftTimeoutTest(unittest.TestCase):
 
 
 class Sc6DaemonRestartBudgetTest(unittest.TestCase):
-    """Pin how many times setup cycles the Bgp daemon.
+    """Pin how many times setup cycles the Bgpcpp daemon.
 
     Every restart is minutes of wall clock and a chance to land in the
     out-of-order-init state (bgpd restarted independently of FibAgentBgp) that
@@ -455,7 +458,7 @@ class Sc6DaemonRestartBudgetTest(unittest.TestCase):
         bgp_actions = [
             p.get("action")
             for p in _params_for(_SC6, "arista_daemon_control")
-            if p.get("daemon_name") == "Bgp"
+            if p.get("daemon_name") == "Bgpcpp"
         ]
         self.assertEqual(bgp_actions.count("enable"), 2, f"actions={bgp_actions}")
 
@@ -513,9 +516,9 @@ class Sc6UpdateGroupEnablementTest(unittest.TestCase):
 
     def test_bgp_restarts_after_config_deployment(self) -> None:
         daemon_tasks = _params_for(_SC6, "arista_daemon_control")
-        bgp_tasks = [p for p in daemon_tasks if p.get("daemon_name") == "Bgp"]
+        bgp_tasks = [p for p in daemon_tasks if p.get("daemon_name") == "Bgpcpp"]
         self.assertGreaterEqual(
-            len(bgp_tasks), 2, "Expected disable + enable Bgp daemon tasks"
+            len(bgp_tasks), 2, "Expected disable + enable Bgpcpp daemon tasks"
         )
 
     def test_postcheck_drain_preserves_sessions_at_bounded_scale(self) -> None:

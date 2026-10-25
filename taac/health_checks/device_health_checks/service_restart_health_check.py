@@ -545,7 +545,7 @@ class ServiceRestartHealthCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthChe
 
         # Legacy daemon-based check (for backward compatibility)
         if use_daemon_check:
-            daemons = check_params.get("services", ["Bgp", "FibBgp", "FibAgent"])
+            daemons = check_params.get("services", ["Bgpcpp", "FibBgp", "FibAgent"])
             duration_since_restart = None
             if expected_restarted_services and restart_start_time is not None:
                 duration_since_restart = current_time - int(restart_start_time)

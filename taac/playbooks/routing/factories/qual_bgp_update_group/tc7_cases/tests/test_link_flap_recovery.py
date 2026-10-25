@@ -237,7 +237,9 @@ class LinkFlapRecoveryPlaybookTest(TestCase):
                 if payload.get("expected_group_count") == 4
             )
             self.assertEqual(["IDLE"], exact_group["expected_group_states"])
-        self.assertTrue(any(payload.get("services") == ["Bgp"] for payload in payloads))
+        self.assertTrue(
+            any(payload.get("services") == ["Bgpcpp"] for payload in payloads)
+        )
         periodic_by_name = {task.name: task for task in playbook.periodic_tasks}
         self.assertEqual(30, periodic_by_name["bgpd_cpu_load_average_check"].interval)
         self.assertTrue(

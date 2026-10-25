@@ -79,14 +79,14 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
         # Open-R dependencies are restarted first.
         self.assertEqual(
             BGPCPP_DAEMONS[-1],
-            "Bgp",
+            "Bgpcpp",
             "Bgp must be the LAST entry in BGPCPP_DAEMONS so FibAgentBgp (and the "
             "other FIB/Open-R agents) are restarted before it",
         )
         for dep in ("FibAgent", "FibAgentBgp"):
             self.assertLess(
                 BGPCPP_DAEMONS.index(dep),
-                BGPCPP_DAEMONS.index("Bgp"),
+                BGPCPP_DAEMONS.index("Bgpcpp"),
                 f"{dep} must come before Bgp in BGPCPP_DAEMONS",
             )
 
@@ -116,7 +116,7 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
             BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
         ):
             tasks = _get_control_plane_tasks(device_name=_DEVICE, profile=profile)
-            bgp_enable = _first_enable_index(tasks, "Bgp")
+            bgp_enable = _first_enable_index(tasks, "Bgpcpp")
             self.assertGreaterEqual(bgp_enable, 0, f"Bgp must be enabled ({profile})")
             for dep in _FIB_DEPENDENCY_DAEMONS:
                 dep_enable = _first_enable_index(tasks, dep)
@@ -142,7 +142,7 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
             + [(daemon, "enable") for daemon in BGPCPP_DAEMONS],
             daemon_actions,
         )
-        for daemon in ("FibAgent", "FibAgentBgp", "Openr", "Bgp"):
+        for daemon in ("FibAgent", "FibAgentBgp", "Openr", "Bgpcpp"):
             self.assertEqual(
                 ["disable", "enable"],
                 [action for name, action in daemon_actions if name == daemon],
@@ -156,7 +156,7 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
         )
         daemon_actions = _daemon_actions(tasks)
 
-        for daemon in ("FibAgent", "FibAgentBgp", "Bgp"):
+        for daemon in ("FibAgent", "FibAgentBgp", "Bgpcpp"):
             self.assertEqual(
                 ["disable", "enable", "disable", "enable"],
                 [action for name, action in daemon_actions if name == daemon],
@@ -222,13 +222,13 @@ class BgpEbbDaemonRestartOrderTest(unittest.TestCase):
                     "arista_daemon_control task is missing JSON parameters"
                 )
             params = json.loads(json_params)
-            if params["daemon_name"] == "Bgp" and params["action"] == "enable":
+            if params["daemon_name"] == "Bgpcpp" and params["action"] == "enable":
                 bgp_enable_indices.append(index)
         last_bgp_enable_index = max(bgp_enable_indices)
         self.assertEqual(1, len(validators))
         validator_index = tasks.index(validators[0])
 
-        for daemon in ("FibAgent", "FibAgentBgp", "Bgp"):
+        for daemon in ("FibAgent", "FibAgentBgp", "Bgpcpp"):
             self.assertEqual(
                 ["disable", "enable"],
                 [action for name, action in daemon_actions if name == daemon],

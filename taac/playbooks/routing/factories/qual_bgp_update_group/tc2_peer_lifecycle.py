@@ -48,7 +48,7 @@ from taac.test_as_a_config.types import (
 )
 
 
-_CRASH_GATE_SERVICES: t.List[str] = ["Bgp", "FibAgent", "FibAgentBgp"]
+_CRASH_GATE_SERVICES: t.List[str] = ["Bgpcpp", "FibAgent", "FibAgentBgp"]
 _CRASH_GATE_DAEMONS: t.List[str] = ["FibBgpGrpc"]
 
 # Spec 2.2.3 leak gate: max allowed memory growth over the churn run (200 MB).

@@ -150,7 +150,7 @@ from taac.test_as_a_config.types import (
 
 def create_bgp_restart_test_stage(
     device_name: str,
-    daemon_name: str = "Bgp",
+    daemon_name: str = "Bgpcpp",
     sleep_after_disable_seconds: int = 5,
     convergence_wait_seconds: int = 540,
     device_group_regex: str = ".*",
@@ -181,7 +181,7 @@ def create_bgp_restart_test_stage(
 
     Args:
         device_name: Name of the device
-        daemon_name: Name of the daemon to restart (default: "Bgp")
+        daemon_name: Name of the daemon to restart (default: "Bgpcpp")
         sleep_after_disable_seconds: Sleep duration after disabling daemon
         convergence_wait_seconds: Wait time for BGP convergence (default: 540s)
         device_group_regex: Regex pattern for device groups to enable
@@ -346,7 +346,7 @@ def create_bgp_restart_test_stage(
 
 def create_cold_start_test_stage(
     device_name: str,
-    daemon_name: str = "Bgp",
+    daemon_name: str = "Bgpcpp",
     sleep_after_disable_seconds: int = 30,
     convergence_wait_seconds: int = 500,
     device_group_regex: str = ".*",
@@ -386,7 +386,7 @@ def create_cold_start_test_stage(
 
     Args:
         device_name: Name of the device
-        daemon_name: Name of the daemon to cold start (default: "Bgp")
+        daemon_name: Name of the daemon to cold start (default: "Bgpcpp")
         sleep_after_disable_seconds: Sleep duration after disabling daemon
         convergence_wait_seconds: Wait time for BGP initialization without sessions
         device_group_regex: Regex pattern for device groups to enable for cold start

@@ -162,7 +162,7 @@ class ConfigureBgpcppStartupTask(BaseTask):
             raise ValueError(
                 "restart_bgp=True is not supported in managed-shell mode: the "
                 "flags are written to run_bgpcpp.sh but bgpd is never restarted, "
-                "so they take no effect. Order this task before an existing Bgp "
+                "so they take no effect. Order this task before an existing Bgpcpp "
                 "enable or add an explicit daemon-control task after it."
             )
 

@@ -235,7 +235,9 @@ class PeerFlappingPlaybookTest(TestCase):
         self.assertTrue(
             any(payload.get("vmhwm_threshold") == 9_999_999_999 for payload in payloads)
         )
-        self.assertTrue(any(payload.get("services") == ["Bgp"] for payload in payloads))
+        self.assertTrue(
+            any(payload.get("services") == ["Bgpcpp"] for payload in payloads)
+        )
         periodic_by_name = {task.name: task for task in playbook.periodic_tasks}
         self.assertEqual(30, periodic_by_name["bgpd_cpu_load_average_check"].interval)
         self.assertTrue(

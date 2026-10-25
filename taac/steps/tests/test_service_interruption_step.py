@@ -158,11 +158,11 @@ class TestServiceInterruptionStep(_ServiceInterruptionStepFixture):
         input_data = taac_types.ServiceInterruptionInput(
             name=taac_types.Service.ARISTA_CUSTOM_AGENTS,
             trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
-            agents=["Rib", "Bgp"],
+            agents=["Rib", "Bgpcpp"],
         )
         await self.si_step.run(input_data, {})
         call_args = self.driver_mock.async_restart_service.call_args
-        self.assertEqual(call_args[0][1], ["Rib", "Bgp"])
+        self.assertEqual(call_args[0][1], ["Rib", "Bgpcpp"])
 
     def test_service_factory_fboss_service(self):
         """Test service_factory returns correct FbossSystemctlServiceName."""

@@ -179,7 +179,7 @@ def create_bgp_ug_new_peer_join_full_sync_resilience_playbook(
             anchor_route_count=expected_after_inject_50,
         ),
         create_service_restart_check(
-            services=["Bgp"],
+            services=["Bgpcpp"],
             daemons=["FibBgpGrpc"],
         ),
         create_bgp_stale_route_check(),
@@ -421,7 +421,7 @@ def create_bgp_ug_new_peer_join_routes_withdrawn_playbook(
             anchor_route_count=b_keep_route_count,
         ),
         create_service_restart_check(
-            services=["Bgp"],
+            services=["Bgpcpp"],
             daemons=["FibBgpGrpc"],
         ),
         create_bgp_stale_route_check(),
@@ -604,7 +604,7 @@ def create_bgp_ug_new_peer_join_attribute_change_playbook(
             },
         ),
         create_service_restart_check(
-            services=["Bgp"],
+            services=["Bgpcpp"],
             daemons=["FibBgpGrpc"],
         ),
         create_bgp_stale_route_check(),
@@ -1087,7 +1087,7 @@ def create_bgp_ug_add_peer_dynamic_playbook(
                 expected_established_sessions=1,
             ),
             create_service_restart_check(
-                services=["Bgp"],
+                services=["Bgpcpp"],
                 daemons=["FibBgpGrpc"],
             ),
             create_bgp_stale_route_check(),

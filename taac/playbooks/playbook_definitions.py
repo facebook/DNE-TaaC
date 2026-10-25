@@ -2557,7 +2557,7 @@ def create_case1_tcp_socket_data_collection_playbook(
                         task_name="arista_daemon_control",
                         params_dict={
                             "hostname": bgpcpp_device,
-                            "daemon_name": "Bgp",
+                            "daemon_name": "Bgpcpp",
                             "action": "disable",
                         },
                     ),
@@ -2565,7 +2565,7 @@ def create_case1_tcp_socket_data_collection_playbook(
                         task_name="arista_daemon_control",
                         params_dict={
                             "hostname": bgpcpp_device,
-                            "daemon_name": "Bgp",
+                            "daemon_name": "Bgpcpp",
                             "action": "enable",
                         },
                     ),
@@ -3516,7 +3516,7 @@ def create_case2_tcp_socket_data_collection_playbook(
                         task_name="arista_daemon_control",
                         params_dict={
                             "hostname": bgpcpp_device,
-                            "daemon_name": "Bgp",
+                            "daemon_name": "Bgpcpp",
                             "action": "disable",
                         },
                     ),
@@ -3524,7 +3524,7 @@ def create_case2_tcp_socket_data_collection_playbook(
                         task_name="arista_daemon_control",
                         params_dict={
                             "hostname": bgpcpp_device,
-                            "daemon_name": "Bgp",
+                            "daemon_name": "Bgpcpp",
                             "action": "enable",
                         },
                     ),

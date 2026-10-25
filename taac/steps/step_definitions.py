@@ -5290,7 +5290,7 @@ def create_ixia_device_group_toggle_step(
 
 def create_daemon_control_step(
     device_name: str,
-    daemon_name: str = "Bgp",
+    daemon_name: str = "Bgpcpp",
     action: str = "enable",
     description: t.Optional[str] = None,
 ) -> Step:
@@ -8652,7 +8652,7 @@ def create_standard_setup_steps(
     disable_all_device_groups: bool = True,
     enable_all_device_groups: bool = False,
     enable_bgp_daemon: bool = True,
-    daemon_name: str = "Bgp",
+    daemon_name: str = "Bgpcpp",
     validate_device_group_toggle: bool = False,
 ) -> t.List[Step]:
     """
@@ -9129,7 +9129,7 @@ def create_policy_evaluation_point_steps(
     steps: list[Step] = [
         create_daemon_control_step(
             device_name=device_name,
-            daemon_name="Bgp",
+            daemon_name="Bgpcpp",
             action="disable",
             description=f"Reset BGP policy counters for {arm} {prefix_count:,}",
         )
@@ -9204,7 +9204,7 @@ def create_policy_evaluation_point_steps(
         [
             create_daemon_control_step(
                 device_name=device_name,
-                daemon_name="Bgp",
+                daemon_name="Bgpcpp",
                 action="enable",
                 description=f"Start BGP for {arm} {prefix_count:,} measurement",
             ),
@@ -9272,7 +9272,7 @@ def create_sc_8_steps(
         List of test steps
     """
     steps = []
-    daemon_name = "Bgp"
+    daemon_name = "Bgpcpp"
 
     steps.append(
         create_daemon_control_step(

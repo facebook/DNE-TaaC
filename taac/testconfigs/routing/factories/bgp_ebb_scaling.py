@@ -1463,13 +1463,13 @@ def create_bgp_ebb_scaling_bounded_ecmp_sets_test_config(
             [
                 create_arista_daemon_control_task(
                     hostname=device_name,
-                    daemon_name="Bgp",
+                    daemon_name="Bgpcpp",
                     action="disable",
                     ixia_needed=True,
                 ),
                 create_arista_daemon_control_task(
                     hostname=device_name,
-                    daemon_name="Bgp",
+                    daemon_name="Bgpcpp",
                     action="enable",
                     ixia_needed=True,
                 ),

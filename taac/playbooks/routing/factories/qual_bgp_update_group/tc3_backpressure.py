@@ -236,7 +236,7 @@ def _ug_backpressure_common_postchecks(
     """
     checks: t.List[PointInTimeHealthCheck] = [
         create_service_restart_check(
-            services=["Bgp"],
+            services=["Bgpcpp"],
             daemons=["FibBgpGrpc"],
         ),
         create_bgp_stale_route_check(),
@@ -244,7 +244,7 @@ def _ug_backpressure_common_postchecks(
         # delta the HC SKIPs on ARISTA_FBOSS devices. 2 GiB is a conservative
         # growth ceiling.
         create_memory_utilization_check(
-            threshold_by_service={"Bgp": memory_threshold_bytes},
+            threshold_by_service={"Bgpcpp": memory_threshold_bytes},
             start_time_jq_var="test_case_start_time",
             delta=2 * (1024**3),
         ),
@@ -258,7 +258,7 @@ def _ug_backpressure_common_postchecks(
         checks.append(
             create_log_parsing_check(
                 json_params={
-                    "agent_name": "Bgp",
+                    "agent_name": "Bgpcpp",
                     "exclude_regex": "Memory Limit Reached",
                 },
                 start_time_jq_var="test_case_start_time",

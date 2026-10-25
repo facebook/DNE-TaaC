@@ -25,7 +25,10 @@ if not TAAC_OSS:
     from neteng.netcastle.utils.paramiko_utils import ParamikoClient
 
 from neteng.fboss.ctrl.types import PortInfoThrift
-from taac.constants import ARISTA_DAEMON_EXEC_SCRIPTS
+from taac.constants import (
+    ARISTA_DAEMON_EXEC_SCRIPTS,
+    RENAMED_ARISTA_DAEMONS,
+)
 from taac.driver.driver_constants import (
     DNE_TEST_REGRESSION_NAME,
     FbossSystemctlServiceName,
@@ -1582,7 +1585,7 @@ class AristaDaemonControlTask(BaseTask):
     - Disable any daemon (shutdown existing "daemon <name>")
     - Check current daemon status
 
-    Supports daemons like: Bgp, FibAgent, FibAgentBgp, etc.
+    Supports daemons like: Bgpcpp, FibAgent, FibAgentBgp, etc.
     """
 
     NAME = "arista_daemon_control"
@@ -1595,7 +1598,7 @@ class AristaDaemonControlTask(BaseTask):
             params: Dictionary containing:
                 - hostname: Device hostname (required)
                 - action: "enable" or "disable" (required)
-                - daemon_name: Name of the daemon (required) - e.g., "Bgp", "FibAgent", "FibAgentBgp"
+                - daemon_name: Name of the daemon (required) - e.g., "Bgpcpp", "FibAgent", "FibAgentBgp"
                 - exec_script: Path to execution script (optional, uses default if not provided)
         """
         hostname = params["hostname"]
@@ -1615,6 +1618,7 @@ class AristaDaemonControlTask(BaseTask):
         driver = await async_get_device_driver(hostname)
 
         if action == "enable":
+            await self._remove_renamed_daemons(driver, daemon_name)
             await self._enable_daemon(driver, daemon_name, exec_script)
         elif action == "disable":
             await self._disable_daemon(driver, daemon_name)
@@ -1747,6 +1751,20 @@ class AristaDaemonControlTask(BaseTask):
         if "no shutdown" not in normalized:
             return False
         return exec_script is None or f"exec {exec_script}" in normalized
+
+    async def _remove_renamed_daemons(self, driver, daemon_name: str) -> None:
+        """Remove stanzas left under a daemon's previous name.
+
+        Devices configured before a rename still carry the old stanza; leaving
+        it would run a second copy of the same binary next to the new daemon.
+        """
+        for old_name in RENAMED_ARISTA_DAEMONS.get(daemon_name, ()):
+            if not await self._check_daemon_exists(driver, old_name):
+                continue
+            self.logger.info(f"Removing daemon {old_name}: renamed to {daemon_name}")
+            await driver.async_execute_show_or_configure_cmd_on_shell(
+                f"no daemon {old_name}", configure=True
+            )
 
     async def _enable_daemon(
         self, driver, daemon_name: str, exec_script: t.Optional[str] = None

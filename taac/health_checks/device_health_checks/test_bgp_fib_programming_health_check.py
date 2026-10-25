@@ -53,7 +53,7 @@ class BgpFibProgrammingCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, hc_types.HealthCheckStatus.PASS)
         archived_logs.assert_awaited_once_with(
             self.health_check.driver,
-            "Bgp",
+            "Bgpcpp",
             "26775",
             start_time=100,
             end_time=200,

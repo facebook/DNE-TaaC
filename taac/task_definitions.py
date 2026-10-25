@@ -1292,7 +1292,7 @@ def create_ixia_modify_communities_task(
 
 def create_arista_daemon_control_task(
     hostname: str,
-    daemon_name: str = "Bgp",
+    daemon_name: str = "Bgpcpp",
     action: str = "enable",
     ixia_needed: bool = False,
 ) -> Task:
@@ -1301,7 +1301,7 @@ def create_arista_daemon_control_task(
 
     Args:
         hostname: Hostname of the Arista device
-        daemon_name: Name of the daemon (default: "Bgp")
+        daemon_name: Name of the daemon (default: "Bgpcpp")
         action: Action to perform ("enable", "disable", "restart")
         ixia_needed: If True, task runs after IXIA setup (default: False).
             BGP++ conveyor configs set this to True so daemon enable runs

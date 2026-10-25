@@ -1482,7 +1482,7 @@ class PerformanceScalingNexthopResolutionGflagTest(unittest.TestCase):
             index
             for index, task in enumerate(config.setup_tasks or [])
             if task.task_name == "arista_daemon_control"
-            and _task_json_params(task).get("daemon_name") == "Bgp"
+            and _task_json_params(task).get("daemon_name") == "Bgpcpp"
             and _task_json_params(task).get("action") == "enable"
         ]
         self.assertEqual(1, len(flag_indices))
@@ -1535,7 +1535,7 @@ class PerformanceScalingNexthopResolutionGflagTest(unittest.TestCase):
             index
             for index, task in enumerate(tasks)
             if task.task_name == "arista_daemon_control"
-            and _task_json_params(task).get("daemon_name") == "Bgp"
+            and _task_json_params(task).get("daemon_name") == "Bgpcpp"
             and _task_json_params(task).get("action") == "enable"
         ]
         shell_commands = [

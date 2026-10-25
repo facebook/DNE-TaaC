@@ -56,7 +56,7 @@ class OpenRDaemonGatingTest(unittest.TestCase):
         )
 
     def test_bgp_daemon_unaffected_by_gating(self) -> None:
-        # Sanity: the Open/R gating must not change the Bgp daemon handling.
+        # Sanity: the Open/R gating must not change the Bgpcpp daemon handling.
         # Bgp is bounced in the main daemon loop and again in the post-ACL
         # restart loop, for both profiles.
         for profile in (
@@ -64,6 +64,6 @@ class OpenRDaemonGatingTest(unittest.TestCase):
             BgpPlusPlusProfile.BGP_PLUS_PLUS_WITH_OPEN_R,
         ):
             tasks = _get_control_plane_tasks(device_name=_DEVICE, profile=profile)
-            bgp_actions = _daemon_actions(tasks, "Bgp")
+            bgp_actions = _daemon_actions(tasks, "Bgpcpp")
             self.assertIn("enable", bgp_actions, f"Bgp must be enabled ({profile})")
             self.assertIn("disable", bgp_actions, f"Bgp must be disabled ({profile})")

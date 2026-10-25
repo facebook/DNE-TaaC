@@ -1178,13 +1178,13 @@ def _characteristic_setup_suffix_phases(
             tasks=(
                 create_arista_daemon_control_task(
                     hostname=device_name,
-                    daemon_name="Bgp",
+                    daemon_name="Bgpcpp",
                     action="disable",
                     ixia_needed=True,
                 ),
                 create_arista_daemon_control_task(
                     hostname=device_name,
-                    daemon_name="Bgp",
+                    daemon_name="Bgpcpp",
                     action="enable",
                     ixia_needed=True,
                 ),
@@ -4188,7 +4188,7 @@ def _ebb_component_runtime_plan(
     dependencies = {
         "FibAgent": ("FibGrpc",),
         "FibAgentBgp": ("FibBgpGrpc",),
-        "Bgp": (
+        "Bgpcpp": (
             "FibAgent",
             "FibAgentBgp",
             *(("Openr",) if openr_inputs.mode is not OpenRMode.NONE else ()),
@@ -4197,7 +4197,7 @@ def _ebb_component_runtime_plan(
     startup_options = (
         (
             ComponentStartupOption(
-                component="Bgp",
+                component="Bgpcpp",
                 name="bgp_resolve_nexthops_from_interface_state",
                 value="true",
             ),

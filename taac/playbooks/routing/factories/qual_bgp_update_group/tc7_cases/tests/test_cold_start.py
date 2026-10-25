@@ -446,14 +446,14 @@ class ColdStartPlaybookTest(TestCase):
         restart_checks = [
             (check, payload)
             for check, payload in checks_with_payloads
-            if payload.get("services") == ["Bgp"]
+            if payload.get("services") == ["Bgpcpp"]
             and payload.get("daemons") == ["FibBgpGrpc"]
         ]
         self.assertEqual(2, len(restart_checks))
         intentional = next(
             item
             for item in restart_checks
-            if item[1].get("expected_restarted_services") == ["Bgp"]
+            if item[1].get("expected_restarted_services") == ["Bgpcpp"]
         )
         post_restart = next(
             item

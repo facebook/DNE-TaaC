@@ -401,7 +401,7 @@ def _postchecks(
     )
     if not any(_guards_bgp_and_fibbgpgrpc(check) for check in case_aware_checks):
         bounded.append(
-            create_service_restart_check(services=["Bgp"], daemons=["FibBgpGrpc"])
+            create_service_restart_check(services=["Bgpcpp"], daemons=["FibBgpGrpc"])
         )
     return bounded
 
@@ -470,7 +470,7 @@ def _guards_bgp_and_fibbgpgrpc(check: PointInTimeHealthCheck) -> bool:
     daemons = payload.get("daemons")
     return (
         isinstance(services, list)
-        and "Bgp" in services
+        and "Bgpcpp" in services
         and isinstance(daemons, list)
         and "FibBgpGrpc" in daemons
     )

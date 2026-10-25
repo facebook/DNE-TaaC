@@ -684,7 +684,7 @@ def _eos_routing_daemons() -> tuple[EosRoutingDaemonIntent, ...]:
         ),
         EosRoutingDaemonIntent(name="Openr", enabled=False),
         EosRoutingDaemonIntent(
-            name="Bgp",
+            name="Bgpcpp",
             enabled=True,
             dependencies=("FibAgent", "FibAgentBgp"),
         ),
@@ -694,7 +694,7 @@ def _eos_routing_daemons() -> tuple[EosRoutingDaemonIntent, ...]:
 def _eos_routing_startup_options() -> tuple[EosRoutingStartupOptionIntent, ...]:
     return (
         EosRoutingStartupOptionIntent(
-            daemon="Bgp",
+            daemon="Bgpcpp",
             name="bgp_resolve_nexthops_from_interface_state",
             value="true",
         ),

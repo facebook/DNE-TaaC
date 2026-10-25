@@ -93,7 +93,7 @@ class BgpEbbStateGuardTasksTest(unittest.TestCase):
         )
 
         restore = _params(teardown_tasks[0])
-        self.assertEqual(["Bgp"], restore["force_restart_daemons"])
+        self.assertEqual(["Bgpcpp"], restore["force_restart_daemons"])
         self.assertEqual(
             [
                 {

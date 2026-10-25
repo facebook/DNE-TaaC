@@ -348,7 +348,7 @@ def _daemon_restart(ctx: ProfileContext) -> ProfileChecks:
             expected_established_session_count=(
                 ctx.expected_established_sessions or None
             ),
-            expected_restarted_services=["Bgp"],
+            expected_restarted_services=["Bgpcpp"],
             restart_start_time_jq_var="daemon_restart_time",
             bgp_mon=ctx.bgp_mon,
         ),
@@ -428,7 +428,7 @@ def _cold_start(ctx: ProfileContext) -> ProfileChecks:
             expected_established_session_count=(
                 ctx.expected_established_sessions or None
             ),
-            expected_restarted_services=["Bgp"],
+            expected_restarted_services=["Bgpcpp"],
             restart_start_time_jq_var="daemon_restart_time",
             bgp_mon=ctx.bgp_mon,
         ),
