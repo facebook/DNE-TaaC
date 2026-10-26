@@ -909,6 +909,29 @@ _TRACED_REQUEST_OWNER: str = "_taac_ixia_request_wrapper_owner"
 # cannot turn diagnostic collection into a test-length stall.
 _APP_ERRORS_FETCH_TIMEOUT_SECONDS: int = 15
 
+# 100G NRZ is the one Ethernet rate where FEC is optional, so IxNetwork's IEEE L1
+# defaults run it with FEC off, while FBOSS 100G NRZ profiles (`..._RS528_...`)
+# expect RS-FEC (CL91). The optics lock but the DUT never finds FEC alignment, so
+# the link stays down. PAM4 rates always run RS-FEC (RS544) and are unaffected.
+_NRZ_100G_SPEED: str = "speed100g"
+# Resource group modes that predate the explicit NRZ/PAM4 naming but only run
+# 100G as 4x25G NRZ.
+_LEGACY_NRZ_100G_RESOURCE_MODES: t.FrozenSet[str] = frozenset(
+    {
+        "hundredGigNonFanOut",
+        "novusHundredGigNonFanOut",
+        "novusHundredGigNonFanOutHighStream",
+        "novus5GOneByHundredGigNonFanOut",
+        "novus5GOneByHundredGigNonFanOutHighStream",
+    }
+)
+_VPORT_LINK_UP_STATE: str = "connectedLinkUp"
+# How long a 100G NRZ port gets to link up, first on IEEE defaults and then on
+# RS-FEC. A matching FEC links up within seconds; this only bounds a DUT port
+# that is down for an unrelated reason, which costs at most two windows.
+_NRZ_100G_FEC_LINK_WAIT_SECONDS: int = 30
+_NRZ_100G_FEC_LINK_POLL_SECONDS: int = 2
+
 
 def cap_timeout_at_deadline(existing_timeout: t.Any, remaining: float) -> t.Any:
     """Cap a `requests` timeout at the seconds left on the current deadline.
@@ -1156,6 +1179,7 @@ class Ixia:
     _current_playbook_name: t.Optional[str] = None
     _current_testconfig_name: t.Optional[str] = None
     _defer_traffic_preparation: bool = False
+    auto_nrz_100g_rs_fec: bool = True
 
     def __init__(
         self,
@@ -1177,6 +1201,7 @@ class Ixia:
         username: t.Optional[str] = API_SERVER_USERNAME,
         ixia_recovery: t.Optional[t.Any] = None,
         trace_api_calls: bool = False,
+        auto_nrz_100g_rs_fec: bool = True,
     ) -> None:
         """Instantiates the object of class Ixia
 
@@ -1255,6 +1280,11 @@ class Ixia:
                 (see `ixia_tracer.py`). The file path is logged at construction
                 and exposed via the `api_tracer` property so the caller can
                 publish it once the run is over.
+
+            auto_nrz_100g_rs_fec: After assigning ports, enable RS-FEC (CL91)
+                on 100G NRZ ports that are still on IEEE L1 defaults and do not
+                link up, and revert any that still stay down. See
+                `configure_nrz_100g_rs_fec`.
         """
 
         self.logger = logger if logger else get_logger()
@@ -1281,6 +1311,7 @@ class Ixia:
         # By default, we will NOT let the automation to grab IXIA ports
         # that is already reserved
         self.force_take_port_ownership: bool = force_take_port_ownership
+        self.auto_nrz_100g_rs_fec = auto_nrz_100g_rs_fec
         self.cleanup_config: bool = cleanup_config
         self.teardown_session: bool = teardown_session
 
@@ -2381,6 +2412,132 @@ class Ixia:
             f"{_GREEN}{_BOLD}[IXIA]{_RESET} All ports reserved in "
             f"{_YELLOW}{elapsed_time:.1f}s{_RESET}"
         )
+
+    def configure_nrz_100g_rs_fec(
+        self, port_configs: t.Sequence[ixia_types.PortConfig]
+    ) -> None:
+        """Bring up 100G NRZ ports whose DUT expects RS-FEC.
+
+        IEEE L1 defaults run 100G NRZ with FEC off. Ports on those defaults
+        that do not link up get RS-FEC (CL91); ports that still stay down are
+        put back on IEEE defaults, so a DUT that runs without FEC, or a port
+        that is down for another reason, ends up exactly where it started.
+        Ports that are already up, run PAM4, or carry test-specific L1 settings
+        are never touched. Best effort: a failure here only logs.
+        """
+        if not self.auto_nrz_100g_rs_fec or self.is_uhd_chassis:
+            return
+        candidates: t.List["Vport"] = []
+        for port_config in port_configs:
+            desired_vport_name = DESIRED_VPORT_NAME.format(
+                port_identifier=self.get_port_identifier(port_config.port_name)
+            )
+            try:
+                vport = self.ixnetwork.Vport.find(Name=desired_vport_name)
+                if self._is_nrz_100g_on_ieee_defaults(vport):
+                    candidates.append(vport)
+            except Exception as ex:
+                self.logger.debug(
+                    f"[IXIA] Skipping 100G NRZ FEC check for {desired_vport_name}: {ex}"
+                )
+        if not candidates:
+            return
+
+        up = self._wait_for_vports_link_up(candidates, _NRZ_100G_FEC_LINK_WAIT_SECONDS)
+        down = [vport for vport in candidates if vport.Name not in up]
+        if not down:
+            return
+        names = ", ".join(vport.Name for vport in down)
+        self.logger.info(
+            f"{_CYAN}[IXIA]{_RESET} 100G NRZ port(s) down on IEEE defaults "
+            f"(FEC off), trying RS-FEC: {names}"
+        )
+        try:
+            for vport in down:
+                self._set_l1_rs_fec(vport, enabled=True)
+            fixed = self._wait_for_vports_link_up(
+                down, _NRZ_100G_FEC_LINK_WAIT_SECONDS
+            )
+            for vport in down:
+                if vport.Name in fixed:
+                    self.logger.info(
+                        f"{_GREEN}[IXIA]{_RESET}   {vport.Name} up with RS-FEC (CL91)"
+                    )
+                else:
+                    self._set_l1_rs_fec(vport, enabled=False)
+                    self.logger.warning(
+                        f"{_YELLOW}[IXIA]{_RESET}   {vport.Name} still down with "
+                        "RS-FEC; restored IEEE L1 defaults"
+                    )
+        except Exception as ex:
+            self.logger.warning(f"[IXIA] 100G NRZ RS-FEC configuration failed: {ex}")
+
+    def _get_l1_speed_settings(self, vport: "Vport") -> t.Optional[t.Any]:
+        """Return the speed-specific L1 settings object of a vport.
+
+        `L1Config.CurrentType` names it, e.g. `aresOneM` -> `L1Config.AresOneM`.
+        The `Fcoe` variant of a type shares the settings object of the base type.
+        """
+        current_type = str(vport.L1Config.CurrentType or "")
+        if not current_type:
+            return None
+        attribute = (current_type[0].upper() + current_type[1:]).replace("Fcoe", "")
+        return getattr(vport.L1Config, attribute, None)
+
+    def _get_resource_group_mode(self, vport: "Vport") -> t.Optional[str]:
+        """Return the resource group mode of the physical port behind a vport."""
+        port_href = str(vport.ConnectedTo or "")
+        if "/port/" not in port_href:
+            return None
+        card = self.session.Session.GetObjectFromHref(port_href.rsplit("/port/", 1)[0])
+        if card is None:
+            return None
+        for aggregation in card.Aggregation.find():
+            if port_href in (aggregation.ActivePorts or []):
+                return aggregation.Mode
+        return card.AggregationMode
+
+    def _is_nrz_100g_on_ieee_defaults(self, vport: "Vport") -> bool:
+        settings = self._get_l1_speed_settings(vport)
+        if settings is None:
+            return False
+        if (
+            settings.Speed != _NRZ_100G_SPEED
+            or not settings.IeeeL1Defaults
+            or settings.EnableRsFec
+        ):
+            return False
+        mode = self._get_resource_group_mode(vport) or ""
+        return "NRZ" in mode or mode in _LEGACY_NRZ_100G_RESOURCE_MODES
+
+    def _set_l1_rs_fec(self, vport: "Vport", enabled: bool) -> None:
+        """Turn RS-FEC (CL91) on, or put the port back on IEEE L1 defaults."""
+        settings = none_throws(self._get_l1_speed_settings(vport))
+        if enabled:
+            settings.IeeeL1Defaults = False
+            settings.EnableRsFec = True
+        else:
+            settings.EnableRsFec = False
+            settings.IeeeL1Defaults = True
+
+    def _wait_for_vports_link_up(
+        self, vports: t.Sequence["Vport"], timeout_seconds: float
+    ) -> t.Set[str]:
+        """Poll until every vport links up or the timeout passes.
+
+        Returns the names of the vports that came up.
+        """
+        deadline = time.monotonic() + timeout_seconds
+        pending = list(vports)
+        up: t.Set[str] = set()
+        while True:
+            for vport in list(pending):
+                if vport.refresh().ConnectionState == _VPORT_LINK_UP_STATE:
+                    up.add(vport.Name)
+                    pending.remove(vport)
+            if not pending or time.monotonic() >= deadline:
+                return up
+            time.sleep(_NRZ_100G_FEC_LINK_POLL_SECONDS)
 
     def rehydrate_vport_indices(
         self, port_configs: t.Sequence[ixia_types.PortConfig]
@@ -8113,6 +8270,7 @@ class Ixia:
             _step_start = time.time()
             # pyrefly: ignore [bad-argument-type]
             self.assign_ports(port_configs)
+            self.configure_nrz_100g_rs_fec(port_configs or ())
             _log(
                 f"{_GREEN}[IXIA]{_RESET} Ports assigned in {time.time() - _step_start:.0f}s"
             )
