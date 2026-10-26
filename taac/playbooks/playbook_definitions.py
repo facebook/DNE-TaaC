@@ -16606,6 +16606,7 @@ def create_rbb_3x200g_zr_playbooks(
     traffic_item_name: str,
     iteration: int = 10,
     recovery_wait_s: int = 300,
+    control_plane_settle_s: int = 120,
     longevity_duration_s: int = 12 * 60 * 60,
     max_packet_loss_duration_ms: str = "25",
 ) -> t.List[Playbook]:
@@ -16659,7 +16660,7 @@ def create_rbb_3x200g_zr_playbooks(
             for device in devices
         }
 
-    def _recovery_checks() -> t.List[PointInTimeHealthCheck]:
+    def _link_recovery_checks() -> t.List[PointInTimeHealthCheck]:
         return [
             create_port_state_check(
                 additional_interfaces=_zr_member_interfaces(),
@@ -16673,8 +16674,15 @@ def create_rbb_3x200g_zr_playbooks(
                 json_params={
                     "port_channel_names": _port_channel_names(),
                     "expected_up": True,
+                    "retry_count": 30,
+                    "retry_delay_seconds": 10,
+                    "retry_delay_multiplier": 1.0,
                 }
             ),
+        ]
+
+    def _control_plane_checks() -> t.List[PointInTimeHealthCheck]:
+        return [
             create_openr_spark_neighbor_check(
                 expected_neighbor_count=1,
                 retry_count=30,
@@ -16689,6 +16697,30 @@ def create_rbb_3x200g_zr_playbooks(
                 retry_delay_multiplier=1.0,
             ),
         ]
+
+    def _recovery_checks() -> t.List[PointInTimeHealthCheck]:
+        return _link_recovery_checks() + _control_plane_checks()
+
+    def _routing_recovery_stage() -> Stage:
+        return create_steps_stage(
+            steps=[
+                create_validation_step(
+                    point_in_time_checks=_link_recovery_checks(),
+                    stage=ValidationStage.MID_TEST,
+                    description=(
+                        "Wait for both ends of the 3x200G ZR LAG to recover"
+                    ),
+                    fail_on_failure=True,
+                ),
+                create_longevity_step(
+                    duration=control_plane_settle_s,
+                    description=(
+                        "Allow Open/R, BGP, and IXIA forwarding to stabilize "
+                        "after ZR link recovery"
+                    ),
+                ),
+            ]
+        )
 
     def _packet_loss_check(
         *, clear_traffic_stats: bool
@@ -16760,7 +16792,8 @@ def create_rbb_3x200g_zr_playbooks(
             iteration=iteration,
             prechecks=_prechecks(),
             stages=[
-                create_steps_stage(steps=_member_flap_steps(device, method))
+                create_steps_stage(steps=_member_flap_steps(device, method)),
+                _routing_recovery_stage(),
             ],
             postchecks=_postchecks(),
             traffic_items_to_start=[traffic_item_name],
@@ -16788,7 +16821,8 @@ def create_rbb_3x200g_zr_playbooks(
                         )
                         for member in device["zr_members"]
                     ]
-                )
+                ),
+                _routing_recovery_stage(),
             ],
             postchecks=_postchecks(),
             traffic_items_to_start=[traffic_item_name],
@@ -16827,11 +16861,12 @@ def create_rbb_3x200g_zr_playbooks(
                         create_longevity_step(
                             duration=recovery_wait_s,
                             description=(
-                                "Wait for ZR links and control plane to settle"
+                                "Wait for the ZR optics to relock"
                             ),
                         ),
                     ]
-                )
+                ),
+                _routing_recovery_stage(),
             ],
             postchecks=_postchecks(clear_traffic_stats=clear_traffic_stats),
             traffic_items_to_start=[traffic_item_name],
@@ -16875,7 +16910,8 @@ def create_rbb_3x200g_zr_playbooks(
                             ),
                         ),
                     ]
-                )
+                ),
+                _routing_recovery_stage(),
             ],
             cleanup_steps=[
                 create_run_ssh_command_step(
