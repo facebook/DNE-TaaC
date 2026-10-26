@@ -221,6 +221,9 @@ NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG = (
         enable_update_group=True,
         name_override="NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG",
         parent_networks=BOUNDED_ECMP_PARENT_NETWORKS_IXIA03,
+        # DBG5 keepalive tracing filled nrqeb009's 6.3 GB /var/log tmpfs in one
+        # SC9 run; production EBB runs DBG1.
+        bgpcpp_logging_config_override="DBG1;default:async=true",
     )
 )
 

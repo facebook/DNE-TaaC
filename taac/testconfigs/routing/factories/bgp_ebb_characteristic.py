@@ -2960,6 +2960,7 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
     enable_update_group: bool = True,
     profile: BgpPlusPlusProfile = BgpPlusPlusProfile.BGP_PLUS_PLUS_WITHOUT_OPEN_R,
     parent_networks: dict[str, str] | None = None,
+    bgpcpp_logging_config_override: str | None = None,
 ) -> taac_types.TestConfig:
     """Build the SC9 bounded-ECMP characteristic config from DICE intent.
 
@@ -2999,6 +3000,12 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
         device_config_override=RoutingDeviceConfig(
             openr_mode=openr_mode_for_bgpcpp_profile(profile),
             update_group_enable=enable_update_group,
+            # None keeps the BOUNDED_ECMP topology's logging level.
+            **(
+                {"bgpcpp_logging_config_override": bgpcpp_logging_config_override}
+                if bgpcpp_logging_config_override is not None
+                else {}
+            ),
         ),
     )
     compiled = bound.compile()

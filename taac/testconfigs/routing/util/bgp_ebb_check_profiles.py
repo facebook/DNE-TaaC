@@ -42,6 +42,8 @@ import enum
 import typing as t
 
 from taac.abstractions.compatibility.legacy_ebb_binding import (
+    IXIA03_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
+    IXIA03_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
     IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1,
     IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1,
 )
@@ -103,9 +105,18 @@ from taac.test_as_a_config.types import PointInTimeHealthCheck, SnapshotHealthCh
 # entirely inside the fifth hextet -- so /80 is exact there.
 #
 # Net effect of the two masks: exactly the 256 eBGP sessions stay in scope.
+#
+# Both chassis are listed because SC9 runs on bag013 (ixia) and nrqeb009
+# (ixia03), and the profile is built without knowing which one it is bound to.
+# With only the ixia masks, nrqeb009 kept its 256 ixia03 iBGP mimic sessions in
+# scope and the drain failed its baseline with "512, expected 256". The ixia03
+# ranges have the same shape, so the same /80 and /23 masks apply, and neither
+# chassis' masks overlap the other's eBGP range.
 IBGP_MIMIC_PARENTS: t.List[str] = [
     f"{IXIA_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1}::/80",
     f"{IXIA_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1}.0/23",
+    f"{IXIA03_IBGP_IC_PARENT_NETWORK_V6_DC_PLANE1}::/80",
+    f"{IXIA03_IBGP_IC_PARENT_NETWORK_V4_DC_PLANE1}.0/23",
 ]
 
 # 128 eBGP peers per AFI, both AFIs -- the population the masks above leave in

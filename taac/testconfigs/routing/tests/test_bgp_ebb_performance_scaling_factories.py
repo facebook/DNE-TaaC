@@ -15,6 +15,7 @@ from taac.abstractions.compatibility.eos_bgpcpp_compatibility import (
     POLICY_EVALUATION_BGPCPP_STARTUP_FLAGS,
 )
 from taac.abstractions.eos_bgpcpp_setup_tasks import (
+    create_bgpcpp_logging_setup_task,
     POLICY_EVALUATION_SOURCE_CONFIG_PATH,
 )
 from taac.abstractions.physical_inventory import (
@@ -41,6 +42,7 @@ from taac.abstractions.topologies.separable_policy_evaluation import (
 )
 from taac.abstractions.topology import BgpPeerGroup
 from taac.constants import BgpPlusPlusProfile
+from taac.testconfigs.routing import cicd_ebb_int_tc
 from taac.testconfigs.routing.factories import (
     bgp_ebb_characteristic as characteristic_factory,
 )
@@ -55,6 +57,9 @@ from taac.testconfigs.routing.factories.bgp_ebb_characteristic import (
 from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_ingress_peer_scale_test_config,
     create_bgp_ebb_scaling_performance_test_config,
+)
+from taac.testconfigs.routing.util.bgp_ebb_constants import (
+    EBB_BGPCPP_LOGGING_CONFIG,
 )
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
     build_bgpcpp_peers_patch_shell_cmds,
@@ -775,6 +780,22 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
                             inventory,
                             parent_networks=incomplete_networks,
                         )
+
+    def test_nrqeb009_sc9_runs_bgpcpp_at_dbg1(self) -> None:
+        commands = [
+            command
+            for task in cicd_ebb_int_tc.NRQEB009_SC9_BOUNDED_ECMP_SETS_TEST_CONFIG_UG.setup_tasks
+            or []
+            if task.task_name == "run_commands_on_shell"
+            for command in json.loads(task.params.json_params or "{}").get("cmds", [])
+        ]
+
+        def logging_command(logging_config: str) -> str:
+            task = create_bgpcpp_logging_setup_task("nrqeb009.ash6", logging_config)
+            return json.loads(task.params.json_params or "{}")["cmds"][0]
+
+        self.assertIn(logging_command("DBG1;default:async=true"), commands)
+        self.assertNotIn(logging_command(EBB_BGPCPP_LOGGING_CONFIG), commands)
 
     def test_nrqeb009_sc9_uses_primary_ixia03_addresses_and_ports(self) -> None:
         config = create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
