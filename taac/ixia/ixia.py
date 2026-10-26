@@ -8660,6 +8660,41 @@ class Ixia:
             bgp_peer.Stop(SessionIndices=f"1-{bgp_peer.Count}")
             bgp_peer.Start(SessionIndices=f"1-{bgp_peer.Count}")
 
+    def get_bgp_session_addresses(self, regex: str) -> t.List[str]:
+        """IXIA-side session addresses of every BGP peer whose name matches ``regex``."""
+        return [
+            str(ip_address(address))
+            for bgp_peer in self.find_bgp_peers(regex)
+            for address in bgp_peer.parent.Address.Values
+        ]
+
+    def restart_bgp_sessions(
+        self, regex: str, peer_addresses: t.Collection[str]
+    ) -> t.Dict[str, t.List[int]]:
+        """Stop then start only the sessions at ``peer_addresses``.
+
+        ``restart_bgp_peers`` bounces every session on a peer object; this
+        restarts just the listed indices so established siblings on the same
+        object keep their uptime. Returns the 1-based indices restarted per peer
+        name; addresses no matching peer emulates are ignored.
+        """
+        wanted = {ip_address(address) for address in peer_addresses}
+        restarted: t.Dict[str, t.List[int]] = {}
+        for bgp_peer in self.find_bgp_peers(regex):
+            indices = [
+                index
+                for index, address in enumerate(bgp_peer.parent.Address.Values, 1)
+                if ip_address(address) in wanted
+            ]
+            if not indices:
+                continue
+            session_indices = _bgp_session_indices_spec(indices)
+            bgp_peer.Stop(SessionIndices=session_indices)
+            bgp_peer.Start(SessionIndices=session_indices)
+            restarted[bgp_peer.Name] = indices
+        self.logger.info(f"Restarted BGP sessions {restarted} matching {regex!r}")
+        return restarted
+
     def find_ipv6s(
         self, regex: t.Optional[str] = None, ignore_case: bool = False
     ) -> t.List["Ipv6"]:

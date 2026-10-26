@@ -140,6 +140,7 @@ from taac.steps.step_definitions import (
     create_allocate_cgroup_memory_step,
     create_clear_port_stats_step,
     create_clear_traffic_stats_step,
+    create_bgp_ixia_session_recovery_step,
     create_custom_step,
     create_drain_undrain_step,
     create_ecmp_member_static_route_step,
@@ -31148,6 +31149,9 @@ _SC9_BASELINE_PREDICATE_TIMEOUT_SECONDS = 120.0
 # The poll does the waiting now. This is only enough for sessions to start
 # coming up so the first read is not certainly wasted; the stock default is 300.
 _SC9_SETUP_SETTLE_SECONDS = 60
+# Only the eBGP children carry the multipath width; the iBGP mimic peers are
+# expected to sit IDLE, so gating on them would fail every healthy run.
+_SC9_EBGP_IXIA_PEER_REGEX = r"BGP_PEER_IPV[46]_EBGP_SET\d+"
 
 
 def get_bgp_ebb_bounded_ecmp_sc9_playbook(
@@ -31305,7 +31309,16 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
             # Trimmed from the stock 300s because Stage A now polls: the wait
             # that matters is the one with a predicate behind it.
             convergence_wait_seconds=_SC9_SETUP_SETTLE_SECONDS,
-        ),
+        )
+        + [
+            # A peer that never establishes leaves Stage A one width short
+            # (125 vs 128) and fails as a baseline mismatch. Recovering or
+            # naming it here keeps that IXIA fault out of the SC9 verdict.
+            create_bgp_ixia_session_recovery_step(
+                device_name=device_name,
+                ixia_bgp_peer_regex=_SC9_EBGP_IXIA_PEER_REGEX,
+            ),
+        ],
         prechecks=profile_checks.prechecks,
         postchecks=profile_checks.postchecks,
         snapshot_checks=profile_checks.snapshot_checks,

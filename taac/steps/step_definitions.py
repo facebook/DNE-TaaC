@@ -557,6 +557,37 @@ def create_hardware_capacity_delta_step(
     )
 
 
+def create_bgp_ixia_session_recovery_step(
+    device_name: str,
+    ixia_bgp_peer_regex: str,
+    *,
+    initial_wait_seconds: int = 300,
+    restart_wait_seconds: int = 120,
+    poll_interval_seconds: int = 15,
+    max_restart_rounds: int = 3,
+    description: t.Optional[str] = None,
+) -> Step:
+    """Gate on every IXIA session matching the regex reaching ESTABLISHED,
+    restarting only the stuck sessions between bounded waits."""
+    if max_restart_rounds < 0:
+        raise ValueError("max_restart_rounds must be non-negative")
+    if min(initial_wait_seconds, restart_wait_seconds, poll_interval_seconds) <= 0:
+        raise ValueError("wait and poll intervals must be positive")
+    return create_custom_step(
+        params_dict={
+            "custom_step_name": "bgp_ixia_session_recovery",
+            "hostname": device_name,
+            "ixia_bgp_peer_regex": ixia_bgp_peer_regex,
+            "initial_wait_seconds": initial_wait_seconds,
+            "restart_wait_seconds": restart_wait_seconds,
+            "poll_interval_seconds": poll_interval_seconds,
+            "max_restart_rounds": max_restart_rounds,
+        },
+        description=description
+        or f"Wait for IXIA BGP sessions matching {ixia_bgp_peer_regex!r} to establish",
+    )
+
+
 def _validate_disruption_route_verifier(
     action: str,
     params: t.Mapping[str, t.Any],
