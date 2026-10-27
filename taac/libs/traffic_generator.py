@@ -985,7 +985,10 @@ class TrafficGenerator:
             if self.is_standalone:
                 port_configs.append(
                     self.create_standalone_port_config(
-                        endpoint_str, asset, logical_port_num
+                        endpoint_str,
+                        asset,
+                        logical_port_num,
+                        l1_config=basic_port_config.l1_config,
                     )
                 )
             elif basic_port_config.device_group_configs:
@@ -1057,6 +1060,7 @@ class TrafficGenerator:
         endpoint_str: str,
         ixia_asset: IxiaEndpointInfo,
         ixia_logical_port_num: int,
+        l1_config: t.Optional[ixia_types.L1Config] = None,
     ) -> ixia_types.PortConfig:
         ixia_starting_ip, prefix_v6, prefix_len = self.get_standalone_ip_fields(
             endpoint_str
@@ -1086,6 +1090,7 @@ class TrafficGenerator:
                 slot_number=int(ixia_asset.ixia_slot_num),
                 port_number=ixia_logical_port_num,
             ),
+            l1_config=l1_config,
             device_group_configs=device_group_configs,
         )
         return port_config

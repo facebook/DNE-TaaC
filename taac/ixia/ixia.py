@@ -7827,6 +7827,28 @@ class Ixia:
                 self.logger.debug(
                     f"Successfully configured L1Config CurrentType for {port_identifier} as {new_current_type}"
                 )
+        # getattr: enable_rs_fec rolls out via a configerator thrift change and
+        # the fbcode-generated types lag the mirror sync; stay green on both.
+        # NOTE: this only drives the FEC knobs on the vport's current L1
+        # family. It cannot change the family itself: on some modes the
+        # chassis re-asserts the connect-time personality (e.g. the FCoE
+        # variant on 100G-R4 NRZ), and post-connect switches do not stick.
+        if getattr(l1_config, "enable_rs_fec", False):
+            # pyrefly: ignore [missing-attribute]
+            current_type = vport.L1Config.CurrentType
+            family_attr = current_type.replace("Fcoe", "")
+            family_attr = family_attr[0].upper() + family_attr[1:]
+            # pyrefly: ignore [missing-attribute]
+            l1_family = getattr(vport.L1Config, family_attr, None)
+            if l1_family is not None and hasattr(l1_family, "EnableRsFec"):
+                l1_family.update(
+                    IeeeL1Defaults=False,
+                    EnableRsFec=True,
+                    RsFecForceOn=True,
+                )
+                self.logger.debug(
+                    f"Successfully configured RS-FEC for {port_identifier} as {family_attr}"
+                )
 
     def start_and_verify_protocols(self) -> None:
         """Starts and verifies the protocols"""

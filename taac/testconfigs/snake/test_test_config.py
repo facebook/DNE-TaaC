@@ -212,6 +212,7 @@ def gen_snake_test_config(
     include_ptp: bool = True,
     skip_ixia_protocol_verification: bool = False,
     ixia_protocol_verification_timeout: int = 90,
+    default_ixia_l1_config: t.Optional[ixia_types.L1Config] = None,
 ) -> taac_types.TestConfig:
     """Build a snake/loopback ``TestConfig``.
 
@@ -524,6 +525,11 @@ def gen_snake_test_config(
         # in that very code path. Every snake run pays the cold cost on
         # purpose so any drift in topology assembly surfaces immediately.
         ixia_config_cache=taac_types.IxiaConfigCache(enabled=False),
+        default_basic_port_config=(
+            taac_types.BasicPortConfig(l1_config=default_ixia_l1_config)
+            if default_ixia_l1_config is not None
+            else None
+        ),
     )
     return test_config
 
