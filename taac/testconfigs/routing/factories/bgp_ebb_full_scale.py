@@ -3,6 +3,7 @@
 """Factory for the EBB full-scale topology."""
 
 import ipaddress
+import json
 import re
 import typing as t
 import uuid
@@ -110,6 +111,7 @@ from taac.test_as_a_config.types import (
     Playbook,
     PointInTimeHealthCheck,
     SnapshotHealthCheck,
+    StepName,
     TestConfig,
 )
 
@@ -1523,6 +1525,23 @@ def _get_bgp_ebb_full_scale_playbooks(
 _EBB_IXIA_BGP_PEER_REGEX = r"^BGP_PEER_"
 
 
+def _setup_enables_all_ixia_device_groups(playbook: Playbook) -> bool:
+    """True when the last all-group IXIA toggle in setup enables them. Setup
+    that disables them (cold start) or never toggles them (UG suite cases)
+    does not guarantee every IXIA BGP peer is up."""
+    enabled = False
+    for step in playbook.setup_steps or []:
+        if step.name != StepName.INVOKE_IXIA_API_STEP or step.step_params is None:
+            continue
+        params = json.loads(step.step_params.json_params or "{}")
+        if params.get("api_name") != "toggle_device_groups":
+            continue
+        args = json.loads(params.get("args_json") or "{}")
+        if args.get("device_group_name_regex") == ".*":
+            enabled = args.get("enable", True)
+    return enabled
+
+
 def create_bgp_ebb_full_scale_test_config(  # noqa: C901
     physical_inventory: PhysicalInventory,
     *,
@@ -1749,6 +1768,8 @@ def create_bgp_ebb_full_scale_test_config(  # noqa: C901
     )
     playbooks = [
         playbook(setup_steps=[*(playbook.setup_steps or []), session_recovery])
+        if _setup_enables_all_ixia_device_groups(playbook)
+        else playbook
         for playbook in playbooks
     ]
 

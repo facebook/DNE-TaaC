@@ -20,7 +20,10 @@ from taac.constants import (
     BgpPlusPlusProfile,
     TESTBED_ISOLATION_BYPASS_TAG,
 )
-from taac.testconfigs.routing import cicd_ebb_int_tc
+from taac.testconfigs.routing import (
+    cicd_ebb_int_tc,
+    qual_bgp_update_group,
+)
 from taac.testconfigs.routing.factories import (
     bgp_ebb_full_scale as factory,
 )
@@ -628,20 +631,54 @@ class BgpEbbFullScaleFactoryTest(unittest.TestCase):
 
 
 class StuckIxiaSessionRecoveryTest(unittest.TestCase):
-    def test_every_stage1_case_ends_setup_with_session_recovery(self) -> None:
+    @staticmethod
+    def _last_custom_step_name(playbook: taac_types.Playbook) -> str | None:
+        step_params = (playbook.setup_steps or [])[-1].step_params
+        if step_params is None:
+            return None
+        return json.loads(step_params.json_params or "{}").get("custom_step_name")
+
+    def test_active_peer_cases_end_setup_with_session_recovery(self) -> None:
         """A stuck IXIA peer held back End-of-RIB and failed convergence on
-        nrqeb006, so each case must recover peers after its own setup."""
+        nrqeb006, so each case that starts with peers up must recover them
+        after its own setup."""
         for config in (
             cicd_ebb_int_tc.NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
             cicd_ebb_int_tc.NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
         ):
             for playbook in config.playbooks or []:
+                if playbook.name == "bgp_ebb_cold_start_playbook":
+                    continue
                 with self.subTest(config=config.name, playbook=playbook.name):
-                    last_step = (playbook.setup_steps or [])[-1]
-                    step_params = last_step.step_params
+                    step_params = (playbook.setup_steps or [])[-1].step_params
                     assert step_params is not None
                     params = json.loads(step_params.json_params or "{}")
                     self.assertEqual(
                         "bgp_ixia_session_recovery", params["custom_step_name"]
                     )
                     self.assertEqual("^BGP_PEER_", params["ixia_bgp_peer_regex"])
+
+    def test_cold_start_skips_session_recovery(self) -> None:
+        """Cold start disables every IXIA device group in setup, so requiring
+        established peers there failed the case before it ran."""
+        cold_start = next(
+            playbook
+            for playbook in cicd_ebb_int_tc.NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG.playbooks
+            or []
+            if playbook.name == "bgp_ebb_cold_start_playbook"
+        )
+        self.assertNotEqual(
+            "bgp_ixia_session_recovery", self._last_custom_step_name(cold_start)
+        )
+
+    def test_cases_without_device_group_toggle_skip_session_recovery(self) -> None:
+        """UG suite cases never enable the IXIA device groups in setup, so their
+        peers are not guaranteed up when setup ends."""
+        config = (
+            qual_bgp_update_group.BAG012_ASH6_BGP_UG_DISRUPTION_RECOVERY_TEST_CONFIG
+        )
+        for playbook in config.playbooks or []:
+            with self.subTest(playbook=playbook.name):
+                self.assertNotEqual(
+                    "bgp_ixia_session_recovery", self._last_custom_step_name(playbook)
+                )
