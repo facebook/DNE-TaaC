@@ -2870,7 +2870,23 @@ class FbossSwitch(AbstractSwitch):
             HwObjectType.NEXT_HOP_GROUP,
             HwObjectType.ROUTE_ENTRY,
         ]
-        if await self.async_is_mnpu():
+        # sw_agent serves listHwObjects only when monolithic; split agents
+        # reject it and the hw agent answers instead. A thrift stress burst
+        # calls this 10k times concurrently, so they share one run-mode probe;
+        # a failed probe fails them all once and the next call probes again.
+        loop = asyncio.get_running_loop()
+        probe = self.__dict__.get("_hw_objects_probe")
+        if probe is None or probe.get_loop() is not loop:
+            probe = self._hw_objects_probe = loop.create_task(
+                self.async_is_multi_switch()
+            )
+        try:
+            multi_switch = await asyncio.shield(probe)
+        except Exception:
+            if self.__dict__.get("_hw_objects_probe") is probe:
+                self._hw_objects_probe = None
+            raise
+        if multi_switch:
             async with await self.get_hw_agent_client(switch_index=0) as client:
                 hw_objects = await client.listHwObjects(
                     hw_object_type_list, cached=False
