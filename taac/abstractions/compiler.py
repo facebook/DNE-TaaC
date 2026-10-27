@@ -106,6 +106,7 @@ from taac.task_definitions import (
     create_run_commands_on_shell_task,
     create_validate_bgpcpp_config_on_device_task,
     create_validate_bgpcpp_update_group_state_task,
+    create_verify_bgpcpp_stack_task,
 )
 from taac.test_as_a_config import types as taac_types
 
@@ -909,6 +910,7 @@ def _ebb_full_scale_control_plane_tasks(
                 ixia_needed=True,
             )
         )
+    tasks.append(create_verify_bgpcpp_stack_task(hostname=device_name))
 
     tasks.append(
         create_run_commands_on_shell_task(

@@ -18,6 +18,7 @@ from taac.constants import TestDevice
 from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
+from taac.health_checks.common_utils import declares_bgpcpp
 from taac.utils.bgp_route_count_utils import (
     filter_bgp_sessions,
     get_route_count_histogram_by_afi_for_peers,
@@ -338,7 +339,9 @@ class BgpRouteCountVerificationHealthCheck(
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
         """
-        Verify BGP route counts on ar-bgp (native EOS BGP) devices via EOS CLI.
+        Devices the TestConfig declares ``ARISTA_FBOSS`` in ``host_os_type_map``
+        run BGP++ and delegate to the thrift ``_run``. Other EOS devices are
+        native EOS BGP and are verified via EOS CLI.
 
         ar-bgp has no BGP++ thrift API, so getPrefilterReceivedNetworks() etc.
         are not available. Instead, uses 'show bgp ipv6 unicast summary | json'
@@ -358,6 +361,8 @@ class BgpRouteCountVerificationHealthCheck(
                 - descriptions_to_ignore: List of peer descriptions to ignore (optional)
                 - exact_peer_group_names: Exact BGP peer-group names to check (optional)
         """
+        if declares_bgpcpp(obj.name):
+            return await self._run(obj, input, check_params)
         hostname = obj.name
         address_family = check_params.get("address_family", "ipv6")
         expected_count = check_params.get("expected_count")

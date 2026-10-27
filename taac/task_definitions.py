@@ -1290,6 +1290,15 @@ def create_ixia_modify_communities_task(
     )
 
 
+def create_verify_bgpcpp_stack_task(hostname: str, ixia_needed: bool = True) -> Task:
+    """Fail setup unless BGP++ is the only BGP stack enabled on ``hostname``."""
+    return Task(
+        task_name="verify_bgpcpp_stack",
+        ixia_needed=ixia_needed,
+        params=Params(json_params=json.dumps({"hostname": hostname})),
+    )
+
+
 def create_arista_daemon_control_task(
     hostname: str,
     daemon_name: str = "Bgpcpp",

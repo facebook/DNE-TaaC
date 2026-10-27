@@ -16,9 +16,10 @@ up with the NEW community, not the stale one.
 Backed primarily by BGP++ thrift ``getPostfilterAdvertisedNetworks`` (one
 call per peer, returns ``Mapping[TIpPrefix, TBgpPath]`` with each TBgpPath
 carrying ``community_list`` -- the DUT-side mirror of what the receiver
-peer should be getting after egress policy). EOS native-BGP fallback uses
+peer should be getting after egress policy). EOS devices not declared
+``ARISTA_FBOSS`` in the TestConfig's ``host_os_type_map`` run native EOS BGP
+and are read via
 ``show bgp ipv6 unicast neighbors <peer> advertised-routes detail | json``.
-On "BGP inactive" the arista path delegates back to thrift.
 
 KNOWN LIMITATION under BGP++ Update Group: ``getPostfilterAdvertisedNetworks``
 returns 0 prefixes for every peer when UG is enabled, because UG bypasses
@@ -46,6 +47,7 @@ from taac.constants import TestDevice
 from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
+from taac.health_checks.common_utils import declares_bgpcpp
 from taac.health_check.health_check import types as hc_types
 
 
@@ -149,8 +151,8 @@ class BgpReceivedRouteCommunityHealthCheck(
         mutation community in a 2.4.3 test).
       - ``address_family`` (str, default "ipv6"): arista-CLI path only.
 
-    OS: ARISTA_FBOSS (thrift) + EOS (CLI fallback that delegates back to
-    thrift on "BGP inactive").
+    OS: ARISTA_FBOSS (declared in host_os_type_map) uses thrift; other EOS
+    devices use the EOS CLI path.
     """
 
     CHECK_NAME = hc_types.CheckName.BGP_RECEIVED_ROUTE_COMMUNITY_CHECK
@@ -267,7 +269,9 @@ class BgpReceivedRouteCommunityHealthCheck(
         input: hc_types.BaseHealthCheckIn,
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
-        """EOS native-BGP CLI path; delegates to thrift on "BGP inactive"."""
+        """Thrift for devices declared ARISTA_FBOSS; EOS CLI otherwise."""
+        if declares_bgpcpp(obj.name):
+            return await self._run(obj, input, check_params)
         hostname = obj.name
         baseline_peer_addr = check_params.get("baseline_peer_addr")
         tested_peer_addrs = check_params.get("tested_peer_addrs") or []

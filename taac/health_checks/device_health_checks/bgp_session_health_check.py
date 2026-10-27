@@ -14,6 +14,7 @@ from taac.constants import TestDevice
 from taac.health_checks.abstract_health_check import (
     AbstractDeviceHealthCheck,
 )
+from taac.health_checks.common_utils import declares_bgpcpp
 from taac.utils.health_check_utils import is_parent_prefix
 from taac.health_check.health_check import types as hc_types
 
@@ -55,8 +56,9 @@ class BgpSessionEstablishedHealthCheck(
             # NetOS keeps the active config in the fwdstack runtime namespace;
             # classic FBOSS keeps it on /mnt/flash. async_read_file routes the
             # command through that same namespace on NetOS.
-            # pyrefly: ignore [missing-attribute]
-            is_netos = await self.driver.async_is_netos()
+            # Arista drivers have no NetOS mode and keep the config on /mnt/flash.
+            is_netos_fn = getattr(self.driver, "async_is_netos", None)
+            is_netos = is_netos_fn is not None and await is_netos_fn()
             config_path = NETOS_BGPCPP_CONFIG_PATH if is_netos else BGPCPP_CONFIG_PATH
             # pyrefly: ignore [missing-attribute]
             config_content = await self.driver.async_read_file(config_path)
@@ -806,7 +808,9 @@ class BgpSessionEstablishedHealthCheck(
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
         """
-        Verify BGP sessions on ar-bgp (native EOS BGP) devices via EOS CLI.
+        Devices the TestConfig declares ``ARISTA_FBOSS`` in ``host_os_type_map``
+        run BGP++ and delegate to the thrift ``_run``. Other EOS devices are
+        native EOS BGP and are verified via EOS CLI.
 
         ar-bgp devices have no BGP++ thrift API, so async_get_bgp_sessions()
         is not available. Instead, uses 'show bgp ipv6 unicast summary | json'
@@ -819,6 +823,8 @@ class BgpSessionEstablishedHealthCheck(
                 - expected_established_session_count: Expected established sessions (optional)
                 - address_family: "ipv4", "ipv6", or "both" (optional, defaults to "both")
         """
+        if declares_bgpcpp(obj.name):
+            return await self._run(obj, input, check_params)
         hostname = obj.name
         expected_established_session_count = check_params.get(
             "expected_established_session_count"

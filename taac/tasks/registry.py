@@ -141,6 +141,7 @@ from taac.tasks.all import (
     ValidateAccessPolicyHardwareTask,
     ValidateBgpcppConfigOnDevice,
     ValidateBgpcppUpdateGroupState,
+    VerifyBgpcppStackTask,
     WaitForAgentConvergenceTask,
     WaitForBgpConvergenceTask,
 )
@@ -185,6 +186,7 @@ from taac.tasks.verify_best_path_changes_task import (
 
 TASK_REGISTRY: t.List[t.Type[BaseTask]] = [
     AristaDaemonControlTask,
+    VerifyBgpcppStackTask,
     AssertThriftRateLimitEnabledTask,
     BgpTcpdumpTask,
     CoopUnregisterPatchersTask,

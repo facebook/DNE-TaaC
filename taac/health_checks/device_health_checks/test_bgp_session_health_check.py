@@ -19,6 +19,12 @@ from taac.health_checks.healthcheck_definitions import (
     create_bgp_session_establish_check,
 )
 from taac.health_check.health_check import types as hc_types
+from taac.test_as_a_config import types as taac_types
+
+
+_HOST_OS_TYPE_MAP = (
+    "neteng.test_infra.dne.taac.utils.driver_factory.HOST_TO_DEVICE_OS_TYPE_MAP"
+)
 
 
 def _make_bgp_session(
@@ -44,6 +50,58 @@ class TestBgpSessionEstablishedHealthCheck(unittest.IsolatedAsyncioTestCase):
         self.device = MagicMock(spec=TestDevice)
         self.device.name = "rsw001.p001.f01.ash6"
         self.input = hc_types.BaseHealthCheckIn()
+
+    async def test_arista_declared_bgpcpp_reads_thrift_not_eos_cli(self):
+        """An empty native EOS BGP table must not stand in for BGP++ on a device
+        the TestConfig declares ARISTA_FBOSS."""
+        self.health_check.driver.async_execute_show_json_on_shell = AsyncMock(
+            return_value={"vrfs": {}}
+        )
+        expected = hc_types.HealthCheckResult(status=hc_types.HealthCheckStatus.PASS)
+        with (
+            patch.dict(
+                _HOST_OS_TYPE_MAP,
+                {self.device.name: taac_types.DeviceOsType.ARISTA_FBOSS},
+            ),
+            patch.object(
+                self.health_check, "_run", new=AsyncMock(return_value=expected)
+            ) as thrift_check,
+        ):
+            result = await self.health_check._run_arista(self.device, self.input, {})
+
+        self.assertEqual(expected, result)
+        thrift_check.assert_awaited_once()
+        self.health_check.driver.async_execute_show_json_on_shell.assert_not_awaited()
+
+    async def test_arista_undeclared_keeps_eos_cli_behaviour(self):
+        """Native EOS BGP users (no ARISTA_FBOSS declaration) keep the
+        existing CLI path unchanged."""
+        self.health_check.driver.async_execute_show_json_on_shell = AsyncMock(
+            return_value={"vrfs": {}}
+        )
+        with patch.object(self.health_check, "_run", new=AsyncMock()) as thrift_check:
+            result = await self.health_check._run_arista(self.device, self.input, {})
+
+        self.assertEqual(result.status, hc_types.HealthCheckStatus.FAIL)
+        self.assertIn("No BGP peers found", result.message or "")
+        thrift_check.assert_not_awaited()
+
+    async def test_bgpcpp_config_read_from_flash_on_driver_without_netos(self):
+        """AristaFbossSwitch has no async_is_netos; peer identity validation
+        was silently skipped on every Arista DUT."""
+        self.health_check.driver = AsyncMock(spec=["async_read_file"])
+        self.health_check.driver.async_read_file = AsyncMock(
+            return_value=json.dumps(
+                {"peers": [{"peer_addr": "2001:db8::11", "local_addr": "2001:db8::10"}]}
+            )
+        )
+
+        expected = await self.health_check._read_bgpcpp_config(self.device.name)
+
+        self.assertEqual({"2001:db8::11": "2001:db8::10"}, expected)
+        self.health_check.driver.async_read_file.assert_awaited_once_with(
+            "/mnt/flash/bgpcpp_config"
+        )
 
     async def test_restart_epoch_uses_native_service_name(self):
         self.health_check.driver.async_get_systemctl_service_name = AsyncMock(

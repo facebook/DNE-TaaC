@@ -1175,3 +1175,58 @@ class ValidateBgpcppUpdateGroupStateTest(later.unittest.TestCase):
                 }
             )
         self.assertEqual(3, self.logger.exception.call_count)
+
+
+_BGPCPP_ENABLED = (
+    "daemon Bgpcpp\n   exec /usr/sbin/run_bgpcpp.sh\n   no shutdown\n"
+    "daemon FibAgent\n   exec /usr/sbin/run_fibagent.sh\n   no shutdown\n"
+)
+_ROUTER_BGP_SHUT = (
+    "router bgp 65006\n   router-id 10.0.0.1\n   shutdown\n"
+    "   neighbor 10.0.0.2 shutdown\n"
+)
+
+
+class VerifyBgpcppStackTaskTest(unittest.TestCase):
+    def test_bgpcpp_only_stack_passes(self) -> None:
+        self.assertEqual(
+            [],
+            tasks_all.VerifyBgpcppStackTask.stack_problems(
+                _BGPCPP_ENABLED, _ROUTER_BGP_SHUT
+            ),
+        )
+
+    def test_absent_router_bgp_passes(self) -> None:
+        self.assertEqual(
+            [], tasks_all.VerifyBgpcppStackTask.stack_problems(_BGPCPP_ENABLED, "")
+        )
+
+    def test_native_router_bgp_running_fails(self) -> None:
+        """A neighbor-level shutdown does not disable the native BGP instance."""
+        problems = tasks_all.VerifyBgpcppStackTask.stack_problems(
+            _BGPCPP_ENABLED,
+            "router bgp 65006\n   router-id 10.0.0.1\n   neighbor 10.0.0.2 shutdown\n",
+        )
+        self.assertEqual(["native router bgp 65006 is not shut down"], problems)
+
+    def test_missing_or_shut_bgpcpp_fails(self) -> None:
+        self.assertEqual(
+            ["daemon Bgpcpp is not configured"],
+            tasks_all.VerifyBgpcppStackTask.stack_problems("", _ROUTER_BGP_SHUT),
+        )
+        self.assertEqual(
+            ["daemon Bgpcpp is shut down"],
+            tasks_all.VerifyBgpcppStackTask.stack_problems(
+                "daemon Bgpcpp\n   exec /usr/sbin/run_bgpcpp.sh\n   shutdown\n",
+                _ROUTER_BGP_SHUT,
+            ),
+        )
+
+    def test_pre_rename_daemon_bgp_fails(self) -> None:
+        self.assertEqual(
+            ["pre-rename daemon Bgp is still configured"],
+            tasks_all.VerifyBgpcppStackTask.stack_problems(
+                _BGPCPP_ENABLED + "daemon Bgp\n   exec /usr/sbin/run_bgpcpp.sh\n",
+                _ROUTER_BGP_SHUT,
+            ),
+        )

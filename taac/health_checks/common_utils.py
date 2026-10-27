@@ -8,7 +8,9 @@ from taac.utils.common import (  # oss-rewrite (force ShipIt re-export to taac.*
     async_everpaste_str,
     async_get_fburl,
 )
+from taac.utils.driver_factory import HOST_TO_DEVICE_OS_TYPE_MAP
 from taac.health_check.health_check import types as hc_types
+from taac.test_as_a_config import types as taac_types
 
 
 def evaluate_comparison(
@@ -63,3 +65,14 @@ async def async_get_everpaste_fburl_if_needed(
     if shorten_fburl:
         return await async_get_fburl(everpaste_url)
     return everpaste_url
+
+
+# A BGP++ DUT keeps native EOS BGP configured but shut down, and native BGP
+# answers the EOS CLI with an empty table rather than an error, so the CLI cannot
+# tell "no peers" from "wrong stack". The TestConfig's host_os_type_map declares
+# the stack instead: ARISTA_FBOSS means BGP++; anything else keeps the native EOS
+# BGP behaviour.
+def declares_bgpcpp(hostname: str) -> bool:
+    return (
+        HOST_TO_DEVICE_OS_TYPE_MAP.get(hostname) == taac_types.DeviceOsType.ARISTA_FBOSS
+    )

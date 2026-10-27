@@ -2234,6 +2234,67 @@ class ValidateBgpcppUpdateGroupState(BaseTask):
             )
 
 
+class VerifyBgpcppStackTask(BaseTask):
+    """Fail setup unless BGP++ is the only BGP stack enabled on an Arista DUT.
+
+    A device declared ARISTA_FBOSS is checked through BGP++ thrift, so the
+    running config must agree: ``daemon Bgpcpp`` enabled, native ``router bgp``
+    shut down, and no pre-rename ``daemon Bgp`` left behind.
+    """
+
+    NAME = "verify_bgpcpp_stack"
+
+    async def run(self, params: t.Dict[str, t.Any]) -> None:
+        hostname = params["hostname"]
+        # The concrete Arista driver, not AbstractSwitch, owns the EOS CLI.
+        driver: t.Any = await async_get_device_driver(hostname)
+        daemon_config = await driver.async_execute_show_or_configure_cmd_on_shell(
+            "show running-config section daemon"
+        )
+        router_config = await driver.async_execute_show_or_configure_cmd_on_shell(
+            "show running-config section router bgp"
+        )
+        problems = self.stack_problems(daemon_config, router_config)
+        if problems:
+            raise RuntimeError(
+                f"BGP++ stack is not the only BGP enabled on {hostname}: "
+                + "; ".join(problems)
+            )
+        self.logger.info(
+            f"BGP++ stack verified on {hostname}: daemon Bgpcpp enabled, "
+            "native router bgp shut down, no daemon Bgp"
+        )
+
+    @staticmethod
+    def stack_problems(daemon_config: str, router_config: str) -> t.List[str]:
+        problems = []
+        bgpcpp = AristaDaemonControlTask._extract_daemon_config(daemon_config, "Bgpcpp")
+        if not bgpcpp:
+            problems.append("daemon Bgpcpp is not configured")
+        elif "shutdown" in bgpcpp[1:]:
+            problems.append("daemon Bgpcpp is shut down")
+        if AristaDaemonControlTask._extract_daemon_config(daemon_config, "Bgp"):
+            problems.append("pre-rename daemon Bgp is still configured")
+        router_lines = router_config.splitlines()
+        for index, line in enumerate(router_lines):
+            if not line.startswith("router bgp"):
+                continue
+            children = []
+            for child in router_lines[index + 1 :]:
+                if child.strip() and child == child.lstrip():
+                    break
+                children.append(child)
+            indents = [len(c) - len(c.lstrip()) for c in children if c.strip()]
+            top = min(indents, default=0)
+            # Neighbor- and VRF-level shutdowns do not disable the BGP instance.
+            if not any(
+                c.strip() == "shutdown" and len(c) - len(c.lstrip()) == top
+                for c in children
+            ):
+                problems.append(f"native {line.strip()} is not shut down")
+        return problems
+
+
 class DeployEosImageTask(BaseTask):
     """
     Task to deploy an EOS image to an Arista device.
