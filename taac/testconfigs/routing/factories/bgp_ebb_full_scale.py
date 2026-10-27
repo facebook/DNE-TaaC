@@ -70,6 +70,9 @@ from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_cases.link_flap_
 from taac.playbooks.routing.factories.qual_bgp_update_group.tc7_cases.sustained_link_flap import (
     create_bgp_ug_sustained_link_flap_playbook,
 )
+from taac.steps.step_definitions import (
+    create_bgp_ixia_session_recovery_step,
+)
 from taac.testconfigs.routing.factories.bgp_ug_2_7_suite import (
     build_bgp_ug_2_7_playbook,
 )
@@ -1517,6 +1520,9 @@ def _get_bgp_ebb_full_scale_playbooks(
     return playbooks
 
 
+_EBB_IXIA_BGP_PEER_REGEX = r"^BGP_PEER_"
+
+
 def create_bgp_ebb_full_scale_test_config(  # noqa: C901
     physical_inventory: PhysicalInventory,
     *,
@@ -1733,6 +1739,18 @@ def create_bgp_ebb_full_scale_test_config(  # noqa: C901
                 f"{unavailable_names}"
             )
         playbooks = [playbooks_by_name[name] for name in playbooks_selected]
+
+    # ixia03 peers intermittently stall after OPEN and never retry; one stuck
+    # static peer (BGP-MON included) holds back End-of-RIB until the EoR timer
+    # fires and fails convergence, so recover or name them before each case.
+    session_recovery = create_bgp_ixia_session_recovery_step(
+        device_name=physical_inventory.device_name,
+        ixia_bgp_peer_regex=_EBB_IXIA_BGP_PEER_REGEX,
+    )
+    playbooks = [
+        playbook(setup_steps=[*(playbook.setup_steps or []), session_recovery])
+        for playbook in playbooks
+    ]
 
     compiled = bound.compile()
     return TestConfig(

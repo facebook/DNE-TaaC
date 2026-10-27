@@ -2543,6 +2543,7 @@ class BgpAttributeChurnPlaybookTest(unittest.TestCase):
 
         for port_count, expected_auxiliary_observers in ((2, False), (3, True)):
             inventory = MagicMock()
+            inventory.device_name = "dut.example.com"
             inventory.ixia_ports = [
                 [f"Ethernet{index}", f"1/{index}"] for index in range(1, port_count + 1)
             ]

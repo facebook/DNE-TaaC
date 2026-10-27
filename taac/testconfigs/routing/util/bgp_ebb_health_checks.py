@@ -219,8 +219,8 @@ def create_standard_prechecks(
         check_bgp_convergence: Add the BGP++ initialization-events convergence
             precheck (default True). Asserts the device reached INITIALIZED
             within the convergence threshold (self-waits up to it). The strict
-            canonical-sequence and EOR-timer-expiry assertions are temporarily
-            disabled pending the BGP++ cold-start EOR-timer fix.
+            canonical-sequence and EOR-timer-expiry assertions stay relaxed;
+            see the comment at the check for why.
         check_hardware_capacity: Add the startup FEC/ECMP capacity gate.
             Defaults to True for existing EBB callers. Set False when the
             qualification case does not define hardware-capacity preconditions.
@@ -329,12 +329,13 @@ def create_standard_prechecks(
     # device reached INITIALIZED within the threshold. Self-waits up to the
     # threshold for post-restart convergence.
     #
-    # The strict canonical-sequence and EOR-timer-expiry assertions are
-    # TEMPORARILY relaxed (fail_on_eor_expired/validate_sequence=False): on a
-    # cold start the EOR timer is started prematurely at PeerManager startup
-    # (rather than on first session up), so it always expires before all peers'
-    # EoRs arrive — emitting EOR_TIMER_EXPIRED plus an out-of-order late
-    # ALL_EOR_RECEIVED. Re-enable both once the BGP++ EOR-timer fix lands.
+    # The strict canonical-sequence and EOR-timer-expiry assertions are relaxed
+    # (fail_on_eor_expired/validate_sequence=False). They were relaxed for a
+    # premature EoR timer that BGP++ has since fixed (D109742699, PeerManagerBB:
+    # the wait now starts at the first established session). The timer can
+    # still expire when an IXIA peer never establishes -- ixia03 peers stall
+    # after OPEN, BGP-MON included -- which also emits an out-of-order late
+    # ALL_EOR_RECEIVED. Re-enable both once runs converge without expiry.
     if check_bgp_convergence:
         prechecks.append(
             create_bgp_convergence_check(
@@ -496,10 +497,11 @@ def create_standard_postchecks(
 
     postchecks: list[PointInTimeHealthCheck] = []
 
-    # Conditionally add BGP convergence check. validate_sequence is temporarily
-    # disabled: cold start / restart can emit an out-of-order late
-    # ALL_EOR_RECEIVED once the prematurely-started EOR timer expires. Re-enable
-    # once the BGP++ EOR-timer fix lands.
+    # Conditionally add BGP convergence check. validate_sequence is disabled: a
+    # peer that never sends End-of-RIB (e.g. an IXIA peer that never establishes)
+    # lets the EoR timer expire and emits an out-of-order late ALL_EOR_RECEIVED.
+    # The BGP++ premature-timer fix (D109742699) has landed; re-enable once runs
+    # converge without expiry.
     if check_bgp_convergence:
         postchecks.append(
             create_bgp_convergence_check(

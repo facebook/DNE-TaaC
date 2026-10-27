@@ -1,6 +1,7 @@
 # (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
 """Focused coverage for EBB full-scale topology selection."""
 
+import json
 import typing as t
 import unittest
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from taac.constants import (
     BgpPlusPlusProfile,
     TESTBED_ISOLATION_BYPASS_TAG,
 )
+from taac.testconfigs.routing import cicd_ebb_int_tc
 from taac.testconfigs.routing.factories import (
     bgp_ebb_full_scale as factory,
 )
@@ -623,3 +625,23 @@ class BgpEbbFullScaleFactoryTest(unittest.TestCase):
 
         self.assertEqual([playbook_name], [item.name for item in config.playbooks])
         self.assertEqual(850, topology_builder.call_args.kwargs["ebgp_prefix_count"])
+
+
+class StuckIxiaSessionRecoveryTest(unittest.TestCase):
+    def test_every_stage1_case_ends_setup_with_session_recovery(self) -> None:
+        """A stuck IXIA peer held back End-of-RIB and failed convergence on
+        nrqeb006, so each case must recover peers after its own setup."""
+        for config in (
+            cicd_ebb_int_tc.NRQEB006_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+            cicd_ebb_int_tc.NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_UG,
+        ):
+            for playbook in config.playbooks or []:
+                with self.subTest(config=config.name, playbook=playbook.name):
+                    last_step = (playbook.setup_steps or [])[-1]
+                    step_params = last_step.step_params
+                    assert step_params is not None
+                    params = json.loads(step_params.json_params or "{}")
+                    self.assertEqual(
+                        "bgp_ixia_session_recovery", params["custom_step_name"]
+                    )
+                    self.assertEqual("^BGP_PEER_", params["ixia_bgp_peer_regex"])
