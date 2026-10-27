@@ -1149,6 +1149,42 @@ MINIPACK3_STANDALONE_BENCHMARK_TEST_CONFIG = gen_snake_test_config(
     ],
 )
 
+
+WEDGE800BACT_STANDALONE_TEST_CONFIG_200G = gen_snake_test_config(
+    name="WEDGE800BACT_STANDALONE_TEST_CONFIG_200G",
+    basset_pool="dne.standalone",
+    snake_configs=[
+        taac_types.SnakeConfig(
+            source="fboss338826578.ash6:eth1/1/1",
+            destination="fboss338826578.ash6:eth1/32/5",
+            source_ip="5000:1::1/64",
+            destination_ip="5000:1::2/64",
+        ),
+    ],
+    direct_ixia_connections=[
+        taac_types.DirectIxiaConnection(
+            interface="eth1/1/1",
+            ixia_chassis_ip="2401:db00:2066:3091::3002",
+            ixia_port="1/135",
+        ),
+        taac_types.DirectIxiaConnection(
+            interface="eth1/32/5",
+            ixia_chassis_ip="2401:db00:2066:3091::3002",
+            ixia_port="1/136",
+        ),
+    ],
+    hostname="fboss338826578.ash6",
+    line_rate=99,
+    traffic_item_name="W800_BACT_200G_SNAKE",
+    include_benchmark=True,
+    include_link_flap_longevity=True,
+    include_rapid_a_end_flap_stress=True,
+    playbooks_to_skip=[
+        "test_snake_fsdb_restart",
+        "test_snake_fsdb_crash",
+    ],
+)
+
 SNAKE_TEST_CONFIGS = [
     MINIPACK3_STANDALONE_TEST_CONFIG_FBOSS159_800G_DR4_GEARBOX,
     MINIPACK3_STANDALONE_TEST_CONFIG,
@@ -1170,4 +1206,5 @@ SNAKE_TEST_CONFIGS = [
     ICEPACK_MP3_CROSS_DEVICE_MP3_THRIFT_FLAP_TEST_CONFIG,
     ICEPACK_STANDALONE_TEST_CONFIG_FR4_400G,
     ICEPACK_STANDALONE_TEST_CONFIG_FR4_800G,
+    WEDGE800BACT_STANDALONE_TEST_CONFIG_200G,
 ]
