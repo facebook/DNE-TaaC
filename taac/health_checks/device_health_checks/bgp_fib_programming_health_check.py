@@ -50,14 +50,14 @@ class BgpFibProgrammingCheck(AbstractDeviceHealthCheck[hc_types.BaseHealthCheckI
                 message="start_time is required for BGP fib programming health check",
             )
 
+        agent_name = "Bgpcpp"
         try:
-            agent_name = "Bgpcpp"
             pid = await arista_utils.get_daemon_pid(self.driver, agent_name)
 
         except Exception as e:
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.ERROR,
-                message=f"Failed to check Bgp logs: {str(e)}",
+                message=f"Failed to check {agent_name} logs: {str(e)}",
             )
         if not pid:
             return hc_types.HealthCheckResult(
