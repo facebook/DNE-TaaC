@@ -11,7 +11,11 @@ service-restart playbook on an otherwise healthy DUT.
 
 Supported check_params: ``parent_prefixes_to_ignore`` (list of CIDRs whose
 subnets are excluded from both sides) and the base-class retry knobs. The
-``rib_fib_*heal_latency*`` diagnostics are accepted and ignored.
+``rib_fib_*heal_latency*`` diagnostics are accepted and ignored. Independently
+of check_params, a network bgpd itself originates with ``install_to_fib`` false
+(``getOriginatedRoutes``) is excluded from the RIB-to-FIB direction only, and
+only while its locally originated path is the best path: that is the one case
+bgpd never programs. If bgpd cannot list them, nothing is excluded.
 """
 
 import ipaddress
@@ -45,14 +49,36 @@ def _ntop(addr: bytes) -> str:
     return socket.inet_ntop(family, packed)
 
 
+def _prefix_cidr(prefix: t.Any) -> str:
+    """CIDR of a bgpd TIpPrefix."""
+    return f"{_ntop(prefix.prefix_bin)}/{prefix.num_bits}"
+
+
 def rib_prefixes(entries: t.Iterable[t.Any]) -> t.Set[str]:
     """CIDRs of RIB entries that have a selected best path."""
-    out = set()
-    for e in entries:
-        if e.best_path is None:
-            continue
-        out.add(f"{_ntop(e.prefix.prefix_bin)}/{e.prefix.num_bits}")
-    return out
+    return {_prefix_cidr(e.prefix) for e in entries if e.best_path is not None}
+
+
+def local_best_prefixes(entries: t.Iterable[t.Any]) -> t.Set[str]:
+    """CIDRs of RIB entries whose best path is a locally originated route.
+
+    bgpd's own test (RibBase isLocalRouteBest): the best path's next hop is
+    the unspecified address, 0.0.0.0 or ::. A learned path that wins is
+    programmed even for a network originated with install_to_fib false.
+    """
+    return {
+        _prefix_cidr(e.prefix)
+        for e in entries
+        if e.best_path is not None
+        and e.best_path.next_hop is not None
+        and not any(bytes(e.best_path.next_hop.prefix_bin))
+    }
+
+
+def not_installed_prefixes(routes: t.Iterable[t.Any]) -> t.Set[str]:
+    """CIDRs of the routes bgpd originates without programming them in the FIB."""
+    # Formatted like rib_prefixes, so the two compare as plain strings.
+    return {_prefix_cidr(r.prefix) for r in routes if not r.install_to_fib}
 
 
 def _cidr(r: t.Any) -> str:
@@ -120,9 +146,8 @@ class BgpRibFibConsistencyHealthCheck(
         check_params: t.Dict[str, t.Any],
     ) -> hc_types.HealthCheckResult:
         ignore = check_params.get("parent_prefixes_to_ignore") or []
-        rib = drop_ignored(
-            rib_prefixes(await self.driver.async_get_bgp_rib_entries()), ignore
-        )
+        entries = await self.driver.async_get_bgp_rib_entries()
+        rib = drop_ignored(rib_prefixes(entries), ignore)
         details = await self.driver.async_get_route_table_details()
         unowned = sum(1 for r in details if not r.nextHopMulti)
         if unowned:
@@ -133,14 +158,20 @@ class BgpRibFibConsistencyHealthCheck(
                 "BGP ownership is unknown for them"
             )
         fib = drop_ignored(fib_bgp_prefixes(details), ignore)
+        not_installed = await self._not_installed_prefixes(obj) & local_best_prefixes(
+            entries
+        )
         # A BGP best path is "in the FIB" even when a static or connected route
         # for the same prefix won the FIB slot, so compare against every owner.
-        missing_in_fib = sorted(rib - drop_ignored(fib_prefixes(details), ignore))
+        missing_in_fib = sorted(
+            rib - drop_ignored(fib_prefixes(details), ignore) - not_installed
+        )
         missing_in_rib = sorted(fib - rib)
         self.add_data_to_log(
             {
                 "rib_prefixes": len(rib),
                 "fib_bgp_prefixes": len(fib),
+                "originated_not_installed": len(not_installed),
                 "missing_in_fib": len(missing_in_fib),
                 "missing_in_rib": len(missing_in_rib),
             }
@@ -158,3 +189,17 @@ class BgpRibFibConsistencyHealthCheck(
                 f"routes not in RIB (e.g. {missing_in_rib[:_MAX_EXAMPLES]})"
             ),
         )
+
+    async def _not_installed_prefixes(self, obj: TestDevice) -> t.Set[str]:
+        try:
+            return not_installed_prefixes(
+                await self.driver.async_get_bgp_originated_routes() or []
+            )
+        except Exception as exc:
+            # Excluding nothing keeps the check at its strictest; the miss is
+            # reported, not hidden.
+            self.logger.warning(
+                f"{obj.name}: cannot list bgpd's originated routes, so no "
+                f"install_to_fib=false network is excluded: {exc}"
+            )
+            return set()
