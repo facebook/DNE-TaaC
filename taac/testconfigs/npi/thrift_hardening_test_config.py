@@ -38,6 +38,7 @@ from taac.task_definitions import (
     create_wait_for_agent_convergence_task,
 )
 from taac.utils.netwhoami_utils import fetch_whoami
+from taac.health_check.health_check import types as hc_types
 from taac.test_as_a_config import types as taac_types
 from taac.test_as_a_config.types import TestConfig
 
@@ -55,6 +56,7 @@ def _assert_fboss_platform(hostname: str) -> None:
             "ICECUBE800BC",  # IcePack TH6
             "MORGAN800CC",  # Kodiak3 (TH4)
             "WEDGE400C",  # Wedge400C / Gibraltar RSW
+            "WEDGE800BACT",  # Wedge800 BACT RSW
         ):
             raise ValueError(
                 f"Unsupported hardware '{hardware}' for {hostname}. "
@@ -585,6 +587,12 @@ def create_npi_device_only_thrift_hardening_test_config(
     service_restart_services: list | None = None,
     expected_established_bgp_sessions: int | None = None,
     kitchen_sink_test_duration_s: int | None = None,
+    systemctl_active_services: list[str] | None = None,
+    tags: list[str] | None = None,
+    neighbor_devices: list[str] | None = None,
+    ignore_circuit_fbnet_status: bool = False,
+    expected_restart_cascades: dict[str, list[str]] | None = None,
+    agent_restart_service: taac_types.Service = taac_types.Service.AGENT,
 ) -> TestConfig:
     """Build THFT coverage that needs no IXIA protocol scaffolding.
 
@@ -593,17 +601,25 @@ def create_npi_device_only_thrift_hardening_test_config(
     invalid. It retains device/service/core checks and can assert an exact
     established-session count without requiring intentionally idle production
     peers to establish or comparing ambient per-peer route placement.
+    Optional neighbors populate link expectations as non-DUT endpoints;
+    device health checks remain scoped to the DUT.
     """
     _assert_fboss_platform(device_name)
     return TestConfig(
         name=test_config_name,
         basset_pool=basset_pool or "dne.test",
+        tags=tags,
+        ignore_circuit_fbnet_status=ignore_circuit_fbnet_status,
         endpoints=[
             taac_types.Endpoint(
                 name=device_name,
                 dut=True,
                 ixia_needed=False,
-            )
+            ),
+            *[
+                taac_types.Endpoint(name=name, dut=False, ixia_needed=False)
+                for name in neighbor_devices or []
+            ],
         ],
         setup_tasks=[
             create_assert_thrift_rate_limit_enabled_task(device_name),
@@ -621,11 +637,15 @@ def create_npi_device_only_thrift_hardening_test_config(
                 flap_burst_timeout_s=flap_burst_timeout_s,
                 include_kitchen_sink=include_kitchen_sink,
                 kitchen_sink_test_duration_s=kitchen_sink_test_duration_s,
+                agent_restart_service=agent_restart_service,
             ),
             service_restart_services=service_restart_services,
             require_all_bgp_sessions_established=False,
             expected_established_bgp_sessions=expected_established_bgp_sessions,
             compare_bgp_peer_routes=False,
+            systemctl_active_services=systemctl_active_services,
+            check_scope=hc_types.Scope.DEFAULT if neighbor_devices else None,
+            expected_restart_cascades=expected_restart_cascades,
         ),
     )
 

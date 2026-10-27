@@ -4,6 +4,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from later.unittest import TestCase
 from taac.tasks.periodic_tasks import ThriftStressPeriodicTask
 from taac.tasks.thrift_stress_payloads import (
     fboss_qsfp_flaps_only,
@@ -12,6 +13,7 @@ from taac.tasks.thrift_stress_payloads import (
     ThriftStressCall,
 )
 from taac.health_check.health_check import types as hc_types
+from thrift.python.exceptions import TransportError, TransportErrorType
 
 
 PERIODIC_TASKS_PATH = "neteng.test_infra.dne.taac.tasks.periodic_tasks"
@@ -125,7 +127,7 @@ class ThriftStressPayloadCatalogTest(unittest.TestCase):
             self.assertTrue(callable(builder), f"{k} builder not callable")
 
 
-class ThriftStressPeriodicTaskTest(unittest.IsolatedAsyncioTestCase):
+class ThriftStressPeriodicTaskTest(TestCase):
     """Unit tests for ThriftStressPeriodicTask burst + final-check behavior."""
 
     def setUp(self) -> None:
@@ -209,6 +211,156 @@ class ThriftStressPeriodicTaskTest(unittest.IsolatedAsyncioTestCase):
         burst = next(iter(self.task._data.values()))
         self.assertEqual(burst["flap_interfaces"], ["eth1/3/1", "eth1/5/1"])
         self.assertEqual(burst["hostname"], "gtsw001.l1001.c085.ash6")
+
+    async def test_dynamic_flap_recovers_after_lldp_transport_failure(self) -> None:
+        driver = _make_fboss_driver(
+            extra_apis=["async_get_lldp_neighbors", "async_do_rapid_interface_flaps"]
+        )
+        driver.async_get_lldp_neighbors.side_effect = [
+            TransportError(
+                TransportErrorType.INTERNAL_ERROR, "Connection refused", 111, 0
+            ),
+            {"eth1/3/1": MagicMock(remote_device_name="fsw001.p001.m001.qzr1")},
+        ]
+        with (
+            patch(
+                f"{PERIODIC_TASKS_PATH}.async_get_device_driver",
+                AsyncMock(return_value=driver),
+            ),
+            patch(f"{PERIODIC_TASKS_PATH}.asyncio.sleep", AsyncMock()),
+        ):
+            await self.task.run(
+                {
+                    "hostname": "gtsw001.l1001.c085.ash6",
+                    "calls": [
+                        c.to_dict() for c in fboss_qsfp_flaps_only([], total_flaps=1)
+                    ],
+                    "resolve_flap_interfaces_from_lldp": True,
+                }
+            )
+        driver.async_do_rapid_interface_flaps.assert_awaited_once_with(
+            ["eth1/3/1"], 6, 1
+        )
+        burst = next(iter(self.task._data.values()))
+        self.assertEqual(burst["success"], 1)
+        self.assertEqual(burst["flap_interfaces"], ["eth1/3/1"])
+
+    async def test_dynamic_flap_lldp_transport_retry_has_deadline(self) -> None:
+        driver = _make_fboss_driver(
+            extra_apis=["async_get_lldp_neighbors", "async_do_rapid_interface_flaps"]
+        )
+        driver.async_get_lldp_neighbors.side_effect = TransportError(
+            TransportErrorType.INTERNAL_ERROR, "Connection refused", 111, 0
+        )
+        with patch(
+            f"{PERIODIC_TASKS_PATH}.async_get_device_driver",
+            AsyncMock(return_value=driver),
+        ):
+            with self.assertRaises(TimeoutError):
+                await self.task.run(
+                    {
+                        "hostname": "gtsw001.l1001.c085.ash6",
+                        "calls": [
+                            c.to_dict()
+                            for c in fboss_qsfp_flaps_only([], total_flaps=1)
+                        ],
+                        "resolve_flap_interfaces_from_lldp": True,
+                        "burst_timeout_s": 0.01,
+                    }
+                )
+        driver.async_do_rapid_interface_flaps.assert_not_awaited()
+        self.assertFalse(self.task._data)
+
+    async def test_dynamic_flap_waits_for_lldp_after_transport_recovers(self) -> None:
+        driver = _make_fboss_driver(
+            extra_apis=["async_get_lldp_neighbors", "async_do_rapid_interface_flaps"]
+        )
+        driver.async_get_lldp_neighbors.side_effect = [
+            TransportError(
+                TransportErrorType.INTERNAL_ERROR, "Connection refused", 111, 0
+            ),
+            {},
+            {"eth1/4/1": MagicMock(remote_device_name="ixia-lab-001")},
+            {"eth1/3/1": MagicMock(remote_device_name="fsw001.p001.m001.qzr1")},
+        ]
+        with (
+            patch(
+                f"{PERIODIC_TASKS_PATH}.async_get_device_driver",
+                AsyncMock(return_value=driver),
+            ),
+            patch(f"{PERIODIC_TASKS_PATH}.asyncio.sleep", AsyncMock()),
+        ):
+            await self.task.run(
+                {
+                    "hostname": "gtsw001.l1001.c085.ash6",
+                    "calls": [
+                        c.to_dict() for c in fboss_qsfp_flaps_only([], total_flaps=1)
+                    ],
+                    "resolve_flap_interfaces_from_lldp": True,
+                }
+            )
+        driver.async_do_rapid_interface_flaps.assert_awaited_once_with(
+            ["eth1/3/1"], 6, 1
+        )
+        burst = next(iter(self.task._data.values()))
+        self.assertEqual(burst["flap_interfaces"], ["eth1/3/1"])
+        self.assertEqual(burst["success"], 1)
+
+    async def test_dynamic_flap_lldp_deadline_cancels_hung_rpc(self) -> None:
+        driver = _make_fboss_driver(
+            extra_apis=["async_get_lldp_neighbors", "async_do_rapid_interface_flaps"]
+        )
+        pending = asyncio.Future()
+
+        async def hung_lldp():
+            return await pending
+
+        driver.async_get_lldp_neighbors.side_effect = hung_lldp
+        with patch(
+            f"{PERIODIC_TASKS_PATH}.async_get_device_driver",
+            AsyncMock(return_value=driver),
+        ):
+            with self.assertRaises(TimeoutError):
+                await self.task.run(
+                    {
+                        "hostname": "gtsw001.l1001.c085.ash6",
+                        "calls": [
+                            c.to_dict()
+                            for c in fboss_qsfp_flaps_only([], total_flaps=1)
+                        ],
+                        "resolve_flap_interfaces_from_lldp": True,
+                        "burst_timeout_s": 0.01,
+                    }
+                )
+        self.assertTrue(pending.cancelled())
+        driver.async_do_rapid_interface_flaps.assert_not_awaited()
+
+    async def test_dynamic_flap_lldp_other_errors_and_cancellation_propagate(
+        self,
+    ) -> None:
+        driver = _make_fboss_driver(
+            extra_apis=["async_get_lldp_neighbors", "async_do_rapid_interface_flaps"]
+        )
+        for error in (ValueError("Invalid LLDP"), asyncio.CancelledError()):
+            with self.subTest(error=type(error).__name__):
+                driver.async_get_lldp_neighbors.side_effect = error
+                with patch(
+                    f"{PERIODIC_TASKS_PATH}.async_get_device_driver",
+                    AsyncMock(return_value=driver),
+                ):
+                    with self.assertRaises(type(error)) as raised:
+                        await self.task.run(
+                            {
+                                "hostname": "gtsw001.l1001.c085.ash6",
+                                "calls": [
+                                    c.to_dict()
+                                    for c in fboss_qsfp_flaps_only([], total_flaps=1)
+                                ],
+                                "resolve_flap_interfaces_from_lldp": True,
+                            }
+                        )
+                self.assertIs(raised.exception, error)
+        driver.async_do_rapid_interface_flaps.assert_not_awaited()
 
     async def test_final_check_fails_when_dynamically_flapped_port_is_down(
         self,
@@ -313,12 +465,13 @@ class ThriftStressPeriodicTaskTest(unittest.IsolatedAsyncioTestCase):
             f"{PERIODIC_TASKS_PATH}.async_get_device_driver",
             AsyncMock(return_value=driver),
         ):
-            with self.assertRaisesRegex(RuntimeError, "non-IXIA LLDP"):
+            with self.assertRaisesRegex(TimeoutError, "non-IXIA LLDP"):
                 await self.task.run(
                     {
                         "hostname": "gtsw001.l1001.c085.ash6",
                         "calls": [c.to_dict() for c in payload],
                         "resolve_flap_interfaces_from_lldp": True,
+                        "burst_timeout_s": 0.01,
                     }
                 )
 

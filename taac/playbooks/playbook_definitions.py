@@ -1815,6 +1815,7 @@ def create_thft_playbooks(
     flap_burst_timeout_s: float = 60.0,
     include_kitchen_sink: bool = False,
     kitchen_sink_test_duration_s: int | None = None,
+    agent_restart_service: Service = Service.AGENT,
 ) -> list[Playbook]:
     """Return the standard NPI THFT playbook set for any FBOSS DUT.
 
@@ -1830,6 +1831,7 @@ def create_thft_playbooks(
     and `kitchen_sink_test_duration_s` can independently set the optional
     kitchen-sink duration. Omitting it preserves the existing behavior of
     using `test_duration_s` for the kitchen sink.
+    `agent_restart_service` selects the foreground target of THFT_002.
     """
     playbooks: list[Playbook] = []
     playbooks.append(
@@ -1848,6 +1850,9 @@ def create_thft_playbooks(
         service,
         service_label,
     ) in _THFT_RESTART_VARIANTS:
+        if playbook_number == 2:
+            service = agent_restart_service
+            service_label = taac_types.SERVICE_NAME_MAP[agent_restart_service]
         playbooks.append(
             create_thft_restart_playbook(
                 device_name=device_name,
@@ -1883,6 +1888,9 @@ def add_common_checks_to_thft_playbooks(
     require_all_bgp_sessions_established: bool = True,
     expected_established_bgp_sessions: int | None = None,
     compare_bgp_peer_routes: bool = True,
+    systemctl_active_services: list[str] | None = None,
+    check_scope: hc_types.Scope | None = None,
+    expected_restart_cascades: dict[str, list[str]] | None = None,
 ) -> list[Playbook]:
     """Add THFT validation chain (BGP-only mirror of cpu_queue's chain).
 
@@ -1900,6 +1908,9 @@ def add_common_checks_to_thft_playbooks(
     to drop services not present on a given DUT — e.g. IcePack backend
     GTSWs don't run openr, so omitting it here avoids a postcheck
     false-fail on INACTIVE.
+
+    `expected_restart_cascades` supplies device-specific replacements for
+    the restart expectations keyed by playbook name suffix.
 
     `SERVICE_RESTART_CHECK` semantics per playbook:
       - THFT_001 (baseline, no foreground restart): plain check, any
@@ -1941,7 +1952,7 @@ def add_common_checks_to_thft_playbooks(
                 else []
             )
         ),
-        create_systemctl_active_state_check(),
+        create_systemctl_active_state_check(services_json=systemctl_active_services),
         create_memory_utilization_check(
             threshold=5 * (1024**3),  # 5 GiB
             start_time_jq_var="test_case_start_time",
@@ -1971,10 +1982,12 @@ def add_common_checks_to_thft_playbooks(
     # propagate and don't need to be listed here.
     _restart_suffix_to_daemons: dict[str, list[str]] = {
         "_with_restart_wedge_agent": WEDGE_AGENT_BINDS_TO_CASCADE,
+        "_with_restart_fboss_sw_agent": ["fboss_sw_agent"],
         "_with_restart_bgpd": ["bgpd"],
         "_with_restart_qsfp_service": ["qsfp_service"],
         "_with_restart_fsdb": ["fsdb"],
     }
+    _restart_suffix_to_daemons.update(expected_restart_cascades or {})
     result = []
     for pb in playbooks:
         expected_restarted = None
@@ -2006,6 +2019,13 @@ def add_common_checks_to_thft_playbooks(
                 threshold=400.0, start_time_jq_var="test_case_start_time"
             ),
         ]
+        prechecks = list(pb.prechecks or []) + common_prechecks
+        postchecks = per_playbook_postchecks + list(pb.postchecks or [])
+        snapshot_checks = list(pb.snapshot_checks or []) + common_snapshot_checks
+        if check_scope is not None:
+            prechecks = [check(check_scope=check_scope) for check in prechecks]
+            postchecks = [check(check_scope=check_scope) for check in postchecks]
+            snapshot_checks = [check(check_scope=check_scope) for check in snapshot_checks]
         result.append(
             Playbook(
                 name=pb.name,
@@ -2015,9 +2035,9 @@ def add_common_checks_to_thft_playbooks(
                 traffic_items_to_start=pb.traffic_items_to_start,
                 enabled=pb.enabled,
                 backup_and_restore_ixia_config=pb.backup_and_restore_ixia_config,
-                prechecks=list(pb.prechecks or []) + common_prechecks,
-                postchecks=per_playbook_postchecks + list(pb.postchecks or []),
-                snapshot_checks=list(pb.snapshot_checks or []) + common_snapshot_checks,
+                prechecks=prechecks,
+                postchecks=postchecks,
+                snapshot_checks=snapshot_checks,
                 skip_test_config_prechecks=pb.skip_test_config_prechecks,
                 skip_test_config_postchecks=pb.skip_test_config_postchecks,
                 skip_test_config_snapshot_checks=pb.skip_test_config_snapshot_checks,

@@ -26,6 +26,7 @@ from taac.utils.common import (
 )
 from taac.utils.driver_factory import async_get_device_driver
 from taac.health_check.health_check import types as hc_types
+from thrift.python.exceptions import TransportError
 
 try:
     from configerator.client import ConfigeratorClient
@@ -2605,20 +2606,43 @@ class ThriftStressPeriodicTask(PeriodicTask):
             )
             return
 
+        burst_timeout_s: float = float(
+            params.get("burst_timeout_s", self.DEFAULT_BURST_TIMEOUT_S)
+        )
         flap_interfaces: t.List[str] = []
         if params.get("resolve_flap_interfaces_from_lldp", False):
-            lldp_neighbors = await driver.async_get_lldp_neighbors()
-            flap_interfaces = sorted(
-                interface
-                for interface, neighbor in lldp_neighbors.items()
-                if "ixia"
-                not in str(getattr(neighbor, "remote_device_name", "")).lower()
-            )
-            if not flap_interfaces:
-                raise RuntimeError(
-                    f"thrift_stress: {hostname} has no non-IXIA LLDP interfaces "
-                    "eligible for the dynamic flap"
-                )
+            try:
+                async with asyncio.timeout(burst_timeout_s):
+                    while True:
+                        try:
+                            lldp_neighbors = await driver.async_get_lldp_neighbors()
+                        except TransportError as error:
+                            self.logger.warning(
+                                f"thrift_stress: LLDP transport failure on {hostname}: "
+                                f"{error}; retrying in 5s within {burst_timeout_s}s"
+                            )
+                            await asyncio.sleep(5)
+                            continue
+                        flap_interfaces = sorted(
+                            interface
+                            for interface, neighbor in lldp_neighbors.items()
+                            if "ixia"
+                            not in str(
+                                getattr(neighbor, "remote_device_name", "")
+                            ).lower()
+                        )
+                        if flap_interfaces:
+                            break
+                        self.logger.warning(
+                            f"thrift_stress: {hostname} has no non-IXIA LLDP "
+                            f"interfaces yet; retrying in 5s within {burst_timeout_s}s"
+                        )
+                        await asyncio.sleep(5)
+            except TimeoutError as error:
+                raise TimeoutError(
+                    f"thrift_stress: non-IXIA LLDP interface discovery on {hostname} "
+                    f"did not recover within {burst_timeout_s}s"
+                ) from error
             self.logger.info(
                 f"thrift_stress: dynamically selected {len(flap_interfaces)} "
                 f"non-IXIA LLDP interfaces for this flap cycle: {flap_interfaces}"
@@ -2658,9 +2682,6 @@ class ThriftStressPeriodicTask(PeriodicTask):
             )
             return
 
-        burst_timeout_s: float = float(
-            params.get("burst_timeout_s", self.DEFAULT_BURST_TIMEOUT_S)
-        )
         self.logger.info(
             f"thrift_stress: firing {len(coros)} concurrent calls "
             f"(timeout={burst_timeout_s:.0f}s) ({', '.join(scheduled_breakdown)})"
