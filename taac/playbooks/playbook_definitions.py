@@ -17059,6 +17059,7 @@ def gen_snake_playbooks(
     flap_recovery_check_retry_count: t.Optional[int] = None,
     flap_recovery_check_retry_delay_seconds: float = 10.0,
     skip_lldp_check: bool = False,
+    include_split_agent_warmboot: bool = False,
 ) -> t.List[taac_types.Playbook]:
     def _create_flap_recovery_checks() -> t.List[
         taac_types.PointInTimeHealthCheck
@@ -17767,6 +17768,44 @@ def gen_snake_playbooks(
                 postchecks=_postchecks + gen_ptp_health_checks(),
             ),
         )
+
+    if include_split_agent_warmboot:
+        # Same shape as test_snake_agent_warmboot, but restarts one half of a
+        # split agent. On native NetOS the hw agent unit is also what
+        # Service.AGENT resolves to, so the hw variant repeats the wedge_agent
+        # warmboot there.
+        for name, service in (
+            ("test_snake_sw_agent_warmboot", taac_types.Service.FBOSS_SW_AGENT),
+            ("test_snake_hw_agent_warmboot", taac_types.Service.FBOSS_HW_AGENT_0),
+        ):
+            playbooks.append(
+                taac_types.Playbook(
+                    name=name,
+                    iteration=iteration,
+                    prechecks=_prechecks,
+                    postchecks=_postchecks,
+                    stages=[
+                        create_steps_stage(
+                            steps=[
+                                create_service_interruption_step(
+                                    service=service,
+                                    trigger=taac_types.ServiceInterruptionTrigger.SYSTEMCTL_RESTART,
+                                ),
+                                create_service_convergence_step(
+                                    services=[taac_types.Service.AGENT],
+                                    description="Wait for wedge_agent to converge",
+                                ),
+                                create_longevity_step(
+                                    duration=SNAKE_AGENT_LLDP_SETTLE_S,
+                                    description=(
+                                        "Let LLDP neighbors relearn before postchecks"
+                                    ),
+                                ),
+                            ]
+                        )
+                    ],
+                )
+            )
 
     if manual_test_interfaces:
         playbooks.extend(

@@ -55,5 +55,48 @@ class SnakeWarmbootSettleTest(unittest.TestCase):
         self.assertEqual(params["duration"], SNAKE_AGENT_LLDP_SETTLE_S)
 
 
+_SPLIT_AGENT_WARMBOOT_SERVICES = {
+    "test_snake_sw_agent_warmboot": taac_types.Service.FBOSS_SW_AGENT,
+    "test_snake_hw_agent_warmboot": taac_types.Service.FBOSS_HW_AGENT_0,
+}
+
+
+class SnakeSplitAgentWarmbootTest(unittest.TestCase):
+    def test_off_by_default(self) -> None:
+        names = {pb.name for pb in gen_snake_playbooks(hostname="dut1", iteration=1)}
+        self.assertTrue(names.isdisjoint(_SPLIT_AGENT_WARMBOOT_SERVICES))
+
+    def test_restarts_one_split_agent_then_settles(self) -> None:
+        playbooks = {
+            pb.name: pb
+            for pb in gen_snake_playbooks(
+                hostname="dut1", iteration=1, include_split_agent_warmboot=True
+            )
+        }
+        for name, service in _SPLIT_AGENT_WARMBOOT_SERVICES.items():
+            with self.subTest(playbook=name):
+                self.assertIn(name, playbooks)
+                steps = playbooks[name].stages[0].steps
+                self.assertEqual(
+                    [
+                        taac_types.StepName.SERVICE_INTERRUPTION_STEP,
+                        taac_types.StepName.SERVICE_CONVERGENCE_STEP,
+                        taac_types.StepName.LONGEVITY_STEP,
+                    ],
+                    [s.name for s in steps],
+                )
+                interruption = json.loads(steps[0].input_json or "{}")
+                self.assertEqual(service, interruption["name"])
+                step_params = steps[2].step_params
+                if step_params is None or step_params.json_params is None:
+                    raise AssertionError(
+                        "LONGEVITY_STEP is missing serialized parameters"
+                    )
+                self.assertEqual(
+                    SNAKE_AGENT_LLDP_SETTLE_S,
+                    json.loads(step_params.json_params)["duration"],
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

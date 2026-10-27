@@ -188,6 +188,7 @@ def gen_snake_test_config(
     rapid_a_end_flap_interval_s: int = 6,
     rapid_a_end_flap_rest_s: int = 120,
     rapid_a_end_flap_longevity_s: int = 300,
+    include_split_agent_warmboot: bool = False,
     manual_test_interfaces: t.Optional[t.List[str]] = None,
     ixia_ports: t.Optional[t.List[str]] = None,
     precheck_packet_loss_clear_stats: bool = False,
@@ -299,6 +300,11 @@ def gen_snake_test_config(
                 ``rapid_a_end_flap_rest_s`` rest, a stats clear, a mid-test
                 validation, and a ``rapid_a_end_flap_longevity_s`` soak.
                 Defaults: 1h continuous / 6s gap / 2m rest / 5m soak.
+            include_split_agent_warmboot: When True, include
+                ``test_snake_sw_agent_warmboot`` and
+                ``test_snake_hw_agent_warmboot``, which restart
+                ``fboss_sw_agent`` and ``fboss_hw_agent@0`` separately. Only
+                for platforms that run a split agent.
             manual_test_interfaces: Optional explicit interface list
                 forwarded to ``gen_snake_playbooks`` for tests that
                 need an operator-pinned target set.
@@ -473,6 +479,7 @@ def gen_snake_test_config(
             flap_recovery_check_retry_delay_seconds
         ),
         skip_lldp_check=skip_lldp_check,
+        include_split_agent_warmboot=include_split_agent_warmboot,
     )
     if playbooks_to_include is not None:
         included_playbooks = set(playbooks_to_include)
