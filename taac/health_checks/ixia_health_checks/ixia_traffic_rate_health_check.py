@@ -1,5 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-unsafe
+import math
 import typing as t
 
 from taac.health_checks.abstract_health_check import (
@@ -16,6 +17,7 @@ from tabulate import tabulate
 # ``check_params["base_bandwidth_gbps"]`` is absent. 400G for back-compat with
 # configs written against 400G ports.
 DEFAULT_BASE_BANDWIDTH_GBPS: float = 400.0
+_RATE_KEYS = {"tx_rate": "Tx Rate", "rx_rate": "Rx Rate"}
 
 
 class IxiaTrafficRateHealthCheck(
@@ -48,6 +50,7 @@ class IxiaTrafficRateHealthCheck(
             rate_tolerance_percent = self._validate_rate_tolerance_percent(
                 check_params.get("rate_tolerance_percent")
             )
+            rate_metrics = self._validate_rate_metrics(check_params.get("rate_metrics"))
         except ValueError as error:
             return hc_types.HealthCheckResult(
                 status=hc_types.HealthCheckStatus.ERROR,
@@ -61,6 +64,7 @@ class IxiaTrafficRateHealthCheck(
                     threshold,
                     base_bandwidth_gbps,
                     rate_tolerance_percent,
+                    rate_metrics,
                 )
             )
 
@@ -92,6 +96,7 @@ class IxiaTrafficRateHealthCheck(
         threshold: hc_types.TrafficRateThreshold,
         base_bandwidth_gbps: float = DEFAULT_BASE_BANDWIDTH_GBPS,
         rate_tolerance_percent: float | None = None,
+        rate_metrics: t.Sequence[str] | None = None,
     ) -> t.List[t.Dict[str, t.Any]]:
         """
         Verify if the port stats exceed the given threshold.
@@ -105,9 +110,12 @@ class IxiaTrafficRateHealthCheck(
                 real port speed (e.g. 200 for 200G, 800 for 800G) via
                 ``check_params["base_bandwidth_gbps"]``.
             rate_tolerance_percent: When set, treats the threshold as an expected
-                rate and requires both TX and RX to remain within this percentage
+                rate and requires the selected rates to remain within this percentage
                 above or below it. When omitted, preserves the historical
                 lower-bound-only behavior.
+            rate_metrics: Optional ``["tx_rate"]``, ``["rx_rate"]``, or both.
+                Omitting it preserves checks of both directions. This selection
+                is independent of the legacy threshold.metric field.
 
         Returns:
             A list of dictionaries containing the ports that exceeded the threshold.
@@ -115,10 +123,24 @@ class IxiaTrafficRateHealthCheck(
         rate_tolerance_percent = self._validate_rate_tolerance_percent(
             rate_tolerance_percent
         )
+        rate_metrics = self._validate_rate_metrics(rate_metrics)
         rate_violations = []
 
         threshold_value = threshold.value
         value_type = threshold.threshold_type
+        expected_rate_gbps = (
+            base_bandwidth_gbps * (threshold_value / 100.0)
+            if value_type == hc_types.ThresholdType.PERCENT
+            else threshold_value
+        )
+        tolerance = (rate_tolerance_percent or 0) / 100.0
+        minimum_rate_gbps = expected_rate_gbps * (1.0 - tolerance)
+        maximum_rate_gbps = (
+            expected_rate_gbps * (1.0 + tolerance)
+            if rate_tolerance_percent is not None
+            else None
+        )
+        observed_identifiers = set()
 
         for stat in latest_stats:
             identifier = stat["identifier"]
@@ -126,43 +148,40 @@ class IxiaTrafficRateHealthCheck(
             # If traffic item names are specified, make sure the identifier matches one of them
             if threshold.names and identifier not in threshold.names:
                 continue
+            observed_identifiers.add(identifier)
 
-            tx_rate = stat.get("Tx Rate")
-            rx_rate = stat.get("Rx Rate")
-            if tx_rate is None and rx_rate is None:
-                continue
-            # Convert the tx_rate and rx_rate from Mbps to Gbps
-            # pyrefly: ignore [unsupported-operation]
-            tx_rate_gbps = tx_rate / 1000.0
-            # pyrefly: ignore [unsupported-operation]
-            rx_rate_gbps = rx_rate / 1000.0
+            rates: dict[str, float | None] = {}
+            for metric, key in _RATE_KEYS.items():
+                try:
+                    rates[metric] = float(stat[key]) / 1000.0
+                except (KeyError, TypeError, ValueError):
+                    rates[metric] = None
+            tx_rate_gbps = rates["tx_rate"]
+            rx_rate_gbps = rates["rx_rate"]
 
             self.logger.info(
                 f"For {identifier} observed traffic rate - Tx Rate: {tx_rate_gbps} Gbps, Rx Rate: {rx_rate_gbps} Gbps"
             )
 
-            if value_type == hc_types.ThresholdType.PERCENT:
-                tx_rate_threshold_gbps = base_bandwidth_gbps * (threshold_value / 100.0)
-                rx_rate_threshold_gbps = base_bandwidth_gbps * (threshold_value / 100.0)
-
-            else:
-                tx_rate_threshold_gbps = threshold_value
-                rx_rate_threshold_gbps = threshold_value
-
-            if rate_tolerance_percent is None:
-                rate_is_invalid = (
-                    tx_rate_gbps <= tx_rate_threshold_gbps
-                    or rx_rate_gbps <= rx_rate_threshold_gbps
+            invalid_metrics = []
+            selected_rates: list[float] = []
+            for metric in rate_metrics:
+                rate = rates[metric]
+                if rate is None or not math.isfinite(rate):
+                    invalid_metrics.append(metric)
+                else:
+                    selected_rates.append(rate)
+            if invalid_metrics:
+                rate_is_invalid = True
+            elif rate_tolerance_percent is None:
+                rate_is_invalid = any(
+                    rate <= minimum_rate_gbps for rate in selected_rates
                 )
-                minimum_rate_gbps = tx_rate_threshold_gbps
-                maximum_rate_gbps = None
             else:
-                tolerance = rate_tolerance_percent / 100.0
-                minimum_rate_gbps = tx_rate_threshold_gbps * (1.0 - tolerance)
-                maximum_rate_gbps = tx_rate_threshold_gbps * (1.0 + tolerance)
-                rate_is_invalid = not (
-                    minimum_rate_gbps <= tx_rate_gbps <= maximum_rate_gbps
-                    and minimum_rate_gbps <= rx_rate_gbps <= maximum_rate_gbps
+                assert maximum_rate_gbps is not None
+                rate_is_invalid = not all(
+                    minimum_rate_gbps <= rate <= maximum_rate_gbps
+                    for rate in selected_rates
                 )
 
             if rate_is_invalid:
@@ -174,9 +193,47 @@ class IxiaTrafficRateHealthCheck(
                 }
                 if maximum_rate_gbps is not None:
                     violation["Maximum Rate (Gbps)"] = maximum_rate_gbps
+                if invalid_metrics:
+                    violation["Reason"] = (
+                        "Missing or nonfinite selected rate(s): "
+                        + ", ".join(invalid_metrics)
+                    )
                 rate_violations.append(violation)
 
+        missing_identifiers = (
+            set(threshold.names) - observed_identifiers
+            if threshold.names
+            else ({"<all traffic items>"} if not observed_identifiers else set())
+        )
+        for identifier in sorted(missing_identifiers):
+            rate_violations.append(
+                {
+                    "identifier": identifier,
+                    "Tx Rate (Gbps)": None,
+                    "Rx Rate (Gbps)": None,
+                    "Minimum Rate (Gbps)": minimum_rate_gbps,
+                    "Reason": "Expected traffic item missing from rate statistics",
+                }
+            )
         return rate_violations
+
+    @staticmethod
+    def _validate_rate_metrics(value: t.Any) -> tuple[str, ...]:
+        if value is None:
+            return ("tx_rate", "rx_rate")
+        if (
+            not isinstance(value, (list, tuple))
+            or not value
+            or any(
+                not isinstance(metric, str) or metric not in _RATE_KEYS
+                for metric in value
+            )
+            or len(set(value)) != len(value)
+        ):
+            raise ValueError(
+                "rate_metrics must be a nonempty list of unique 'tx_rate' or 'rx_rate' values"
+            )
+        return tuple(value)
 
     @staticmethod
     def _validate_rate_tolerance_percent(value: t.Any) -> float | None:

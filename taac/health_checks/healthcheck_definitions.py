@@ -1770,8 +1770,13 @@ def create_ixia_traffic_rate_check(
     when the traffic items are running against non-400G ports.
 
     When ``rate_tolerance_percent`` is set, each threshold becomes an expected
-    rate and both TX and RX must stay within that percentage above or below it.
+    rate and the selected rates must stay within that percentage above or below it.
     Omitting it preserves the historical lower-bound-only behavior.
+
+    Runtime ``check_params.json_params`` may explicitly select
+    ``rate_metrics=["rx_rate"]`` or ``["tx_rate"]``. Omitting this option
+    preserves verification of both directions. Missing selected rate data or
+    missing named traffic items fail the check.
     """
     if json_params is not None and thresholds is not None:
         raise ValueError("json_params and thresholds are mutually exclusive")

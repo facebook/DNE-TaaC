@@ -23,7 +23,12 @@ class IxiaTrafficRateHealthCheckTest(TestCase):
             metric=hc_types.TrafficRateMetric.TX_RATE,
         )
 
-    def _violations(self, tx_gbps: float, rx_gbps: float) -> list[dict[str, t.Any]]:
+    def _violations(
+        self,
+        tx_gbps: float,
+        rx_gbps: float,
+        rate_metrics: list[str] | None = None,
+    ) -> list[dict[str, t.Any]]:
         return self.health_check.verify_traffic_rate_threshold(
             [
                 {
@@ -35,6 +40,7 @@ class IxiaTrafficRateHealthCheckTest(TestCase):
             self.threshold,
             base_bandwidth_gbps=200,
             rate_tolerance_percent=10,
+            rate_metrics=rate_metrics,
         )
 
     def test_expected_rate_within_tolerance_passes(self) -> None:
@@ -54,6 +60,78 @@ class IxiaTrafficRateHealthCheckTest(TestCase):
         violations = self._violations(tx_gbps=180, rx_gbps=198.1)
 
         self.assertEqual(1, len(violations))
+
+    def test_received_only_selection_preserves_received_rate_bounds(self) -> None:
+        self.assertEqual(
+            [], self._violations(tx_gbps=300, rx_gbps=180, rate_metrics=["rx_rate"])
+        )
+        for rx_gbps in [161.9, 198.1]:
+            with self.subTest(rx_gbps=rx_gbps):
+                self.assertEqual(
+                    1,
+                    len(self._violations(300, rx_gbps, rate_metrics=["rx_rate"])),
+                )
+
+    def test_transmitted_only_selection_is_explicit(self) -> None:
+        self.assertEqual(
+            [], self._violations(tx_gbps=180, rx_gbps=0, rate_metrics=["tx_rate"])
+        )
+        self.assertEqual(1, len(self._violations(tx_gbps=180, rx_gbps=0)))
+
+    def test_selected_nonfinite_rate_fails(self) -> None:
+        for rx_gbps in [float("nan"), float("inf")]:
+            with self.subTest(rx_gbps=rx_gbps):
+                violations = self._violations(180, rx_gbps, rate_metrics=["rx_rate"])
+                self.assertEqual(1, len(violations))
+                self.assertIn("nonfinite", violations[0]["Reason"])
+
+    def test_selected_missing_rate_fails(self) -> None:
+        violations = self.health_check.verify_traffic_rate_threshold(
+            [{"identifier": "RDMA", "Tx Rate": 180_000}],
+            self.threshold,
+            base_bandwidth_gbps=200,
+            rate_tolerance_percent=10,
+            rate_metrics=["rx_rate"],
+        )
+        self.assertEqual(1, len(violations))
+        self.assertIn("Missing", violations[0]["Reason"])
+
+    def test_missing_named_traffic_item_fails(self) -> None:
+        violations = self.health_check.verify_traffic_rate_threshold(
+            [{"identifier": "OTHER", "Tx Rate": 180_000, "Rx Rate": 180_000}],
+            self.threshold,
+            rate_metrics=["rx_rate"],
+        )
+        self.assertEqual(1, len(violations))
+        self.assertEqual("RDMA", violations[0]["identifier"])
+        self.assertIn("missing", violations[0]["Reason"])
+
+    def test_invalid_rate_selection_is_rejected(self) -> None:
+        for value in [[], "rx_rate", ["unknown"], ["rx_rate", "rx_rate"]]:
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "rate_metrics"),
+            ):
+                self.health_check.verify_traffic_rate_threshold(
+                    [], self.threshold, rate_metrics=value
+                )
+
+    async def test_run_uses_received_only_selection_from_check_params(self) -> None:
+        ixia = MagicMock()
+        ixia.has_traffic_items.return_value = True
+        ixia.get_latest_stats_traffic.return_value = [
+            {"identifier": "RDMA", "Tx Rate": 300_000, "Rx Rate": 180_000}
+        ]
+        result = await self.health_check._run(
+            ixia,
+            hc_types.IxiaTrafficRateHealthCheckIn(thresholds=[self.threshold]),
+            {
+                "base_bandwidth_gbps": 200,
+                "rate_tolerance_percent": 10,
+                "rate_metrics": ["rx_rate"],
+            },
+        )
+        self.assertEqual(hc_types.HealthCheckStatus.PASS, result.status)
 
     def test_invalid_tolerance_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "between 0 and 100"):
