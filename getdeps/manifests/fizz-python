@@ -4,7 +4,7 @@
 # Snapshot: v2026.07.27.00 (upstream weekly release tag)
 [manifest]
 name = fizz-python
-fbsource_path = fbcode/fizz
+fbsource_path = xplat/fizz
 shipit_project = fizz
 shipit_fbcode_builder = true
 
@@ -46,5 +46,5 @@ zstd-python
 googletest
 
 [shipit.pathmap]
-fbcode/fizz/public_tld = .
-fbcode/fizz = fizz
+xplat/fizz/public_tld = .
+xplat/fizz = fizz
