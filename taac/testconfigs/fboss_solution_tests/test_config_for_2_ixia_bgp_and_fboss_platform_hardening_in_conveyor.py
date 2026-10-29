@@ -415,6 +415,7 @@ def get_bgp_peer_config_tasks(
     route_map_downlink_egress,
     ecmp_group_overflow_prefix,
     v6_uplink_prefix,
+    v6_downlink_prefix=None,
 ):
     """
     Returns the list of BGP peer configuration tasks that were originally part of list b in
@@ -701,6 +702,26 @@ def get_bgp_peer_config_tasks(
                     "out_stmt_name": "RANDOM",
                 },
             ),
+            *(
+                [
+                    create_coop_register_patcher_task(
+                        hostname=device_name,
+                        config_names=[
+                            "bgpcpp",
+                            "bgpcpp_softdrain",
+                        ],
+                        patcher_name=f"add_bgp_policy_match_prefix_to_propagate_routes_{route_map_downlink_ingress}_downlink",
+                        py_func_name="add_bgp_policy_match_prefix_to_propagate_routes",
+                        patcher_args={
+                            "matching_prefix": f"{v6_downlink_prefix}::/16",
+                            "in_stmt_name": route_map_downlink_ingress,
+                            "out_stmt_name": "RANDOM",
+                        },
+                    )
+                ]
+                if v6_downlink_prefix is not None
+                else []
+            ),
             create_wait_for_bgp_convergence_task(hostnames=[device_name]),
             create_coop_register_patcher_task(
                 hostname=device_name,
@@ -867,6 +888,8 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     v4_uplink_prefix="102",
     v4_downlink_prefix="101",
     v6_downlink_prefix="3000",
+    propagate_v6_downlink_prefix=False,
+    include_v4_directional_traffic=True,
     ecmp_member_limit=11500,
     ecmp_member_test_member_limit=11950,
     ecmp_member_test_group_limit=1300,
@@ -875,6 +898,7 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     # generate_prefix_nh_list_map asserts on the total.
     ecmp_nh_device_group_count=None,
     uplink_interfaces_to_flap=None,
+    qsfp_uplink_interfaces_to_flap=None,
     neighbor_dut_name=None,
     neighbor_dut_interfaces_to_flap=None,
     neighbor_interfaces_to_flap=None,
@@ -959,6 +983,10 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
         ecmp_group_overflow_prefix / v6_uplink_prefix / v4_session_flapping_prefix /
         v6_prefix_flapping_prefix / v4_uplink_prefix / v4_downlink_prefix /
         v6_downlink_prefix: Prefix string roots used to construct test prefixes.
+        propagate_v6_downlink_prefix: Add the downlink traffic prefix to the
+            downlink ingress policy for bidirectional traffic.
+        include_v4_directional_traffic: Include IPv4 directional traffic in
+            traffic checks and flap-stage validation.
         ecmp_member_limit / ecmp_member_test_member_limit / ecmp_member_test_group_limit:
             ECMP member sizing parameters for the dedicated ECMP test phase.
         uplink_interfaces_to_flap: DUT uplink ports for the UCMP-disabled port-flap
@@ -976,6 +1004,9 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
             port-state verification, so nothing else needs the Endpoint.
         churn_restart_period_s / churn_restart_duration_s / churn_flap_iterations /
             churn_coldboot_iterations: agent-churn playbook knobs; None = creator default.
+        qsfp_uplink_interfaces_to_flap: Optional interface subset for the
+            QSFP low-power and TX-disable cases. Defaults to the full uplink
+            list so existing callers retain their current behavior.
         uplink_flap_iterations / uplink_flap_interval_s / uplink_flap_settle_s:
             Flap cycles per playbook, seconds between interface operations, and
             the post-recovery settle window before the zero-loss assertion.
@@ -1015,9 +1046,12 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
     ]
 
     directional_traffic_items = [
-        f"{device_name.upper()}_V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
-        f"{device_name.upper()}_V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK",
+        f"{device_name.upper()}_V6_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK"
     ]
+    if include_v4_directional_traffic:
+        directional_traffic_items.append(
+            f"{device_name.upper()}_V4_DIRECTIONAL_TRAFFIC_BETWEEN_DOWNLINK_AND_UPLINK"
+        )
 
     # TestConfig-level checks moved to playbook level
     _tc_prechecks = [
@@ -1162,6 +1196,11 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
         "snapshot_checks": _tc_snapshot_checks,
         "traffic_items_to_start": _uplink_flap_traffic_items,
     }
+    _qsfp_uplink_interfaces_to_flap = (
+        uplink_interfaces_to_flap
+        if qsfp_uplink_interfaces_to_flap is None
+        else qsfp_uplink_interfaces_to_flap
+    )
     _uplink_flap_playbooks = []
     if uplink_interfaces_to_flap:
         _uplink_flap_playbooks.append(
@@ -1186,13 +1225,13 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
                 # Same N-1 shape driven through the optics instead of the ASIC,
                 # so the three flap mechanisms are comparable on one port set.
                 create_ucmp_disabled_n_minus_1_uplinks_flap_playbook(
-                    uplink_interfaces_to_flap=uplink_interfaces_to_flap,
+                    uplink_interfaces_to_flap=_qsfp_uplink_interfaces_to_flap,
                     interface_flap_method=taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_POWER,
                     playbook_name="test_flap_n_minus_1_uplink_ports_qsfp_low_power",
                     **_flap_playbook_kwargs,
                 ),
                 create_ucmp_disabled_n_minus_1_uplinks_flap_playbook(
-                    uplink_interfaces_to_flap=uplink_interfaces_to_flap,
+                    uplink_interfaces_to_flap=_qsfp_uplink_interfaces_to_flap,
                     interface_flap_method=taac_types.InterfaceFlapMethod.FBOSS_WEDGE_QSFP_UTIL_TX,
                     playbook_name="test_flap_n_minus_1_uplink_ports_qsfp_tx_disable",
                     **_flap_playbook_kwargs,
@@ -1336,6 +1375,9 @@ def test_config_for_2_ixia_bgp_and_fboss_platform_hardening_in_conveyor(
             route_map_downlink_egress=route_map_downlink_egress,
             ecmp_group_overflow_prefix=ecmp_group_overflow_prefix,
             v6_uplink_prefix=v6_uplink_prefix,
+            v6_downlink_prefix=(
+                v6_downlink_prefix if propagate_v6_downlink_prefix else None
+            ),
         )
         + [
             # Task(
