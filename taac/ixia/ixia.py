@@ -1180,6 +1180,7 @@ class Ixia:
     _current_testconfig_name: t.Optional[str] = None
     _defer_traffic_preparation: bool = False
     auto_nrz_100g_rs_fec: bool = True
+    ixia_primary_chassis: t.Optional[str] = None
 
     def __init__(
         self,
@@ -1202,6 +1203,7 @@ class Ixia:
         ixia_recovery: t.Optional[t.Any] = None,
         trace_api_calls: bool = False,
         auto_nrz_100g_rs_fec: bool = True,
+        ixia_primary_chassis: t.Optional[str] = None,
     ) -> None:
         """Instantiates the object of class Ixia
 
@@ -1285,6 +1287,11 @@ class Ixia:
                 on 100G NRZ ports that are still on IEEE L1 defaults and do not
                 link up, and revert any that still stay down. See
                 `configure_nrz_100g_rs_fec`.
+
+            ixia_primary_chassis: Hostname or IP of the chassis-chain primary,
+                when it differs from the API server (e.g. every port is on a
+                secondary chassis). When set, chassis chain configuration
+                always runs, even for single-chassis port configs.
         """
 
         self.logger = logger if logger else get_logger()
@@ -1297,6 +1304,7 @@ class Ixia:
         self.primary_chassis_ip = (
             self.ixia_config.api_server_ip if self.ixia_config else chassis_ip
         )
+        self.ixia_primary_chassis = ixia_primary_chassis
 
         if session_id and not self.primary_chassis_ip:
             raise InvalidInputError("chassis_ip is required when using session_id")
@@ -9057,14 +9065,17 @@ class Ixia:
         # daisy-chain configuration is meaningless. The existing
         # fall-through below would try to add primary_chassis_ip as
         # a chassis, which hangs forever in "polling" state when
-        # primary_chassis_ip is just the API server.
+        # primary_chassis_ip is just the API server. An explicit
+        # ixia_primary_chassis is a real chassis, so it always gets chained.
         chassis_ips_in_use = {
             port_config.phy_port_config.chassis_ip
             for port_config in none_throws(self.ixia_config).port_configs
         }
-        if len(chassis_ips_in_use) <= 1:
+        if not self.ixia_primary_chassis and len(chassis_ips_in_use) <= 1:
             return
-        primary_chassis_address = none_throws(self.primary_chassis_ip)
+        primary_chassis_address = none_throws(
+            self.ixia_primary_chassis or self.primary_chassis_ip
+        )
         if not string_is_ip(primary_chassis_address):
             primary_chassis_address = get_ipv6_for_host(
                 primary_chassis_address
@@ -9080,15 +9091,18 @@ class Ixia:
                 "Unable to locate any ports from the Ixia configuration that are associated "
                 "with the primary chassis."
             )
-            portmap_assistant = self.session.PortMapAssistant()
-            # attempt to connect to at least one vport on the primary chassis
-            vport = portmap_assistant.Map(
-                IpAddress=primary_chassis_address,
-                CardId=1,
-                PortId=100,  # an arbitrary port id
-                Name="DO_NOT_USE",
-            )
-            portmap_assistant.Connect(ForceOwnership=False)
+            if self.ixia_primary_chassis:
+                self._add_chassis(primary_chassis_address)
+            else:
+                portmap_assistant = self.session.PortMapAssistant()
+                # attempt to connect to at least one vport on the primary chassis
+                vport = portmap_assistant.Map(
+                    IpAddress=primary_chassis_address,
+                    CardId=1,
+                    PortId=100,  # an arbitrary port id
+                    Name="DO_NOT_USE",
+                )
+                portmap_assistant.Connect(ForceOwnership=False)
         all_chassis = self.ixnetwork.AvailableHardware.Chassis.find()
         primary_chassis = next(
             (
@@ -9098,11 +9112,14 @@ class Ixia:
             ),
             None,
         )
+        # restpy builds a new object per iteration, so compare by address.
         secondary_chassis = [
-            chassis for chassis in all_chassis if chassis != primary_chassis
+            chassis
+            for chassis in all_chassis
+            if ipaddress.ip_address(chassis.Hostname) != primary_chassis_ip
         ]
         if not primary_chassis:
-            raise ValueError(f"Primary chassis {self.primary_chassis_ip} is not found")
+            raise ValueError(f"Primary chassis {primary_chassis_address} is not found")
         primary_chassis.SequenceId = 1
         primary_chassis.ChainTopology = "daisy"
         t.sequence_id = 2
@@ -9112,6 +9129,24 @@ class Ixia:
             t.sequence_id += 1
         if vport:
             vport.remove()
+        self.logger.info(
+            f"[IXIA] Chassis chain: primary={primary_chassis.Hostname}, "
+            f"secondaries={[chassis.Hostname for chassis in secondary_chassis]}"
+        )
+
+    def _add_chassis(self, chassis_address: str, timeout_s: int = 120) -> None:
+        # pyre-fixme[16]: `UhdIxnetwork` has no attribute `AvailableHardware`.
+        chassis = self.ixnetwork.AvailableHardware.Chassis.add(
+            Hostname=chassis_address
+        )
+        deadline = time.time() + timeout_s
+        while chassis.refresh().State != "ready":
+            if time.time() > deadline:
+                raise IxiaSetupError(
+                    f"Chassis {chassis_address} did not become ready within "
+                    f"{timeout_s}s (state={chassis.State})"
+                )
+            time.sleep(3)
 
     @external_api
     @require_traffic_item

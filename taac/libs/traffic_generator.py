@@ -99,6 +99,7 @@ class TrafficGenerator:
         basset_pool: t.Optional[str] = None,
         session_name: t.Optional[str] = None,
         primary_chassis_ip: t.Optional[str] = None,
+        ixia_primary_chassis: t.Optional[str] = None,
         cleanup_config: bool = True,
         tear_down_session: bool = True,
         session_id: t.Optional[int] = None,
@@ -131,6 +132,7 @@ class TrafficGenerator:
         self.name_to_endpoint = {endpoint.name: endpoint for endpoint in self.endpoints}
         self.endpoint_names = list(self.name_to_endpoint.keys())
         self.primary_chassis_ip = primary_chassis_ip
+        self.ixia_primary_chassis = ixia_primary_chassis
         self.cleanup_config: bool = cleanup_config
         self.session_id = session_id
         self.tear_down_session = tear_down_session
@@ -291,6 +293,7 @@ class TrafficGenerator:
                 ixia_protocol_verification_timeout=self.ixia_protocol_verification_timeout,
                 ixia_recovery=self.ixia_recovery,
                 trace_api_calls=self.trace_api_calls,
+                ixia_primary_chassis=self.ixia_primary_chassis,
             )
 
             # Topology cache is only for newly-created sessions. An explicit
