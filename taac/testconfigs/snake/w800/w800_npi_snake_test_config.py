@@ -226,6 +226,7 @@ def _gen_w800_snake_test_config(
     frame_size_settings: t.Optional[ixia_types.FrameSize] = None,
     benchmark_link_speed_gbps: t.Optional[int] = None,
     direct_ixia_connections: t.Optional[t.List[taac_types.DirectIxiaConnection]] = None,
+    default_ixia_l1_config: t.Optional[ixia_types.L1Config] = None,
 ) -> taac_types.TestConfig:
     """Build one W800 snake TestConfig.
 
@@ -279,6 +280,7 @@ def _gen_w800_snake_test_config(
         benchmark_packet_sizes=_W800_BENCHMARK_PACKET_SIZES,
         benchmark_line_rate=_W800_BENCHMARK_LINE_RATE,
         benchmark_link_speed_gbps=benchmark_link_speed_gbps,
+        default_ixia_l1_config=default_ixia_l1_config,
     )
 
 
@@ -394,6 +396,8 @@ WEDGE800BNHP_NPI_SNAKE_TEST_CONFIG_100G = _gen_w800_snake_test_config(
     destination_interface=_SNAKE_END_64_PORT,
     playbooks_to_include=_W800_NPI_CORE_PLAYBOOKS,
     direct_ixia_connections=_nhp_100g_ixia_connections(_IXIA30_ASH6_IP),
+    # DUT profile mandates RS528; IxNetwork session defaults leave FEC off.
+    default_ixia_l1_config=ixia_types.L1Config(enable_rs_fec=True),
 )
 
 
@@ -403,6 +407,8 @@ WEDGE800CNHP_NPI_SNAKE_TEST_CONFIG_100G = _gen_w800_snake_test_config(
     destination_interface=_SNAKE_END_64_PORT,
     playbooks_to_include=_W800_NPI_CORE_PLAYBOOKS,
     direct_ixia_connections=_nhp_100g_ixia_connections(_IXIA31_ASH6_IP),
+    # DUT profile mandates RS528; IxNetwork session defaults leave FEC off.
+    default_ixia_l1_config=ixia_types.L1Config(enable_rs_fec=True),
 )
 
 
@@ -547,6 +553,7 @@ WEDGE800BNHP_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_100G = _gen_w800_snake_test_config
     destination_interface=_SNAKE_END_64_PORT,
     benchmark_link_speed_gbps=100,
     direct_ixia_connections=_nhp_100g_ixia_connections(_IXIA30_ASH6_IP),
+    default_ixia_l1_config=ixia_types.L1Config(enable_rs_fec=True),
 )
 
 
@@ -556,6 +563,7 @@ WEDGE800CNHP_NPI_SNAKE_FULL_SUITE_TEST_CONFIG_100G = _gen_w800_snake_test_config
     destination_interface=_SNAKE_END_64_PORT,
     benchmark_link_speed_gbps=100,
     direct_ixia_connections=_nhp_100g_ixia_connections(_IXIA31_ASH6_IP),
+    default_ixia_l1_config=ixia_types.L1Config(enable_rs_fec=True),
 )
 
 

@@ -2392,8 +2392,24 @@ class Ixia:
             f"{_CYAN}[IXIA]{_RESET} Connecting {len(port_configs)} port(s)... "
             f"{_DIM}(force_ownership={self.force_take_port_ownership}){_RESET}"
         )
+        # Ports whose L1 requests RS-FEC cannot be link-up at connect time:
+        # the chassis only programs FEC once the vport exists. Skip the
+        # link-up gate when (and only when) such a port is present, push FEC
+        # below, then verify link explicitly before setup proceeds.
+        # IgnoreLinkUp is omitted entirely otherwise so the connect call is
+        # byte-identical to the pre-RS-FEC behavior for non-FEC batches.
+        fec_requested = any(
+            getattr(port_config.l1_config, "enable_rs_fec", False)
+            for port_config in port_configs
+            if port_config.l1_config is not None
+        )
+        connect_kwargs: t.Dict[str, t.Any] = {
+            "ForceOwnership": self.force_take_port_ownership,
+        }
+        if fec_requested:
+            connect_kwargs["IgnoreLinkUp"] = True
         try:
-            portmap_obj.Connect(ForceOwnership=self.force_take_port_ownership)
+            portmap_obj.Connect(**connect_kwargs)
         except Exception as connect_ex:
             # Log per-port link state to identify which port(s) failed
             self.logger.error(
@@ -2415,11 +2431,63 @@ class Ixia:
             raise IxiaPortUnavailableError(
                 f"Unable to assign IXIA physical ports: {connect_ex}"
             ) from connect_ex
+        if fec_requested:
+            self._push_rs_fec_and_verify_link(port_configs)
         elapsed_time = time.time() - start_time
         self.logger.info(
             f"{_GREEN}{_BOLD}[IXIA]{_RESET} All ports reserved in "
             f"{_YELLOW}{elapsed_time:.1f}s{_RESET}"
         )
+
+    def _push_rs_fec_and_verify_link(
+        self,
+        port_configs: t.Sequence[ixia_types.PortConfig],
+        timeout_seconds: float = 300,
+    ) -> None:
+        """Push requested RS-FEC and verify every port's link comes up.
+
+        Runs only when at least one port config asks for RS-FEC (the connect
+        above skipped the link-up gate for the whole batch in that case).
+        Pushes each FEC port's own L1 config, then polls until EVERY port in
+        the batch — FEC and non-FEC alike — reports link-up, restoring the
+        skipped gate; raises like a connect failure if the deadline passes.
+        """
+        all_ports: t.List[str] = []
+        fec_ports: t.Set[str] = set()
+        for port_config in port_configs:
+            desired_vport_name = DESIRED_VPORT_NAME.format(
+                port_identifier=self.get_port_identifier(port_config.port_name)
+            )
+            vports = self.ixnetwork.Vport.find(Name=desired_vport_name)
+            if len(vports) == 0:
+                raise IxiaPortUnavailableError(
+                    f"vport {desired_vport_name} missing after connect"
+                )
+            l1_config = port_config.l1_config
+            if l1_config is not None and getattr(
+                l1_config, "enable_rs_fec", False
+            ):
+                self.configure_l1_settings(vports[0], l1_config)
+                fec_ports.add(desired_vport_name)
+            all_ports.append(desired_vport_name)
+        deadline = time.time() + timeout_seconds
+        pending = set(all_ports)
+        while pending and time.time() < deadline:
+            for vport in self.ixnetwork.Vport.find():
+                if vport.Name in pending and vport.ConnectionState == "connectedLinkUp":
+                    pending.discard(vport.Name)
+                    via_fec = " with RS-FEC" if vport.Name in fec_ports else ""
+                    self.logger.info(
+                        f"{_GREEN}[IXIA]{_RESET}   {vport.Name} link up{via_fec}"
+                    )
+            if pending:
+                time.sleep(5)
+        if pending:
+            raise IxiaPortUnavailableError(
+                "Ports never linked up after connect "
+                "(link-up gate was skipped for RS-FEC): "
+                + ", ".join(sorted(pending))
+            )
 
     def configure_nrz_100g_rs_fec(
         self, port_configs: t.Sequence[ixia_types.PortConfig]
