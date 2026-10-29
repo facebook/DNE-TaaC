@@ -847,6 +847,20 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
             address_starts,
         )
 
+    def test_sc9_initializes_every_ixia_device_group_disabled(self) -> None:
+        config = create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
+            NRQEB009_ASH6,
+            parent_networks=BOUNDED_ECMP_PARENT_NETWORKS_IXIA03,
+        )
+        device_groups = [
+            group
+            for port in config.basic_port_configs or []
+            for group in port.device_group_configs or []
+        ]
+
+        self.assertEqual(8, len(device_groups))
+        self.assertTrue(all(not group.enable for group in device_groups))
+
     def test_update_packing_conveyor_config_is_ug_and_non_vacuous(self) -> None:
         config = create_bgp_ebb_update_packing_test_config(
             NRQEB008_ASH6,

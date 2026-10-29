@@ -2954,6 +2954,22 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sets_test_config(
     )
 
 
+def _with_ixia_device_groups_disabled(
+    basic_port_configs: Sequence[taac_types.BasicPortConfig],
+) -> list[taac_types.BasicPortConfig]:
+    return [
+        port_config(
+            device_group_configs=[
+                device_group(enable=False)
+                for device_group in port_config.device_group_configs or []
+            ]
+        )
+        if port_config.device_group_configs is not None
+        else port_config
+        for port_config in basic_port_configs
+    ]
+
+
 def create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
     physical_inventory: PhysicalInventory,
     name_override: str | None = None,
@@ -3027,7 +3043,9 @@ def create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(
         startup_checks=[],
         setup_tasks=compiled.setup_tasks,
         teardown_tasks=compiled.teardown_tasks,
-        basic_port_configs=compiled.basic_port_configs,
+        basic_port_configs=_with_ixia_device_groups_disabled(
+            compiled.basic_port_configs
+        ),
         playbooks=[
             get_bgp_ebb_bounded_ecmp_sc9_playbook(
                 device_name=device_name,

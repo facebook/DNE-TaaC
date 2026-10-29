@@ -568,7 +568,8 @@ def create_bgp_ixia_session_recovery_step(
     description: t.Optional[str] = None,
 ) -> Step:
     """Gate on every IXIA session matching the regex reaching ESTABLISHED,
-    restarting only the stuck sessions between bounded waits."""
+    restarting stuck sessions between bounded waits and resetting their full
+    peer objects once if a sparse restart leaves the down set unchanged."""
     if max_restart_rounds < 0:
         raise ValueError("max_restart_rounds must be non-negative")
     if min(initial_wait_seconds, restart_wait_seconds, poll_interval_seconds) <= 0:
@@ -8793,7 +8794,9 @@ def create_bgp_restart_setup_steps(
 
 
 def create_bgp_instability_setup_steps(
-    device_name: str, convergence_wait_seconds: int = 300
+    device_name: str,
+    convergence_wait_seconds: int = 300,
+    start_device_groups_after_enable: bool = False,
 ) -> t.List[Step]:
     """
     Create setup steps for BGP instability tests where sessions should be pre-established.
@@ -8804,6 +8807,9 @@ def create_bgp_instability_setup_steps(
     Args:
         device_name: Name of the device
         convergence_wait_seconds: Time to wait for BGP convergence (default: 5 minutes)
+        start_device_groups_after_enable: Start newly enabled IXIA device groups
+            and resolve their next-hops. Required when the declarative IXIA
+            config initializes the groups disabled.
 
     Returns:
         List of setup steps for BGP instability tests
@@ -8813,6 +8819,15 @@ def create_bgp_instability_setup_steps(
         enable_all_device_groups=True,
         enable_bgp_daemon=True,
     )
+    if start_device_groups_after_enable:
+        steps.insert(
+            1,
+            create_ixia_api_step(
+                api_name="start_device_groups",
+                args_dict={"device_group_name_regex": ".*"},
+                description="Start all device groups and resolve next-hops",
+            ),
+        )
 
     steps.append(
         create_longevity_step(

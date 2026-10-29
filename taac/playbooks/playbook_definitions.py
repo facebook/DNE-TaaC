@@ -31404,6 +31404,7 @@ def get_bgp_ebb_bounded_ecmp_sc9_playbook(
             # Trimmed from the stock 300s because Stage A now polls: the wait
             # that matters is the one with a predicate behind it.
             convergence_wait_seconds=_SC9_SETUP_SETTLE_SECONDS,
+            start_device_groups_after_enable=True,
         )
         + [
             # A peer that never establishes leaves Stage A one width short
