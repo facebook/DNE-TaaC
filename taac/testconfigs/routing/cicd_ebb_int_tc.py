@@ -216,10 +216,9 @@ NRQEB007_SC3_TRANSIENT_MEMORY_ROUTE_SCALE_TEST_CONFIG_UG = (
 # CONVEYOR: dne_routing / nrqeb008_characteristics_wave1_node
 NRQEB008_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG = (
     create_bgp_ebb_characteristic_performance_scaling_test_config(
-        NRQEB008_ASH6,
+        NRQEB008_ASH6.for_secondary_ixia(),
         enable_update_group=True,
         name_override="NRQEB008_SC1_EGRESS_PEER_SCALE_TEST_CONFIG_UG",
-        parent_networks=EGRESS_PEER_SCALE_PARENT_NETWORKS_IXIA03,
     )
 )
 
