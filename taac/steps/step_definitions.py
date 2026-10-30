@@ -1898,8 +1898,13 @@ def create_openr_scale_cold_boot_step(
     profile: str = "cold_boot_64_256_leaf",
     poll_interval_seconds: float = 1.0,
     baseline_timeout_seconds: float = 120.0,
+    memory_settle_seconds: float = 60.0,
 ) -> Step:
-    """Create one phase of full-fabric DUT cold-boot validation."""
+    """Create one phase of full-fabric DUT cold-boot validation.
+
+    ``memory_settle_seconds`` after recovery, Open/R memory warnings are
+    reported but not gated; crashes and allocation failures always are.
+    """
     if action not in {
         "baseline",
         "mark_reboot",
@@ -1933,6 +1938,8 @@ def create_openr_scale_cold_boot_step(
         raise ValueError("poll_interval_seconds must be positive")
     if baseline_timeout_seconds <= 0:
         raise ValueError("baseline_timeout_seconds must be positive")
+    if memory_settle_seconds < 0:
+        raise ValueError("memory_settle_seconds must be nonnegative")
     return create_custom_step(
         params_dict={
             "custom_step_name": "openr_scale_cold_boot",
@@ -1954,6 +1961,7 @@ def create_openr_scale_cold_boot_step(
             "profile": profile,
             "poll_interval_seconds": poll_interval_seconds,
             "baseline_timeout_seconds": baseline_timeout_seconds,
+            "memory_settle_seconds": memory_settle_seconds,
         },
         description=f"{action.title()} Open/R full-fabric DUT cold boot on {dut_name}",
     )

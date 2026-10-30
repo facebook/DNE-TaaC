@@ -706,6 +706,7 @@ def get_openr_scale_dut_cold_boot_playbook(
     injector_watchdog_seconds: int = 1800,
     injector_ready_timeout_seconds: int = 120,
     stable_seconds: int = 60,
+    memory_settle_seconds: int = 60,
     state_key: str = "openr_scale_dut_cold_boot",
     profile: str = "cold_boot_64_256_leaf",
 ) -> Playbook:
@@ -753,6 +754,7 @@ def get_openr_scale_dut_cold_boot_playbook(
         "injector_jq_var_prefix": injector_jq_var_prefix,
         "state_key": state_key,
         "profile": profile,
+        "memory_settle_seconds": memory_settle_seconds,
     }
     dut_neighbor_interfaces = dict(
         zip(synthetic_neighbors, scale_interfaces, strict=True)
@@ -848,12 +850,15 @@ def get_openr_scale_dut_cold_boot_playbook(
                         action="recover",
                         **common_state,
                     ),
+                    # The resource and memory gates measure the last
+                    # stable_seconds, after a memory_settle_seconds settle.
                     create_longevity_step(
-                        duration=stable_seconds,
+                        duration=memory_settle_seconds + stable_seconds,
                         start_traffic=False,
                         description=(
-                            f"Require {stable_seconds}s of stable post-boot "
-                            "Open/R telemetry"
+                            f"Settle {memory_settle_seconds}s after recovery, "
+                            f"then require {stable_seconds}s of stable "
+                            "post-boot Open/R telemetry"
                         ),
                     ),
                     create_openr_scale_kvstore_state_step(
