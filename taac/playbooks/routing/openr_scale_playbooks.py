@@ -728,9 +728,11 @@ def get_openr_scale_dut_cold_boot_playbook(
     if start_vlan <= 0 or start_vlan + num_subinterfaces - 1 > 4094:
         raise ValueError("cold-boot subinterface VLAN range must be within 1..4094")
     # Keep the deterministic route probe (spine-0) on the physical LAG so
-    # FibAgent can program its next hop into EOS. Give every remaining fake
-    # neighbor a unique subinterface; concentrating all of them on one Spark
-    # interface can leave one adjacency absent at this scale.
+    # FibAgent can program its next hop into EOS; the cold-boot step steers
+    # every route onto it with a link-metric increment on the subinterfaces.
+    # Give every remaining fake neighbor a unique subinterface; concentrating
+    # all of them on one Spark interface can leave one adjacency absent at
+    # this scale.
     scale_interfaces = [
         interface,
         *(f"{interface}.{start_vlan + index}" for index in range(num_subinterfaces)),

@@ -125,7 +125,10 @@ def create_openr_scale_dut_cold_boot_test_config(
             **(helper_inventory.oss_mock_device_data or {}),
         },
         setup_tasks=[isolation, fixture_setup],
-        teardown_tasks=[fixture_cleanup, isolation],
+        # Stop the injector and expire its keys first: Open/R, still
+        # programming, then withdraws its own routes, and the restart that
+        # restores dryrun starts with no simulated neighbors left to discover.
+        teardown_tasks=[isolation, fixture_cleanup],
         playbooks=[
             get_openr_scale_dut_cold_boot_playbook(
                 helper_name=helper_name,

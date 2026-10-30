@@ -55,7 +55,7 @@ class _FakeDriver:
         self.commands.append(command)
         if "test -e" in command:
             for path in sorted(self.paths, key=len, reverse=True):
-                if f"test -e {path}" in command:
+                if f"test -e {path} " in command:
                     return "TAAC_OPENR_SCALE_PATH_EXISTS\n"
             return ""
         if f"cat {_OWNER_PATH}" in command:
@@ -203,14 +203,31 @@ class OpenRScaleColdBootFixtureTaskTest(TestCase):
             }
         )
         helper = _FakeDriver()
-        with patch(
-            f"{_MODULE}.async_get_device_driver",
-            new=AsyncMock(side_effect=[dut, helper]),
+        set_increment = AsyncMock()
+        remove_routes = AsyncMock(return_value=0)
+        with (
+            patch(
+                f"{_MODULE}.async_get_device_driver",
+                new=AsyncMock(side_effect=[dut, helper]),
+            ),
+            patch(f"{_MODULE}.set_link_metric_increment", new=set_increment),
+            patch(
+                f"{_MODULE}.get_link_metric_increments",
+                new=AsyncMock(return_value={"po1910": 0, "po1910.100": 0}),
+            ),
+            patch(f"{_MODULE}.remove_leftover_openr_routes", new=remove_routes),
         ):
             await OpenRScaleColdBootFixtureTask(logger=MagicMock()).run(
                 _params("cleanup")
             )
 
+        # FIB programming was applied, so routes Open/R left behind are removed
+        # once it is back in dryrun.
+        remove_routes.assert_awaited_once_with(dut, "eb04.lab.ash6")
+
+        set_increment.assert_awaited_once_with(
+            "eb04.lab.ash6", [f"po1910.{vlan}" for vlan in range(100, 164)], 0
+        )
         self.assertNotIn(_STATE_DIR, dut.paths)
         self.assertTrue(
             any(
@@ -234,3 +251,44 @@ class OpenRScaleColdBootFixtureTaskTest(TestCase):
                     for command in driver.commands
                 )
             )
+
+    async def _cleanup_with_increments(
+        self, set_increment: AsyncMock, increments: dict[str, int]
+    ) -> "_FakeDriver":
+        remove_routes = AsyncMock(return_value=0)
+        dut = _FakeDriver(rc_eos_exists=True)
+        dut.paths.update(
+            {_STATE_DIR, _OWNER_PATH, _ORIGINAL_RC_EOS, _ORIGINAL_OPENR_CONFIG}
+        )
+        with (
+            patch(
+                f"{_MODULE}.async_get_device_driver",
+                new=AsyncMock(side_effect=[dut, _FakeDriver()]),
+            ),
+            patch(f"{_MODULE}.set_link_metric_increment", new=set_increment),
+            patch(
+                f"{_MODULE}.get_link_metric_increments",
+                new=AsyncMock(return_value=increments),
+            ),
+            patch(f"{_MODULE}.remove_leftover_openr_routes", new=remove_routes),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "link-metric increment"):
+                await OpenRScaleColdBootFixtureTask(logger=MagicMock()).run(
+                    _params("cleanup")
+                )
+        # FIB programming was never applied, so FibAgent is not touched.
+        remove_routes.assert_not_awaited()
+        return dut
+
+    async def test_cleanup_fails_when_increment_clear_fails(self) -> None:
+        dut = await self._cleanup_with_increments(
+            AsyncMock(side_effect=ConnectionError("Open/R is down")), {}
+        )
+        # The rest of the cleanup still ran.
+        self.assertNotIn(_STATE_DIR, dut.paths)
+
+    async def test_cleanup_fails_on_leftover_increment(self) -> None:
+        dut = await self._cleanup_with_increments(
+            AsyncMock(), {"po1910.100": 1_000_000, "po1910.101": 0}
+        )
+        self.assertNotIn(_STATE_DIR, dut.paths)

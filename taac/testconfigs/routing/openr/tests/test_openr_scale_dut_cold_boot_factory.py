@@ -44,13 +44,14 @@ class OpenRScaleDutColdBootFactoryTest(unittest.TestCase):
             ["openr_scale_isolation", "openr_scale_cold_boot_fixture"],
             [task.task_name for task in setup_tasks],
         )
+        # Isolation first: the injector stops before dryrun is restored.
         self.assertEqual(
-            ["openr_scale_cold_boot_fixture", "openr_scale_isolation"],
+            ["openr_scale_isolation", "openr_scale_cold_boot_fixture"],
             [task.task_name for task in teardown_tasks],
         )
-        self.assertEqual(_params(setup_tasks[0]), _params(teardown_tasks[1]))
+        self.assertEqual(_params(setup_tasks[0]), _params(teardown_tasks[0]))
         fixture_setup = _params(setup_tasks[1])
-        fixture_cleanup = _params(teardown_tasks[0])
+        fixture_cleanup = _params(teardown_tasks[1])
         self.assertEqual("setup", fixture_setup.pop("action"))
         self.assertEqual("cleanup", fixture_cleanup.pop("action"))
         self.assertEqual(fixture_setup, fixture_cleanup)
