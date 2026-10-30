@@ -1138,10 +1138,6 @@ def _characteristic_setup_prefix_phases(
             tasks=tuple(_ebb_full_scale_bgpcpp_deployment_tasks(setup_args)),
         ),
         EosBgpCppSetupPhase(
-            owner=EosBgpCppSetupPhaseOwner.COMPONENT_STARTUP,
-            tasks=_characteristic_component_startup_tasks(setup_args, openr_mode),
-        ),
-        EosBgpCppSetupPhase(
             owner=EosBgpCppSetupPhaseOwner.INTERFACE_CONFIGURATION,
             tasks=tuple(
                 _characteristic_interface_ip_tasks(
@@ -1150,6 +1146,10 @@ def _characteristic_setup_prefix_phases(
                     interfaces.device_name,
                 )
             ),
+        ),
+        EosBgpCppSetupPhase(
+            owner=EosBgpCppSetupPhaseOwner.COMPONENT_STARTUP,
+            tasks=_characteristic_component_startup_tasks(setup_args, openr_mode),
         ),
     )
 
@@ -5288,12 +5288,12 @@ class EosBgpCppCompiler(TopologyCompiler):
                 tasks=tuple(native_openr_config_tasks),
             ),
             EosBgpCppSetupPhase(
-                owner=EosBgpCppSetupPhaseOwner.COMPONENT_STARTUP,
-                tasks=deployment_tasks.startup_tasks,
-            ),
-            EosBgpCppSetupPhase(
                 owner=EosBgpCppSetupPhaseOwner.INTERFACE_CONFIGURATION,
                 tasks=tuple(native_interface_ip_config_tasks),
+            ),
+            EosBgpCppSetupPhase(
+                owner=EosBgpCppSetupPhaseOwner.COMPONENT_STARTUP,
+                tasks=deployment_tasks.startup_tasks,
             ),
             EosBgpCppSetupPhase(
                 owner=EosBgpCppSetupPhaseOwner.OPENR_FEATURE,
