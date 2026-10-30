@@ -26,7 +26,7 @@ from taac.task_definitions import (
     create_openr_route_action_task,
     create_run_commands_on_shell_task,
 )
-from taac.test_as_a_config.types import Task
+from taac.test_as_a_config.types import Params, Task
 
 _INTERFACE_STATE_NEXTHOP_FLAG = "bgp_resolve_nexthops_from_interface_state"
 _BGPCPP_CONFIG_PATH = "/mnt/flash/bgpcpp_config"
@@ -100,13 +100,17 @@ def create_bgpcpp_logging_setup_task(
     encoded_script = base64.b64encode(script.encode("utf-8")).decode("ascii")
     pipeline = f"printf '%s' {shlex.quote(encoded_script)} | base64 -d | sudo python3 -"
     command = f"bash {pipeline}"
-    return create_run_commands_on_shell_task(
+    task = create_run_commands_on_shell_task(
         hostname=hostname,
         cmds=[command],
         set_outer_hostname=True,
         ixia_needed=True,
         validate_output=True,
     )
+    # RunCommandsOnShell logs the BGPCPP_LOG_LEVEL marker for this key.
+    params = json.loads(task.params.json_params or "{}")
+    params["bgpcpp_logging_config"] = logging_config
+    return task(params=Params(json_params=json.dumps(params)))
 
 
 def _validate_bgpcpp_config_path(path: str, field_name: str) -> None:

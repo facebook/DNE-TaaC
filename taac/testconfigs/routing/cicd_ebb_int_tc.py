@@ -157,6 +157,15 @@ NRQEB009_STAGE1_FULL_SCALE_TEST_CONFIG_NO_UG = create_bgp_ebb_full_scale_test_co
     ],
     profile=_OPENR_STANDALONE,
     enable_update_group=False,
+    # Nexthop-tracker and FIB-programming DBG3 for T295699836 (BGP and Open/R
+    # routes leaving the EOS RIB after churn). RibBase stays at DBG1: at DBG3
+    # it filled the 6.3 GB /var/log in about 10 minutes.
+    bgpcpp_logging_config_override=(
+        "DBG1, neteng.fboss.bgp.cpp.nexthopTracker.NexthopHandler=DBG3, "
+        "neteng.fboss.bgp.cpp.nexthopTracker.NexthopCache=DBG3, "
+        "neteng.fboss.bgp.cpp.nexthopTracker.NexthopInfo=DBG3, "
+        "neteng.fboss.bgp.cpp.rib.facebook.FibEbb=DBG3; default:async=true"
+    ),
     parent_networks=EBB_PARENT_NETWORKS_IXIA03,
     next_hops=EBB_NEXT_HOPS_IXIA03,
 )

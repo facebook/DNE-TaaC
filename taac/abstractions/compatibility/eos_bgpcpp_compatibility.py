@@ -888,7 +888,10 @@ VERIFY_THRIFT_ACL_USER_IDS_CMD = _on_device_python_command(
 
 POST_ACL_RESTART_DAEMONS = ["FibAgent", "FibAgentBgp", "Bgpcpp"]
 
-EBB_BGPCPP_LOGGING_CONFIG = "DBG5;default:async=true"
+# Production EBB runs DBG1. At full scale DBG2+ logs every keepalive and DBG5
+# every socket callback, which has filled the 6.3 GB /var/log tmpfs; raise it
+# per config with bgpcpp_logging_config_override only while debugging.
+EBB_BGPCPP_LOGGING_CONFIG = "DBG1;default:async=true"
 
 
 def build_update_group_setting_override_cmd(

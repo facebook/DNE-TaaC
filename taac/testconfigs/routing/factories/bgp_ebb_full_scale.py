@@ -83,6 +83,7 @@ from taac.testconfigs.routing.util.bgp_ebb_check_profiles import (
 )
 from taac.testconfigs.routing.util.bgp_ebb_constants import (
     DEFAULT_PROFILE,
+    EBB_BGPCPP_LOGGING_CONFIG,
     EBGP_PEER_COUNT_V4,
     EBGP_PEER_COUNT_V6,
     IBGP_PEER_SCALE_PER_PLANE,
@@ -1549,7 +1550,7 @@ def create_bgp_ebb_full_scale_test_config(  # noqa: C901
     playbooks_selected: list[str] | None = None,
     profile: BgpPlusPlusProfile = DEFAULT_PROFILE,
     enable_update_group: bool = True,
-    bgpcpp_logging_config_override: str | None = None,
+    bgpcpp_logging_config_override: str | None = EBB_BGPCPP_LOGGING_CONFIG,
     parent_networks: dict[str, str] | None = None,
     next_hops: EbbNextHopScheme = EBB_NEXT_HOPS,
     port_map: t.Mapping[str, int] | None = None,
@@ -1585,8 +1586,9 @@ def create_bgp_ebb_full_scale_test_config(  # noqa: C901
         profile: BGP++ profile, which also decides the Open/R mode.
         enable_update_group: Whether to enable BGP Update Group on the device.
         bgpcpp_logging_config_override: Exact BGP++ logging configuration to
-            apply to the launcher. Pass ``None`` to preserve the launcher
-            without a logging override.
+            apply to the launcher, defaulting to the production DBG1 level so
+            a run never inherits the previous run's level. Pass ``None`` to
+            preserve the launcher without a logging override.
         parent_networks: IXIA-side parent networks, defaulting to
             ``EBB_PARENT_NETWORKS`` (ixia11). Pass ``EBB_PARENT_NETWORKS_IXIA03``
             when the inventory has been swapped with

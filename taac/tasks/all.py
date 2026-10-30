@@ -36,6 +36,7 @@ from taac.driver.driver_constants import (
 from taac.file_templates import FILE_TEMPLATES
 from taac.tasks.base_task import BaseTask
 from taac.utils import arista_utils
+from taac.utils.bgpcpp_log_level_marker import record_configured
 from taac.utils.common import (
     get_default_bgp_configs,
     get_default_configs,
@@ -1318,6 +1319,9 @@ class RunCommandsOnShell(BaseTask):
                 ).async_execute_show_or_configure_cmd_on_shell(cmd)
             else:
                 await driver.async_run_cmd_on_shell(cmd)
+        bgpcpp_logging_config = params.get("bgpcpp_logging_config")
+        if bgpcpp_logging_config is not None:
+            self.logger.info(record_configured(hostname, bgpcpp_logging_config))
 
 
 class AllocateCgroupSliceMemory(BaseTask):

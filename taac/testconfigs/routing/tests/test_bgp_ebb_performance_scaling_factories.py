@@ -58,9 +58,6 @@ from taac.testconfigs.routing.factories.bgp_ebb_scaling import (
     create_bgp_ebb_scaling_ingress_peer_scale_test_config,
     create_bgp_ebb_scaling_performance_test_config,
 )
-from taac.testconfigs.routing.util.bgp_ebb_constants import (
-    EBB_BGPCPP_LOGGING_CONFIG,
-)
 from taac.testconfigs.routing.util.bgp_ebb_setup_tasks import (
     build_bgpcpp_peers_patch_shell_cmds,
     get_update_packing_setup_tasks,
@@ -795,7 +792,7 @@ class PerformanceScalingPhysicalInventoryDrivenTest(unittest.TestCase):
             return json.loads(task.params.json_params or "{}")["cmds"][0]
 
         self.assertIn(logging_command("DBG1;default:async=true"), commands)
-        self.assertNotIn(logging_command(EBB_BGPCPP_LOGGING_CONFIG), commands)
+        self.assertNotIn(logging_command("DBG5;default:async=true"), commands)
 
     def test_nrqeb009_sc9_uses_primary_ixia03_addresses_and_ports(self) -> None:
         config = create_bgp_ebb_characteristic_bounded_ecmp_sc9_test_config(

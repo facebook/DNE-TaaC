@@ -11,9 +11,6 @@ from taac.testconfigs.routing import cicd_ebb_int_tc
 from taac.testconfigs.routing.adhoc_fibagent_qualification_traffic import (
     NRQEB009_EBB16_FIBAGENT_QUALIFICATION_TRAFFIC_UG_ADHOC,
 )
-from taac.testconfigs.routing.util.bgp_ebb_constants import (
-    EBB_BGPCPP_LOGGING_CONFIG,
-)
 from taac.test_as_a_config.types import TestConfig
 
 
@@ -116,7 +113,7 @@ class AdhocFibagentQualificationTrafficTest(unittest.TestCase):
             with self.subTest(config=config.name):
                 commands = _shell_commands(config)
                 self.assertIn(_logging_command("DBG1;default:async=true"), commands)
-                self.assertNotIn(_logging_command(EBB_BGPCPP_LOGGING_CONFIG), commands)
+                self.assertNotIn(_logging_command("DBG5;default:async=true"), commands)
 
     def test_config_is_not_scheduled_by_conveyor(self) -> None:
         scheduled_names = {
