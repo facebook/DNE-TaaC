@@ -37,9 +37,10 @@ def create_openr_fib_programming_task(
     """Toggle a lab EOS DUT's Open/R between dryrun and FIB programming.
 
     ``enable`` snapshots ``/etc/openr_config``, sets ``dryrun: false`` and
-    restarts Open/R. ``disable`` first waits until Open/R and FibAgent hold no
-    routes (Open/R can only withdraw them while programming), then restores the
-    snapshot and restarts Open/R.
+    restarts Open/R. ``disable`` waits up to ``drain_timeout`` seconds for Open/R
+    to withdraw its routes (it can only while programming), then always restores
+    the snapshot, restarts Open/R and removes any routes Open/R left in FibAgent,
+    so even a failed run leaves the DUT in dryrun with no Open/R routes.
     """
     if action not in {"enable", "disable"}:
         raise ValueError(f"Unsupported Open/R FIB programming action {action!r}")

@@ -13,6 +13,7 @@ is exactly ``get_{playbook_name}``. See README.md for the routing suite
 contract.
 """
 
+import json
 import typing as t
 
 from taac.health_checks.healthcheck_definitions import (
@@ -34,13 +35,13 @@ __all__ = [
 ]
 
 
-def _asymmetric_burst_cmd(
+def _asymmetric_burst(
     full_interface: str,
     disjoint_interface: str,
     full_metric_first: int,
     full_metric_second: int,
     disjoint_metric: int,
-) -> str:
+) -> t.List[t.Dict[str, t.Any]]:
     """Three local metric rebuilds: full, full, then disjoint-narrow.
 
     Two updates can never lose anything: Fib dequeues the first within
@@ -53,19 +54,14 @@ def _asymmetric_burst_cmd(
     and every fabric route stays at the first update's values while Decision
     moved on.
 
-    Decision's debounce max is 250ms; the sleeps guarantee three separate
-    rebuildRoutes pushes, all inside the freeze window.
+    Decision's debounce max is 250ms; spacing the changes 2s apart guarantees
+    three separate rebuildRoutes pushes, all inside the freeze window.
     """
-    return (
-        f"timeout 60 breeze lm increase-link-metric --yes --quiet "
-        f"{full_interface} {full_metric_first} >/dev/null 2>&1"
-        "; sleep 2; "
-        f"timeout 60 breeze lm increase-link-metric --yes --quiet "
-        f"{full_interface} {full_metric_second} >/dev/null 2>&1"
-        "; sleep 2; "
-        f"timeout 60 breeze lm increase-link-metric --yes --quiet "
-        f"{disjoint_interface} {disjoint_metric} >/dev/null 2>&1"
-    )
+    return [
+        {"interfaces": [full_interface], "increment": full_metric_first},
+        {"interfaces": [full_interface], "increment": full_metric_second},
+        {"interfaces": [disjoint_interface], "increment": disjoint_metric},
+    ]
 
 
 def get_openr_update_loss_playbook(
@@ -102,7 +98,7 @@ def get_openr_update_loss_playbook(
     loss mechanism needs no scale: the small fabric keeps the run fast while
     the queue mechanics are identical to a large one.
     """
-    burst_cmd = _asymmetric_burst_cmd(
+    burst = _asymmetric_burst(
         full_interface,
         disjoint_interface,
         full_metric_first,
@@ -151,11 +147,13 @@ def get_openr_update_loss_playbook(
                         dut_name=dut_name,
                         action="ready",
                         timeout_seconds=ready_timeout_seconds,
+                        metric_interfaces=[full_interface, disjoint_interface],
                     ),
                     create_openr_fibagent_pause_step(
                         dut_name=dut_name,
                         pause_seconds=pause_tail_seconds,
-                        during_pause_shell_cmd=burst_cmd,
+                        metric_increments=burst,
+                        metric_interval_seconds=2.0,
                         description=(
                             "Freeze FibAgent through full, full, disjoint "
                             f"metric rebuilds on {full_interface}/"
@@ -173,7 +171,8 @@ def get_openr_update_loss_playbook(
                         dut_name=dut_name,
                         action="validate",
                         min_moved_prefixes=1,
-                        stimulus_cmd=burst_cmd,
+                        stimulus_cmd=json.dumps(burst),
+                        metric_interfaces=[full_interface, disjoint_interface],
                     ),
                     # A step, not a postcheck, so it runs on the DUT only;
                     # services=[] skips the default agent list this platform

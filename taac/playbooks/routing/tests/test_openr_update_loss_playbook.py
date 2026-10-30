@@ -72,27 +72,23 @@ class OpenRUpdateLossPlaybookTest(unittest.TestCase):
     def test_freeze_runs_full_full_disjoint_metric_rebuilds(self) -> None:
         steps = self.playbook.stages[0].steps
         freeze = _params(steps[2])
-        burst = freeze["during_pause_shell_cmd"]
+        burst = freeze["metric_increments"]
 
         self.assertEqual("openr_fibagent_pause", freeze["custom_step_name"])
         self.assertEqual("eb04.lab.ash6", freeze["dut_name"])
         self.assertEqual("FibAgent", freeze["agent"])
         self.assertEqual(1.0, freeze["pause_seconds"])
-        for fragment in (
-            "increase-link-metric --yes --quiet po1910 50",
-            "increase-link-metric --yes --quiet po1910 60",
-            "increase-link-metric --yes --quiet po1911 70",
-        ):
-            self.assertIn(fragment, burst)
-        # Two sleeps separate the three pushes past the debounce window.
-        self.assertEqual(2, burst.count("sleep 2"))
-        self.assertLess(
-            burst.index("po1910 50"),
-            burst.index("po1910 60"),
+        self.assertEqual(
+            [
+                {"interfaces": ["po1910"], "increment": 50},
+                {"interfaces": ["po1910"], "increment": 60},
+                {"interfaces": ["po1911"], "increment": 70},
+            ],
+            burst,
         )
-        self.assertLess(
-            burst.index("po1910 60"),
-            burst.index("po1911 70"),
-        )
+        # Spacing separates the three pushes past the debounce window.
+        self.assertEqual(2.0, freeze["metric_interval_seconds"])
         # The validator echoes the same stimulus into failure evidence.
-        self.assertEqual(burst, _params(steps[4])["stimulus_cmd"])
+        self.assertEqual(json.dumps(burst), _params(steps[4])["stimulus_cmd"])
+        for step in (steps[1], steps[4]):
+            self.assertEqual(["po1910", "po1911"], _params(step)["metric_interfaces"])

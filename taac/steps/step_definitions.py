@@ -1732,15 +1732,18 @@ def create_openr_scale_performance_step(
 def create_openr_fibagent_pause_step(
     dut_name: str,
     pause_seconds: float = 1.0,
-    during_pause_shell_cmd: t.Optional[str] = None,
+    metric_increments: t.Optional[t.List[t.Dict[str, t.Any]]] = None,
+    metric_interval_seconds: float = 0.0,
     agent: str = "FibAgent",
     description: t.Optional[str] = None,
 ) -> Step:
     """Freeze an EOS daemon (FibAgent by default) with SIGSTOP.
 
-    ``during_pause_shell_cmd`` runs on the DUT while the daemon is frozen (e.g.
-    Open/R route-update triggers); the daemon stays frozen ``pause_seconds``
-    longer, then gets SIGCONT. Fails if the daemon's PID or start time changed.
+    While the daemon is frozen, each ``metric_increments`` entry
+    (``{"interfaces": [...], "increment": N}``, 0 clears) is applied through
+    Open/R's ctrl Thrift API, ``metric_interval_seconds`` apart; the daemon
+    stays frozen ``pause_seconds`` longer, then gets SIGCONT. Fails if the
+    daemon's PID or start time changed.
     """
     params_dict: t.Dict[str, t.Any] = {
         "custom_step_name": "openr_fibagent_pause",
@@ -1748,8 +1751,9 @@ def create_openr_fibagent_pause_step(
         "agent": agent,
         "pause_seconds": pause_seconds,
     }
-    if during_pause_shell_cmd:
-        params_dict["during_pause_shell_cmd"] = during_pause_shell_cmd
+    if metric_increments:
+        params_dict["metric_increments"] = metric_increments
+        params_dict["metric_interval_seconds"] = metric_interval_seconds
     return create_custom_step(
         params_dict=params_dict,
         description=description or f"Pause {agent} on {dut_name}",
@@ -1817,6 +1821,7 @@ def create_openr_update_loss_validation_step(
     timeout_seconds: int = 600,
     min_moved_prefixes: int = 1,
     stimulus_cmd: t.Optional[str] = None,
+    metric_interfaces: t.Optional[t.List[str]] = None,
 ) -> Step:
     """Bracket a FibAgent stall with Decision/Fib/EOS value comparison.
 
@@ -1825,6 +1830,8 @@ def create_openr_update_loss_validation_step(
     (stimulus landed) but Fib or EOS kept stale values -- a route update lost
     in the Decision->Fib queue -- and also fails when Decision never moved
     (broken stimulus). ``stimulus_cmd`` is echoed into the failure evidence.
+    Open/R link-metric increments on ``metric_interfaces`` are cleared before
+    ``ready`` and after ``validate``.
     """
     if action not in {"ready", "validate"}:
         raise ValueError(f"Unsupported Open/R update-loss action {action!r}")
@@ -1838,6 +1845,8 @@ def create_openr_update_loss_validation_step(
     }
     if stimulus_cmd is not None:
         params_dict["stimulus_cmd"] = stimulus_cmd
+    if metric_interfaces:
+        params_dict["metric_interfaces"] = metric_interfaces
     return create_custom_step(
         params_dict=params_dict,
         description=f"{action.title()} Open/R update-loss validation on {dut_name}",

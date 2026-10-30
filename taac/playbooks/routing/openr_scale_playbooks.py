@@ -880,21 +880,25 @@ def get_openr_scale_dut_cold_boot_playbook(
     )
 
 
-def _metric_burst_cmd(interface: str, burst: int, updates: int, last: bool) -> str:
-    """Shell steps that each change the metric of every route through ``interface``.
+def _metric_burst(
+    interface: str, burst: int, updates: int, last: bool
+) -> t.List[t.Dict[str, t.Any]]:
+    """Metric changes that each move every route through ``interface``.
 
     Each value differs from the one before it, and the final burst ends by
     clearing the increment so the DUT is left as it was found.
     """
-    cmds = []
-    for index in range(updates):
-        if last and index == updates - 1:
-            cmd = f"breeze lm clear-link-metric-increase --yes --quiet {interface}"
-        else:
-            value = 10 * (burst * updates + index + 1)
-            cmd = f"breeze lm increase-link-metric --yes --quiet {interface} {value}"
-        cmds.append(f"timeout 60 {cmd} >/dev/null 2>&1")
-    return "; ".join(cmds)
+    return [
+        {
+            "interfaces": [interface],
+            "increment": (
+                0
+                if last and index == updates - 1
+                else 10 * (burst * updates + index + 1)
+            ),
+        }
+        for index in range(updates)
+    ]
 
 
 def get_openr_fibagent_pause_playbook(
@@ -974,9 +978,10 @@ def get_openr_fibagent_pause_playbook(
             create_openr_fibagent_pause_step(
                 dut_name=dut_name,
                 pause_seconds=pause_tail_seconds,
-                during_pause_shell_cmd=_metric_burst_cmd(
+                metric_increments=_metric_burst(
                     interface, burst, updates_per_burst, last=burst == bursts - 1
                 ),
+                metric_interval_seconds=1.0,
                 description=(
                     f"Pause FibAgent through {updates_per_burst} Open/R route updates"
                 ),

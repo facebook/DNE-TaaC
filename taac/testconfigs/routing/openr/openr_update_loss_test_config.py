@@ -28,7 +28,6 @@ from taac.task_definitions import (
     create_openr_fib_programming_task,
     create_openr_scale_isolation_task,
     create_openr_scale_link_fixture_task,
-    create_run_commands_on_shell_task,
 )
 from taac.testconfigs.routing.openr.openr_scale_test_config import (
     EB02_MGMT_ADDRESS,
@@ -83,18 +82,6 @@ def create_openr_update_loss_test_config(
         original_port_channel_id=original_port_channel_id,
         test_port_channel_id=test_port_channel_id,
     )
-    # Best-effort: a leftover override only fails the next run loudly (the
-    # stimulus would be a no-op and the churn gate catches it), it never
-    # silently passes.
-    clear_overrides = create_run_commands_on_shell_task(
-        hostname=dut_name,
-        cmds=[
-            "bash timeout 60 breeze lm clear-link-metric-increase --yes --quiet "
-            "po1910 >/dev/null 2>&1 || true",
-            "bash timeout 60 breeze lm clear-link-metric-increase --yes --quiet "
-            "po1911 >/dev/null 2>&1 || true",
-        ],
-    )
     return TestConfig(
         name=name,
         basset_pool="dne.test",
@@ -116,13 +103,11 @@ def create_openr_update_loss_test_config(
             isolation,
             fixture_setup,
             create_openr_fib_programming_task(dut_name=dut_name, action="enable"),
-            clear_overrides,
         ],
         # Expire the injected keys before restoring dryrun: Open/R can only
         # withdraw its routes from FibAgent while it is still programming.
         # The link fixture is restored last, after Open/R no longer needs it.
         teardown_tasks=[
-            clear_overrides,
             isolation,
             create_openr_fib_programming_task(dut_name=dut_name, action="disable"),
             fixture_cleanup,

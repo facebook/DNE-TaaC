@@ -40,7 +40,6 @@ class OpenRUpdateLossTestConfigTest(unittest.TestCase):
                 "openr_scale_isolation",
                 "openr_scale_link_fixture",
                 "openr_fib_programming",
-                "run_commands_on_shell",
             ],
             [task.task_name for task in setup],
         )
@@ -63,15 +62,14 @@ class OpenRUpdateLossTestConfigTest(unittest.TestCase):
 
         self.assertEqual(
             [
-                "run_commands_on_shell",
                 "openr_scale_isolation",
                 "openr_fib_programming",
                 "openr_scale_link_fixture",
             ],
             [task.task_name for task in teardown],
         )
-        self.assertEqual("disable", _task_params(teardown[2])["action"])
-        cleanup = _task_params(teardown[3])
+        self.assertEqual("disable", _task_params(teardown[1])["action"])
+        cleanup = _task_params(teardown[2])
         self.assertEqual("cleanup", cleanup["action"])
         self.assertEqual("Ethernet3/10/1", cleanup["member_interface"])
         self.assertEqual(1910, cleanup["original_port_channel_id"])
