@@ -382,7 +382,7 @@ add_taac_thrift_python_library(
 
 # BGP thrift schemas. bgp_attr / bgp_config / bgp_policy / rib_policy
 # (plus their transitive deps nsf_policy / routing_policy) are pulled
-# directly from the public facebook/fboss repo via the fboss-thrift-defs
+# directly from the public meta/fboss repo via the fboss-thrift-defs
 # manifest — no need to vendor a local copy.
 # Required by several TAAC health checks and fboss_switch.py driver
 # imports of neteng.fboss.bgp_thrift.* and neteng.fboss.bgp_attr.*.

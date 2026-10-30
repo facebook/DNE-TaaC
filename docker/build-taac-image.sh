@@ -25,7 +25,7 @@
 # floor(RAM_GiB / 5)).
 #
 # Env overrides:
-#   FBOSS_IMAGE_SRC   Where to clone/find facebook/fboss for the base image
+#   FBOSS_IMAGE_SRC   Where to clone/find meta/fboss for the base image
 #                     build context (default: ~/.taac-fboss-image-src)
 #   TAAC_FBCODE_DIR   Internal fbcode checkout whose current FBOSS Docker files
 #                     should be validated instead of the pinned public copies

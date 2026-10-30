@@ -46,7 +46,7 @@ import typing as t
 # bgp_policy.thrift -- at configerator/structs/neteng/bgp_policy/thrift/ -- is
 # imported from ...neteng.robotron. github/thrift/CMakeLists.txt already
 # generates both bindings under exactly these namespaces, from the copies
-# mirrored into public facebook/fboss via neteng/fboss/bgp/public_tld/.
+# mirrored into public meta/fboss via neteng/fboss/bgp/public_tld/.
 #
 # @manual=//configerator/structs/neteng/fboss/bgp:bgp_config-python-types
 # The pin is Buck-only (OSS builds with CMake): that OSS mirror is also a Buck

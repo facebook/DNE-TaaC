@@ -7,7 +7,7 @@ A test is a `TestConfig` containing one or more **playbooks**; a playbook runs a
 
 ## Quick start
 
-Smoke-tested via [facebook/fboss](https://github.com/facebook/fboss)'s public Docker images on **CentOS Stream 9**. Docker is the only host-side dependency.
+Smoke-tested via [meta/fboss](https://github.com/meta/fboss)'s public Docker images on **CentOS Stream 9**. Docker is the only host-side dependency.
 
 ```bash
 # Build the vendor-shippable TAAC image (auto-builds base image if missing)

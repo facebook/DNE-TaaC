@@ -7,7 +7,7 @@
 #   ./docker/ensure-base-image.sh --rebuild   # rebuild without layer cache
 #
 # Env overrides:
-#   FBOSS_IMAGE_SRC   Where to clone/find facebook/fboss for the base image
+#   FBOSS_IMAGE_SRC   Where to clone/find meta/fboss for the base image
 #                     build context (default: ~/.taac-fboss-image-src)
 #   TAAC_FBCODE_DIR   Internal fbcode checkout whose current FBOSS Docker files
 #                     should be validated instead of the pinned public copies
@@ -27,7 +27,7 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FBOSS_IMAGE_SRC="${FBOSS_IMAGE_SRC:-$HOME/.taac-fboss-image-src}"
-FBOSS_PUBLIC_URL="https://github.com/facebook/fboss.git"
+FBOSS_PUBLIC_URL="https://github.com/meta/fboss.git"
 
 # Reuse the fboss pin from the fboss-thrift-defs manifest as the base image
 # recipe: one fboss commit supplies both the build environment and the thrift

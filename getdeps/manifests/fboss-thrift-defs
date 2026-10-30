@@ -2,7 +2,7 @@
 name = fboss-thrift-defs
 
 [git]
-repo_url = https://github.com/facebook/fboss.git
+repo_url = https://github.com/meta/fboss.git
 # Pinning fboss to a specific commit for reproducible builds. Tracking
 # HEAD lets schema additions or splits in fboss/main silently break our
 # codegen between runs with no diff on this repo (concrete instance:
